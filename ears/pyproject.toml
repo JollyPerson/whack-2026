@@ -7,7 +7,11 @@ authors = [
     { name = "Thomas", email = "thomasjread@proton.me" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.4",
+    "soundfile>=0.14.0",
+]
 
 [project.scripts]
 ears = "ears:main"
