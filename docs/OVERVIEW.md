@@ -197,6 +197,23 @@ Earlier desk research is available as a starting point, but it's untested and no
 - **Moderator:** the agent's on-air persona: the voice and dry referee tone. Avoid "narrator" or "commentator".
 - **Interjection:** a single thing the Director has decided the Moderator should say.
 
+## Repo layout
+
+One folder per role, so people rarely edit the same files. Modules talk only through the types in `core/schemas.py`, never by importing each other.
+
+```
+core/        shared contracts (schemas.py) and event bus. Owner: Brain
+ears/        audio, speech-to-text, pauses, replay mock, phone mic page. Owner: Thomas
+brain/       claims, argument map, Director. Owner: Tong
+evidence/    pre-research, retrieval, verdicts. Owner: open
+face/        dashboard, Moderator voice, demo. Owner: open
+fixtures/    the shared recorded test debate and transcript
+evals/       20-claim labelled set and scoring script
+docs/        overview, research, agent docs
+```
+
+Each role folder is its own project and can pick its own tooling. `ears/` is already a `uv` package, so match that unless you have a reason not to.
+
 ## Where things live
 
 - **Planning map:** [Map: Live Debate Fact-Checker team plan](https://github.com/JollyPerson/whack-2026/issues/1). Decisions and open questions are listed here, and the original handoff is its first comment. The handoff is more prescriptive than this overview, and this overview wins where they differ.
