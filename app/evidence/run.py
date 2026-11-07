@@ -1,0 +1,163 @@
+"""Evidence: Claim -> Verdict + SourceCard, index first and web as the fallback. Owner: C.
+
+Indexes are built in advance (see preresearch.py). A Motion without one is researched live in the background, and
+claims that arrive meanwhile go straight to the web.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+from app import config, latency
+from app.evidence import preresearch
+from app.evidence.checks import Guarded, Source
+from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
+from app.evidence.llm import make_verdict_llm
+from app.evidence.search import make_search
+from app.evidence.verdicts import judge
+from app.schemas import Claim, ResearchProgress, SourceCard, Verdict
+
+log = logging.getLogger("evidence")
+
+TOP_K = 5
+INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 3.0))
+WEB_SEARCH_TIMEOUT_S = float(os.environ.get("EVIDENCE_WEB_TIMEOUT_S", 3.0))
+CONCURRENCY = int(os.environ.get("EVIDENCE_CONCURRENCY", 6))
+
+
+@dataclass
+class Outcome:
+    """What a check produced, with everything the eval needs to audit it."""
+    guarded: Guarded
+    via: str = "none"
+    sources: list[Source] = field(default_factory=list)
+    retrieved_at: Optional[float] = None
+
+
+class Checker:
+    def __init__(self, llm, searcher=None, embedder=None, index: Optional[EvidenceIndex] = None, motion: str = ""):
+        self.llm, self.searcher, self.embedder = llm, searcher, embedder
+        self.index, self.motion = index, motion
+
+    async def retrieve(self, claim: str) -> list[Source]:
+        if not self.index or not len(self.index):
+            return []
+        vector = None
+        if self.embedder is not None and self.index.vectors is not None:
+            try:
+                vector = (await asyncio.to_thread(self.embedder.embed, [claim]))[0]
+            except Exception as e:
+                log.warning("query embedding failed, using BM25: %r", e)
+        return [Source(c["url"], c["title"], c["text"]) for c in self.index.search(claim, TOP_K, vector)]
+
+    async def web_sources(self, claim: str) -> list[Source]:
+        pages = await self.searcher.search(claim, kind="lite", results=5, max_chars=2500, timeout=WEB_SEARCH_TIMEOUT_S)
+        ranked = EvidenceIndex([{"url": p["url"], "title": p["title"], "text": c}
+                                for p in pages for c in chunk_text(p["text"])]).search(claim, TOP_K)
+        return [Source(c["url"], c["title"], c["text"]) for c in ranked]
+
+    async def check(self, claim: str, web: bool = True) -> Outcome:
+        if self.llm is None:
+            return Outcome(Guarded(explanation="No verdict model is configured."))
+        outcome = Outcome(Guarded(explanation="No source settles this."))
+        sources = await self.retrieve(claim)
+        outcome.retrieved_at = time.time()
+        if sources:
+            outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
+        if outcome.guarded.label == "unverifiable" and web and self.searcher is not None:
+            try:
+                web_found = await self.web_sources(claim)
+            except Exception as e:
+                log.warning("web fallback failed: %r", e)
+                return outcome
+            if web_found:
+                outcome = await self._judged(claim, web_found, "web", outcome.retrieved_at)
+        return outcome
+
+    async def _judged(self, claim: str, sources: list[Source], via: str, retrieved_at: Optional[float]) -> Outcome:
+        guarded = await judge(self.llm, claim, self.motion, sources, INDEX_LLM_TIMEOUT_S)
+        return Outcome(guarded, via, sources, retrieved_at)
+
+
+def to_verdict(claim: Claim, outcome: Outcome) -> Verdict:
+    g = outcome.guarded
+    verdict = Verdict(claim_id=claim.id, label=g.label, confidence=g.confidence, evidence=g.evidence, via=outcome.via,
+                      explanation=g.explanation, short_fact=g.short_fact, numeric=g.numeric, guard_notes=g.notes)
+    if outcome.retrieved_at:
+        latency.stamp(verdict, "retrieved", outcome.retrieved_at)
+    return latency.finish(verdict, claim)
+
+
+class EvidenceModule:
+    def __init__(self, bus, llm=None, searcher=None, embedder=None):
+        self.bus, self.llm, self.searcher, self.embedder = bus, llm, searcher, embedder
+        self.checker = Checker(llm, searcher, embedder)
+        self.session = 0
+        self.limit = asyncio.Semaphore(CONCURRENCY)
+        self.tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def _progress(self, stage: str, done: int, total: int, detail: str = "") -> None:
+        self.bus.publish(ResearchProgress(stage=stage, done=done, total=total, detail=detail), src="evidence")
+
+    async def start_session(self, motion: str) -> None:
+        self.session += 1
+        session = self.session
+        self.checker = Checker(self.llm, self.searcher, self.embedder, motion=motion)
+        path = preresearch.index_path(motion)
+        if path.with_suffix(".json").exists():
+            self.checker.index = await asyncio.to_thread(EvidenceIndex.load, path)
+            self._progress("ready", len(self.checker.index), len(self.checker.index), "built in advance")
+            return
+        if not motion or self.searcher is None:
+            self._progress("error", 0, 0, "No saved index, and live research isn't available")
+            return
+        try:
+            index = await preresearch.build_index(motion, self.searcher, self.llm, self.embedder, self._progress)
+        except Exception as e:
+            log.warning("pre-research failed: %r", e)
+            self._progress("error", 0, 0, "Pre-research failed, using web search only")
+            return
+        if session == self.session:
+            self.checker.index = index
+            await asyncio.to_thread(index.save, path)
+
+    async def handle_claim(self, claim: Claim) -> None:
+        session, checker = self.session, self.checker
+        async with self.limit:
+            try:
+                if claim.t_end > 1e9 and time.time() - claim.t_end > config.STALE_CLAIM_S:   # below 1e9 isn't a real clock time
+                    outcome = Outcome(Guarded(explanation="Too old to check live."), via="stale")
+                else:
+                    outcome = await asyncio.wait_for(checker.check(claim.text, web=bool(config.FLAGS.get("web_fallback", True))),
+                                                     config.VERDICT_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                outcome = Outcome(Guarded(explanation="Ran out of time."), via="timeout")
+            except Exception as e:
+                log.warning("check failed for %s: %r", claim.id, e)
+                outcome = Outcome(Guarded(explanation="The check failed."), via="error")
+        if session != self.session:
+            return                              # the debate moved on to a new Motion
+        verdict = to_verdict(claim, outcome)
+        for e in verdict.evidence:
+            self.bus.publish(SourceCard(claim_id=claim.id, url=e.url, title=e.title, snippet=e.quote), src="evidence")
+        self.bus.publish(verdict, src="evidence")
+
+    async def run(self) -> None:
+        async for ev in self.bus.subscribe("evidence", {"Claim", "SessionStart"}):
+            if ev.event == "SessionStart":
+                self._spawn(self.start_session(ev.motion))
+            elif ev.checkable:
+                self._spawn(self.handle_claim(ev))
+
+
+async def run(bus) -> None:
+    await EvidenceModule(bus, make_verdict_llm(), make_search(), make_embedder()).run()
