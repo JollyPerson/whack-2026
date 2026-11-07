@@ -33,6 +33,11 @@ from app.schemas import (Claim, Control, DirectorDecision, DirectorStatus, Event
 
 KINDS = ("time", "correction", "context", "prompt", "source_req", "confirm")   # order = tie-break rank
 KIND_W = {"time": .9, "correction": 1.0, "context": .7, "prompt": .6, "source_req": .55, "confirm": .35}
+# prompt/source_req carry no model confidence (conf 1.0): KIND_W alone ranks them under a confident context
+# of equal importance. At aggr 3 an importance-0.67 prompt stays >= .35 for ~12 s after detection (2x half-life:
+# the argmap only notices once the next speaker is already talking), an importance-0.8 source request ~10 s
+# after the claim. Both stay under override_score/streak_override, so cooldown and balance still bind them.
+HL_MULT = {"prompt": 2.0}
 TTL_S = {"time": 15, "correction": 45, "context": 40, "prompt": 90, "source_req": 30, "confirm": 25}
 PRESSURE = {"time", "correction", "context", "prompt", "source_req"}   # kinds that put a speaker on the spot
 LABEL2KIND = {"contradicted": "correction", "missing_context": "context", "supported": "confirm"}
@@ -53,7 +58,7 @@ class Cfg:
     min_conf: float = .75; confirm_min_conf: float = .85; min_importance: float = .4
     srcreq_min_importance: float = .8      # unverifiable -> neutral source request, statistics only
     prompt_min_importance: float = .66     # unanswered-point prompts: LLM importance 2 (0.67) and up
-    prompt_conf: float = .8; srcreq_conf: float = .8
+    prompt_conf: float = 1.0; srcreq_conf: float = 1.0
     fire_threshold: float = .35; half_life_s: float = 30.0
     min_gap_s: float = 30.0; hard_gap_s: float = 12.0; override_score: float = .80
     budget_n: int = 6; budget_window_s: float = 300.0
@@ -401,7 +406,7 @@ def _gate(st: State, cd: Cand, now: float, last: float) -> Optional[str]:
 
 def _score(st: State, cd: Cand, now: float) -> float:
     c = st.cfg
-    recency = 0.5 ** (max(0.0, now - cd.t0) / c.half_life_s)
+    recency = 0.5 ** (max(0.0, now - cd.t0) / (c.half_life_s * HL_MULT.get(cd.kind, 1.0)))
     boost = 1.0
     if cd.kind == "confirm" and \
             _side_pressure(st, cd.side) - _side_pressure(st, cd.side, same=False) >= c.confirm_boost_gap:

@@ -12,8 +12,9 @@ Flexible on purpose:
 - Pause synthesis covers for a late/missing VAD; it switches itself off once a real Pause arrives.
 - Finals-only ears (no interims seen yet): a final is no proof the speaker stopped, so synthetic Pauses and
   the Director's floor timeout wait longer (>= 6 s) before the floor counts as open.
-- Ingress guards: our own TTS (echo; expires if TTSState speaking:false never comes), the other speaker's
-  voice leaking into a mic (bleed), and interims arriving after their final never count as speech.
+- Ingress guards: our own TTS (echo: only words matching what we're saying, so a human talking over us still
+  counts; expires if TTSState speaking:false never comes), the other speaker's voice leaking into a mic (bleed),
+  and interims arriving after their final never count as speech.
 - A crash-restart rebuilds the argument map + Director state (incl. lines already spoken, vetoes, mute,
   aggressiveness) from the bus history, silently.
 """
@@ -36,6 +37,8 @@ TICK_S = 0.25
 STATS_EVERY_S = 10.0
 TOK = re.compile(r"[a-z0-9]+")
 SKEW_S = 120.0          # a producer time this far from the envelope ts is stream-relative or another clock
+STOP = frozenset("a an the of to in on at is are was were be been it its s t that this and or for by as with i you "
+                 "we they he she so but do does".split())
 
 
 def _toks(text: str) -> set:
@@ -85,11 +88,16 @@ class PauseSynth:
 
 
 class EchoGuard:
-    """Keep the moderator's own voice (picked up by a mic) out of claim extraction. A speaking:true whose
-    speaking:false never comes (audio tab refreshed/closed, onend lost) expires after cap_s."""
+    """Keep the moderator's own voice (picked up by a mic) out of the brain. A speaking:true whose
+    speaking:false never comes (audio tab refreshed/closed, onend lost) expires after cap_s.
+    While we speak (and tail_s after) an utterance is echo only if its words plausibly come from what we said
+    (live_overlap of its content words, below the post-hoc `overlap`: a speaker through a mic garbles STT);
+    anything else is a human talking over us (barge-in) and must reach the Director and extraction."""
 
-    def __init__(self, tail_s: float = 0.5, overlap: float = 0.6, window_s: float = 10.0, cap_s: float = 15.0):
+    def __init__(self, tail_s: float = 0.5, overlap: float = 0.6, window_s: float = 10.0, cap_s: float = 15.0,
+                 live_overlap: float = 0.4):
         self.tail_s, self.overlap, self.window_s, self.cap_s = tail_s, overlap, window_s, cap_s
+        self.live_overlap = live_overlap
         self.speaking_since: float | None = None
         self.windows: list[tuple[float, float]] = []
         self.said: list[tuple[float, set]] = []
@@ -108,19 +116,29 @@ class EchoGuard:
         self.said = [(t, s) for t, s in self.said if now - t < 60] + [(now, _toks(text))]
 
     def is_echo(self, u: Utterance, now: float) -> bool:
+        return self.classify(u, now) == "echo"
+
+    def classify(self, u: Utterance, now: float) -> str:
+        """Returns "echo" (drop), "floor" (Director/pauses only, never extracted) or "speech"."""
         if self.speaking_since is not None and now - self.speaking_since > self.cap_s:
             self.speaking(False, self.speaking_since + self.cap_s)   # lost speaking:false
-        t = u.t_start or u.ts
-        if self.speaking_since is not None and t >= self.speaking_since:
-            return True
-        if any(a <= t <= b for a, b in self.windows):
-            return True
-        words = _toks(u.text)
+        t, words = u.t_start or u.ts, _toks(u.text)
+        if (self.speaking_since is not None and t >= self.speaking_since) or any(a <= t <= b for a, b in self.windows):
+            said = [s for ts, s in self.said if 0 <= now - ts < 60]
+            if not said or not words:
+                return "echo"           # no idea what the TTS is saying (or nothing heard): old drop-all
+            content = words - STOP      # function words are shared by any two sentences
+            if len(content) >= 2:
+                hit = max(len(content & s) / len(content) for s in said)
+                return "echo" if hit >= self.live_overlap else "speech"
+            # Under 2 content words ("hold on", or the first interim of our own echo): echo if every word is ours,
+            # else a human claiming the floor. Too short to be a claim: floor tracking only, no extraction/argmap.
+            return "echo" if any(words <= s for s in said) else "floor"
         if len(words) >= 3:
             for ts, said in self.said:
                 if now - ts <= self.window_s and len(words & said) / len(words) >= self.overlap:
-                    return True
-        return False
+                    return "echo"
+        return "speech"
 
 
 class BleedGuard:
@@ -329,10 +347,13 @@ async def run(bus) -> None:
                         m.reset()
                     asyncio.create_task(extractor.warmup(ev.motion))
                 elif name == "Utterance":
-                    if late.is_late(ev) or echo.is_echo(ev, now) or (ev.final and bleed.is_bleed(ev)):
+                    if late.is_late(ev) or (heard := echo.classify(ev, now)) == "echo" or \
+                            (ev.final and bleed.is_bleed(ev)):
                         continue
                     pauses.on_utterance(ev, now)
                     emit(director.handle(ev, now))
+                    if heard == "floor":                       # a 1-2 word barge-in over our TTS: floor only
+                        continue
                     if ev.final:
                         amap.on_utterance(ev)
                     start_extract(extractor.assemble(ev, now))     # an interim only keeps a fragment open
