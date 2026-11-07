@@ -109,8 +109,10 @@ const ttsState = (speaking, id) => send({op: 'publish', src: 'face:audio',
 function setConn(s) { $('conn').className = `dot ${s}`; $('conn').title = `websocket ${s}: ${WS_URL}`; }
 
 // ------------------------------------------------------------------ Moderator voice (?audio=1 only)
-// Browser speech for now, so the voice works with no key and no network. To use a hosted voice, replace
-// say(): it must call done() exactly once when playback ends, and return a function that cuts it off.
+// say() plays the server's WAV (/face/tts: ElevenLabs, or espeak-ng) and falls back to browser speech if the server
+// has no voice or the line isn't ready in time. A replacement must call started(seconds long, if known) when sound is
+// audible, done() once when it ends, and return a function that cuts it off. TTSState{speaking:true} = "audible now".
+const START_TIMEOUT_MS = 8000;  // nothing audible by then (no voice anywhere): give the line up
 let speechQueue = [], speaking = null;
 
 function pickVoice() {
@@ -118,17 +120,32 @@ function pickVoice() {
   return voices.find(v => /^(Daniel|Google UK English Male)/.test(v.name))
       || voices.find(v => v.lang === 'en-GB') || voices.find(v => /^en/.test(v.lang)) || null;
 }
-function say(text, done) {
+function say(text, done, started) {
+  const audio = new Audio(`/face/tts?text=${encodeURIComponent(text)}`);
+  let playing = false, cut = false, fallback = null;
+  const toSpeech = () => {                     // only before the WAV has made a sound, and only once
+    if (playing) done();
+    else if (!cut && !fallback) fallback = saySpeech(text, done, started);
+  };
+  audio.onplaying = () => { if (!playing && !cut) { playing = true; started(audio.duration); } };
+  audio.onended = done;
+  audio.onerror = toSpeech;
+  audio.play().catch(toSpeech);
+  return () => { cut = true; audio.pause(); if (fallback) fallback(); };
+}
+function saySpeech(text, done, started) {
+  if (!window.speechSynthesis) { done(); return () => {}; }
   const u = new SpeechSynthesisUtterance(text), voice = pickVoice();
   if (voice) u.voice = voice;
   u.rate = 1.05;
+  u.onstart = () => started();
   u.onend = u.onerror = done;
   speechSynthesis.speak(u);
   say.keep = u;                                // Chrome drops events if the utterance is garbage collected
   return () => speechSynthesis.cancel();
 }
 function speak(e) {
-  if (!AUDIO || !audioReady || S.flags.tts === false || !window.speechSynthesis) return;
+  if (!AUDIO || !audioReady || S.flags.tts === false) return;
   speechQueue.push({e, at: Date.now()});
   nextLine();
 }
@@ -137,19 +154,29 @@ function nextLine() {
   let item;
   do { item = speechQueue.shift(); } while (item && Date.now() - item.at > STALE_SPEECH_MS);
   if (!item) return;
-  let finished = false;
+  let finished = false, audible = false, stop = () => {};
   const finish = () => {
     if (finished) return;
     finished = true;
     clearTimeout(watchdog);
     speaking = null;
-    ttsState(false, item.e.id);
+    if (audible) ttsState(false, item.e.id);
     nextLine();
   };
-  // Browsers sometimes never fire onend, and a stuck TTSState would silence the Director for good.
-  const watchdog = setTimeout(finish, 3000 + item.e.text.split(/\s+/).length * 600);
-  ttsState(true, item.e.id);
-  speaking = {stop: say(item.e.text, finish), finish};
+  const cut = () => { stop(); finish(); };     // TTSState false only once the sound has really stopped
+  let watchdog = setTimeout(cut, START_TIMEOUT_MS);
+  const started = dur => {                     // dur: the WAV's length in s, when known
+    if (finished || audible) return;
+    audible = true;
+    ttsState(true, item.e.id);
+    // Browsers sometimes never fire onend, and a stuck TTSState would silence the Director for good. Never before
+    // the WAV's own end: spoken numbers ("£1.2bn" -> "1.2 billion pounds") outrun the word-count estimate.
+    clearTimeout(watchdog);
+    const est = 3000 + item.e.text.split(/\s+/).length * 600;
+    watchdog = setTimeout(cut, Number.isFinite(dur) ? Math.max(est, dur * 1000 + 2000) : est);
+  };
+  stop = say(item.e.text, finish, started);
+  if (!finished) speaking = {stop, finish};
 }
 function cutSpeech() {
   speechQueue = [];
@@ -316,9 +343,7 @@ function refereeHtml() {
     : why[d.blocked] || ['listening', 'Listening'];
   const spoke = S.interjections.length, seen = S.considered.size;
   const record = seen ? `<span class="record">Considered ${seen} point${seen === 1 ? '' : 's'}, spoke ${spoke} time${spoke === 1 ? '' : 's'}</span>` : '';
-  const audio = !AUDIO ? ''
-    : !window.speechSynthesis ? '<span class="warn">This browser has no speech</span>'
-    : audioReady ? '' : '<button id="enable" class="primary">Enable audio</button>';
+  const audio = !AUDIO || audioReady ? '' : '<button id="enable" class="primary">Enable audio</button>';
   return `<span class="state ${cls}">${bars}<b>Referee</b> ${esc(text)}</span>${record}${audio}`;
 }
 const bars = '<span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>';
@@ -444,8 +469,8 @@ async function replay(action) {
 document.addEventListener('click', ev => {
   const b = ev.target.closest && ev.target.closest('button');
   if (!b) return;
-  if (b.id === 'enable') {                     // browsers block speech until the page has had a click
-    speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
+  if (b.id === 'enable') {                     // browsers block audio and speech until the page has had a click
+    if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance(' '));
     audioReady = true;
   } else if (b.dataset.ctl) control(b.dataset.ctl, JSON.parse(b.dataset.val));
   else if (b.dataset.act === 'picker') pickerOpen = true;

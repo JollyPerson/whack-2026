@@ -49,7 +49,7 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 | `DirectorDecision` | B → D (reasoning panel), log | — | `key`, `kind`, `action` (candidate\|held\|fired\|skipped\|dropped), `reason`, `score` |
 | `DirectorStatus` | B → D (status chip), ~1 Hz | — | `floor_open`, `tts_busy`, `cooldown_left_s`, `muted`, `aggr`, `pending`, `pressure` |
 | `ResearchProgress` | C → D | — | `stage`, `done`, `total`, `detail` |
-| `TTSState` | D (the one `?audio=1` tab) → A, B | `speaking` | `interjection_id` |
+| `TTSState` | D (the one `?audio=1` tab) → A, B | `speaking` | `interjection_id` — `speaking: true` means the referee is **audible now** (sent when playback actually starts, `false` once it has stopped); gate on this event only |
 | `Control` | dashboard/CLI → all | `flag` | `value` — flags: `tts`, `director`, `web_fallback`, `interims`, `agent_speaking`, `mute`, `force_next`, `veto`, `aggr` (1–5), `time` |
 | `ModuleStatus` | supervisor/modules → D | `module` | `state` (up\|degraded\|down), `detail` (a module that returned normally, or one served only by routes.py/static, stays `up`) |
 

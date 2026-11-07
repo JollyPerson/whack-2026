@@ -4,6 +4,7 @@ POST /face/replay       one-click fallback: the recorded debate re-drives the ru
                         (mock_ears' SessionStart + Utterance + Pause, re-timed to now), so verdicts and
                         the latency meter stay real. ?speed=2 plays it faster.
 POST /face/replay/stop  stops it.
+/face/tts, /face/mate/* the referee's voice and the Mate Engine avatar bridge: see speech.py.
 """
 from __future__ import annotations
 
@@ -12,11 +13,13 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.face.speech import router as speech_router
 from app.mocks import mock_ears
 from app.schemas import Control, ModuleStatus
 
 log = logging.getLogger("face")
 router = APIRouter()
+router.include_router(speech_router)
 
 
 async def _drive(bus, fixture, speed: float) -> None:
