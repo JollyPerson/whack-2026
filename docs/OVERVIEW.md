@@ -130,7 +130,7 @@ Each owner researches their area, chooses their approach and providers, and shar
 - **Owns:** the pre-research job, vector index, web fallback, fact-check cache, verdicts with quote verification and numeric checks, a **20-claim labelled eval set**, and the demo script. The fact-check cache is stretch work, started only if the eval gates pass and the 21:30 live-mic test shows slow web-search checks are hurting.
 - **Skills:** search APIs, embeddings, careful LLM evaluation.
 - **In → out:** motion, `Claim` → `Verdict`, `SourceCard`.
-- **Done when:** verdicts take under 2 s from the index, there are no fabricated quotes, and the eval score is good.
+- **Done when:** verdicts take under 2 s from the index, there are no fabricated quotes, and the eval gates pass. The eval design and gates are on [the Evidence ticket](https://github.com/JollyPerson/whack-2026/issues/15).
 
 ### Face
 
@@ -148,12 +148,13 @@ Each owner researches their area, chooses their approach and providers, and shar
 | Time | Milestone |
 |---|---|
 | By 17:00 Sat | Planning stops. Schemas frozen, repo skeleton pushed, test debate recorded |
-| 18:00 | Recorded test debate and transcript in `fixtures/` (Thomas and Tong), with 8–10 checkable facts covering each verdict label |
-| 18:30 | Every module works standalone on mocks. Gold claim labelling starts (Harkaran) |
-| 19:00 | 5 demo Motions chosen (Harkaran) |
-| 20:00 | **First end-to-end run on the recorded debate** (ugly is fine), watched through the JSONL log. Check-in follows |
+| 18:30 | Every module works standalone on mocks |
+| 19:00 | Recorded test debate and transcript in `fixtures/` (Thomas and Tong), with 8–10 checkable facts covering each verdict label. 5 demo Motions chosen (Harkaran) |
+| 19:00–19:30 | Gold claim labelling (Harkaran) |
+| 20:00 | **First end-to-end run on the recorded debate** (ugly is fine), watched through the JSONL log. If there's no recording, it uses the fake debate. Check-in follows |
+| 20:30–21:15 | Write and freeze the verdict eval set (Harkaran) |
 | 21:30 | Live mics end to end, with the Moderator voice working |
-| Overnight | Verdict accuracy, Interjection timing, UI polish |
+| Overnight | Verdict accuracy, Interjection timing, UI polish. Tuning stops at 06:00. Harkaran covers integration while Tong sleeps (01:45–05:45) |
 | 09:00 Sun | Feature freeze, presenter picked, Thomas records the backup video |
 | 09:00–11:30 | Rehearse the demo at least 3 times, using Motions from the list |
 | 11:00 | Decide whether judges debate or teammates do |
@@ -171,11 +172,12 @@ The slot is **3 minutes**. This plan assumes setup and Q&A aren't included, whic
 | 0:20–2:15 | The debate, with claims, verdicts and at least one spoken Interjection |
 | 2:15–3:00 | The final screen, the agent's effect on the debate, and a nod to prior art |
 
-- **Motions:** the judge chooses from 5 tested Motions that are fun but rich in facts.
+- **Motions:** the judge chooses from 5 tested Motions that are fun but rich in facts, listed in `app/evidence/motions.json`.
 - **Evidence indexes:** these are built in advance for every listed Motion, and we say so on stage. Pre-research progress is shown for a few seconds at most, and isn't presented as happening live.
 - **Debaters:** two teammates debate while the third presents. Judges debate instead only if a stand-in from outside the team passes a rehearsal test by 11:00 on Sunday: the debate starts within 15 seconds and yields at least two verdicts.
 - **Fact cards:** debaters prepare facts for each side of each Motion, including some deliberately wrong ones. Judges are told this upfront.
-- **Dry spells:** after 25 seconds without an Interjection, the Moderator uses a canned line at the next Pause, such as "Neither side has offered a figure yet. Care to name one?"
+- **Dry spells:** the Moderator uses a canned line at the first Pause after 25 seconds of debate, such as "Neither side has offered a figure yet. Care to name one?" After that, it waits for the Director's 30-second gap. It skips only the confidence threshold.
+- **Demo machine:** Tong's laptop, with the presenter operating it from `?admin=1`.
 - **Fallbacks:** live mics are the default. Switch to the recorded debate replayed through the real pipeline if there's no transcript within 15 seconds, or no verdict by 40 seconds into the debate. The presenter says it's a replay. The backup video is only for when the pipeline is down.
 - **Open:** team phones on a team hotspot, with venue wifi as the backup, are assumed but not confirmed.
 

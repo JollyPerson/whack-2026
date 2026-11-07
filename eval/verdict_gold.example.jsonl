@@ -1,0 +1,3 @@
+{"gid": "example-1", "set": "main", "motion": "Example Motion", "side": "prop", "text": "EXAMPLE ONLY: claim as a debater would say it.", "label": "supported", "reason": "One line on why this label is right.", "sources": ["https://example.org/report"], "key": "4.2%"}
+{"gid": "example-2", "set": "main", "motion": "Example Motion", "side": "opp", "text": "EXAMPLE ONLY: claim nothing can settle.", "label": "unverifiable", "reason": "No source can settle this.", "sources": [], "key": ""}
+{"gid": "example-3", "set": "holdout", "motion": "Fifth Motion", "side": "prop", "text": "EXAMPLE ONLY: a holdout claim, not counted in the 20.", "label": "contradicted", "reason": "One line on why this label is right.", "sources": ["https://example.org/stats"], "key": "12 million"}
