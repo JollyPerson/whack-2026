@@ -54,3 +54,12 @@ def test_replay_reports_a_missing_recording(make_client):
     c = make_client(FIXTURE="fixtures/does_not_exist.jsonl")
     assert c.post("/face/replay").status_code == 404
     assert c.post("/face/replay?speed=0").status_code == 422
+
+
+def test_motion_picker_offers_every_demo_motion():
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    picker = json.loads((root / "app/face/static/motions.json").read_text())
+    demo = [m["text"] for m in json.loads((root / "app/evidence/motions.json").read_text())["motions"]]
+    assert picker == demo   # a Motion the picker lacks can't be chosen; one Evidence lacks has no index

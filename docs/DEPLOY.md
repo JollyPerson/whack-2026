@@ -55,8 +55,28 @@ gh workflow run ci-cd.yml --ref master -f image_tag=<commit-sha>
 gh workflow run ci-cd.yml --ref master
 ```
 
-**Change API keys or role overrides.** On the server they live in `/opt/debate-ref/app.env` (`EARS=`, `TAVILY_API_KEY=`, ...),
-and the profile is `APP_PROFILE` in `/opt/debate-ref/.env`. Edit the file, then redeploy. Keys never go through GitHub.
+**Change API keys or role overrides.** On the server they live in `/opt/debate-ref/app.env` (`EARS=`, `EXA_API_KEY=`, ...),
+and the profile is `APP_PROFILE` in `/opt/debate-ref/.env`. Re-running the setup wizard asks for them again, or set one
+from your machine. The value goes on stdin, so it stays out of shell history, and `sudo -u deploy` keeps the file
+readable by the pipeline. Then redeploy. Keys never go through GitHub.
+
+```bash
+read -rs KEY && printf '%s' "$KEY" | ssh root@<ip> "sudo -u deploy /opt/debate-ref/set-env.sh /opt/debate-ref/app.env EXA_API_KEY"
+printf drive | ssh root@<ip> "sudo -u deploy /opt/debate-ref/set-env.sh /opt/debate-ref/.env APP_PROFILE"
+```
+
+**Evidence indexes.** After each successful deploy, `deploy.sh` starts
+`python -m app.evidence.preresearch --all --missing` in the background inside the app container. It builds the
+demo Motions' indexes into the `cache` volume (`/srv/cache/evidence`), which survives deploys, so once they're built
+it does nothing. It never holds up or fails a deploy, and it's skipped while `EXA_API_KEY` isn't set in `app.env`.
+A deploy restarts the app, which stops a build part way through; the next deploy finishes it. Its output is in the
+`logs` volume:
+
+```bash
+docker compose --env-file .env --env-file image.env exec app tail -f /srv/logs/preresearch.log
+```
+
+To rebuild one, delete its `.json` and `.npy` (`exec app sh -c 'rm /srv/cache/evidence/<name>.*'`) and redeploy.
 
 **Look at the server.** Run these from `/opt/debate-ref` as `deploy`. Event logs are in the `logs` volume, and
 `deploys.log` lists past deploys.
@@ -67,8 +87,9 @@ docker compose --env-file .env --env-file image.env logs -f app
 
 ## Good to know
 
-- The default profile is `mock`. `drive` and `live` show red dots until `app/ears`, `app/evidence` and `app/face`
-  have a `run.py` or `routes.py`.
+- The default profile is `mock`. `drive` plays the recorded debate through the real Brain and Evidence, and needs
+  `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) and `EXA_API_KEY`. `live` shows a red dot for Ears until `app/ears` has a
+  `run.py`.
 - The default address `<ip>.sslip.io` is a free shared DNS service. Let's Encrypt limits certificates per domain, so it
   can occasionally refuse one. Use your own domain for anything that matters.
 - External role processes (`EVIDENCE=external`) must send the site password when they connect to `/ws` or `/publish`.

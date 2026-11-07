@@ -38,3 +38,16 @@ compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile \
 docker image prune -af --filter until=168h >/dev/null
 printf '%s %s\n' "$(date -u +%FT%TZ)" "$new" >> deploys.log
 echo "Deployed $new"
+
+# Build the demo Motions' evidence indexes into the cache volume, in the background inside the app container, so it
+# never holds up or fails a deploy. --missing makes it a no-op once they're built. flock stops two running at once.
+if grep -Eq "^EXA_API_KEY=['\"]?[^'\"[:space:]]" app.env 2>/dev/null; then
+  # shellcheck disable=SC2016  # the $ expands in the container's sh
+  if compose exec -d -T app sh -c 'exec >>/srv/logs/preresearch.log 2>&1; echo "$(date -u +%FT%TZ) pre-research started"; flock -n -E 75 /tmp/preresearch.lock python -m app.evidence.preresearch --all --missing; echo "$(date -u +%FT%TZ) pre-research finished: exit $? (75 = one was already running)"'; then
+    echo "Pre-research running in the background, logging to /srv/logs/preresearch.log in the app container"
+  else
+    echo "WARN: couldn't start pre-research" >&2
+  fi
+else
+  echo "Skipping pre-research: EXA_API_KEY isn't set in app.env"
+fi
