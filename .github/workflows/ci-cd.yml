@@ -1,0 +1,175 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Roll back: deploy this existing image tag (a commit SHA) and skip the build. Blank = build this ref."
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: inputs.image_tag == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/*.txt
+      - run: pip install -q -r requirements.txt
+      - run: python -m pytest -q
+      - name: Lint deploy scripts
+        run: shellcheck deploy/*.sh
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: debate-ref:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test image
+        run: |
+          docker run -d --name smoke -p 8000:8000 debate-ref:smoke
+          for _ in $(seq 30); do
+            if curl -fsS http://localhost:8000/health; then exit 0; fi
+            sleep 1
+          done
+          docker logs smoke
+          exit 1
+
+      - name: Validate deploy config
+        working-directory: deploy
+        env:
+          IMAGE: debate-ref:smoke
+          DOMAIN: example.com
+          BASIC_AUTH_USER: ci
+          BASIC_AUTH_HASH: $2a$14$ciciciciciciciciciciciciciciciciciciciciciciciciciciciciu
+        run: |
+          touch app.env
+          docker compose config --quiet
+          docker run --rm -e DOMAIN -e BASIC_AUTH_USER -e BASIC_AUTH_HASH \
+            -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+            caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Name image
+        id: image
+        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Push image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.image.outputs.repo }}:${{ github.sha }}
+            ${{ steps.image.outputs.repo }}:latest
+          cache-from: type=gha
+
+      # Private GHCR storage is metered. Ten versions is the rollback window.
+      - name: Prune old images
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        continue-on-error: true
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: 10
+
+  deploy:
+    needs: build
+    # Set the DEPLOY_ENABLED repo variable to anything but "true" to freeze production, e.g. during a demo:
+    # a deploy restarts the app, and a restart drops the running debate.
+    if: >-
+      !cancelled()
+      && vars.DEPLOY_ENABLED == 'true'
+      && github.event_name != 'pull_request'
+      && github.ref == 'refs/heads/master'
+      && (needs.build.result == 'success' || inputs.image_tag != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: vultr-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TARGET: deploy@${{ vars.VULTR_HOST }}
+      APP_DIR: /opt/debate-ref
+      TAG: ${{ inputs.image_tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check image tag
+        run: |
+          if ! [[ $TAG =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Not a valid image tag: $TAG"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.VULTR_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.VULTR_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Copy deploy files to server
+        run: >-
+          scp -q deploy/compose.yml deploy/Caddyfile deploy/deploy.sh deploy/set-env.sh
+          "$TARGET:$APP_DIR/"
+
+      # The token goes over stdin. The server only needs it for this pull, and it expires with this job.
+      - name: Deploy
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$TAG"
+          printf '%s' "$TOKEN" | ssh "$TARGET" "$APP_DIR/deploy.sh '$image'"
+
+      - name: Check public URL
+        env:
+          DOMAIN: ${{ vars.VULTR_DOMAIN }}
+        run: curl -fsS --retry 24 --retry-delay 5 --retry-all-errors --max-time 10 "https://$DOMAIN/health"

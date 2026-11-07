@@ -17,6 +17,8 @@ PRINT=1 ./run.sh mock              # also print one line per event in the termin
 ./check.sh                         # tests (run before pushing)
 ```
 
+Pushes to `master` deploy to Vultr: see [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
 Replay options: `--speed 2` (2x faster), `--max-gap 5` (silences longer than 5 s are cut to 5 s; this is the
 default, `0` keeps them), `--all-sessions` (by default a log replays from its last `SessionStart`, so rehearsals
 earlier in the same log are skipped), `--only Utterance Pause` (re-drive the live pipeline from recorded speech).
@@ -73,6 +75,7 @@ ears/            A  Thomas's uv package, until it moves into app/ears/
 fixtures/        shared test debates (JSONL, same format as logs)
 eval/            extraction eval and the 20-claim verdict eval
 logs/            one JSONL per run (+ latest.jsonl) — every event, replayable
+deploy/          production stack on Vultr (see docs/DEPLOY.md)
 ```
 
 **Rules:** edit only your own folder and your own `requirements/<role>.txt`. Shared files change through B

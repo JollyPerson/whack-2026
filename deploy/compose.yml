@@ -1,0 +1,40 @@
+# Production stack on the Vultr server. Run by deploy.sh, which supplies .env and image.env.
+name: debate-ref
+
+services:
+  app:
+    image: ${IMAGE:?deploy.sh writes IMAGE to image.env}
+    command: ["python", "-m", "app.main", "${APP_PROFILE:-mock}"]
+    env_file: app.env   # API keys and role overrides (EARS=, BRAIN=, ...)
+    restart: unless-stopped
+    volumes:
+      - logs:/srv/logs
+      - cache:/srv/cache
+    logging: &logging
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  # Terminates HTTPS (browsers only allow the microphone on a secure origin) and is the only public port.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER in .env}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
+volumes:
+  logs:
+  cache:
+  caddy_data:
+  caddy_config:

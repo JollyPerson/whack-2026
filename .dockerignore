@@ -1,0 +1,7 @@
+# Allowlist: nothing reaches the image (.env above all) unless it is named here.
+*
+!app/
+!requirements/
+!fixtures/
+**/__pycache__/
+**/*.pyc
