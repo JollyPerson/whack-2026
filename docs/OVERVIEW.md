@@ -87,7 +87,7 @@ These are targets, and nothing has been measured yet.
 
 **Runtime design**
 
-- A single Python process: FastAPI, with asyncio queues as the event bus.
+- A single Python process on a Vultr server: FastAPI, with asyncio queues as the event bus. It has no authentication of its own, so access is locked down at deployment.
 - A websocket fans events out to the dashboard.
 - Every event is logged to JSONL, for debugging replays and as a demo backup.
 - Every event carries wall-clock timestamps, which gives us the latency meter for free.
@@ -177,8 +177,9 @@ The slot is **3 minutes**. This plan assumes setup and Q&A aren't included, whic
 - **Debaters:** two teammates debate while the third presents. Judges debate instead only if a stand-in from outside the team passes a rehearsal test by 11:00 on Sunday: the debate starts within 15 seconds and yields at least two verdicts.
 - **Fact cards:** debaters prepare facts for each side of each Motion, including some deliberately wrong ones. Judges are told this upfront.
 - **Dry spells:** the Moderator uses a canned line at the first Pause after 25 seconds of debate, such as "Neither side has offered a figure yet. Care to name one?" After that, it waits for the Director's 30-second gap. It skips only the confidence threshold.
-- **Demo machine:** Tong's laptop, with the presenter operating it from `?admin=1`.
-- **Fallbacks:** live mics are the default. Switch to the recorded debate replayed through the real pipeline if there's no transcript within 15 seconds, or no verdict by 40 seconds into the debate. The presenter says it's a replay. The backup video is only for when the pipeline is down.
+- **Hosting:** the pipeline runs on a Vultr server in London, deployed from `master` by Harkaran. Phones and the dashboard connect to its HTTPS address.
+- **Demo machine:** Tong's laptop shows the dashboard and plays audio, with the presenter operating it from `?admin=1`.
+- **Fallbacks:** live mics are the default. Switch to the recorded debate replayed through the real pipeline if there's no transcript within 15 seconds, or no verdict by 40 seconds into the debate. The presenter says it's a replay. If the venue's internet drops, Tong's laptop replays a saved run locally. The backup video is only for when none of that works.
 - **Open:** team phones on a team hotspot, with venue wifi as the backup, are assumed but not confirmed.
 
 **PMQs is dropped**, along with the Full Fact comparison, which leaves the eval set as the accuracy story. See [Do we commit to the PMQs segment?](https://github.com/JollyPerson/whack-2026/issues/10).
