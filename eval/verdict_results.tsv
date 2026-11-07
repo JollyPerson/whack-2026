@@ -1,0 +1,2 @@
+time	layer	model	correct	total	fabricated	swaps	p95_ms	passed	note
+2026-11-07 21:28	verdict	anthropic:claude-haiku-5-5	14	20	0	0	1627	True	
