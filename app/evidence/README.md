@@ -31,6 +31,6 @@ The demo Motions are in `motions.json`. The four marked `eval` go in the eval se
 .venv/bin/python -m app.evidence.preresearch --all --missing
 ```
 
-Indexes are saved in `cache/evidence/`, which is gitignored, so build them wherever the server runs and keep that folder between deploys. `--missing` skips Motions already built, so it's safe to run on every deploy, and the eval's indexes don't change underneath it. To rebuild a Motion, delete its files first. Set `EVIDENCE_INDEX_DIR` to use another folder.
+Indexes are saved in `cache/evidence/`, which is gitignored, so build them wherever the server runs and keep that folder between deploys. On the Vultr server each deploy does this by itself once `EXA_API_KEY` is in `app.env`, into the `cache` volume, and logs to `/srv/logs/preresearch.log`. See [docs/DEPLOY.md](../../docs/DEPLOY.md). `--missing` skips Motions already built, so it's safe to run on every deploy, and the eval's indexes don't change underneath it. To rebuild a Motion, delete its files first. Set `EVIDENCE_INDEX_DIR` to use another folder.
 
 Run `./run.sh dev-c` to develop with mock speech and claims.

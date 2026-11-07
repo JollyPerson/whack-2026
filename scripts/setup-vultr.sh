@@ -306,7 +306,8 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 stage "App profile and API keys"
 say "Profiles are listed in the README. 'mock' needs no keys and spends nothing."
-ask APP_PROFILE "Profile (Enter for mock on a first run):"
+say "Once the keys below are set: 'drive' plays the recorded debate through the real pipeline, 'live' uses the mics."
+ask APP_PROFILE "Profile: mock, drive or live (Enter for mock on a first run):"
 APP_PROFILE=${APP_PROFILE:-mock}
 write_env APP_PROFILE "$APP_PROFILE"
 set_remote .env APP_PROFILE "$APP_PROFILE"
@@ -315,7 +316,13 @@ ask_secret NEW_ANTHROPIC_KEY "ANTHROPIC_API_KEY:"
 [[ -z "$NEW_ANTHROPIC_KEY" ]] || set_remote app.env ANTHROPIC_API_KEY "$NEW_ANTHROPIC_KEY"
 ask_secret NEW_OPENAI_KEY "OPENAI_API_KEY:"
 [[ -z "$NEW_OPENAI_KEY" ]] || set_remote app.env OPENAI_API_KEY "$NEW_OPENAI_KEY"
-note "Other keys (Deepgram, Tavily, ...) can be added later. See docs/DEPLOY.md."
+note "Evidence: Exa is needed for pre-research and the web fallback. Each deploy builds the demo indexes once it's set."
+ask_secret NEW_EXA_KEY "EXA_API_KEY:"
+[[ -z "$NEW_EXA_KEY" ]] || set_remote app.env EXA_API_KEY "$NEW_EXA_KEY"
+note "A separate Anthropic key keeps Evidence off Brain's rate limits. Skip it to share ANTHROPIC_API_KEY."
+ask_secret NEW_EVIDENCE_ANTHROPIC_KEY "EVIDENCE_ANTHROPIC_API_KEY:"
+[[ -z "$NEW_EVIDENCE_ANTHROPIC_KEY" ]] || set_remote app.env EVIDENCE_ANTHROPIC_API_KEY "$NEW_EVIDENCE_ANTHROPIC_KEY"
+note "Other keys (Deepgram, ...) can be added later. See docs/DEPLOY.md."
 
 # ─────────────────────────────────────────────────────────────────────────
 stage "Connect GitHub Actions"
