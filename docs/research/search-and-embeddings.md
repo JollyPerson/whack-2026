@@ -64,7 +64,7 @@ What this supports [Inference]:
 
 No benchmark tests UK political claims, and none says it was run from London.
 
-[Vendor claim] Brave says LLM Context "reduces latency to under 500ms at P90" and is "up to 20x faster" ([Brave](https://brave.com/search/api/)). The P90 claim is not corroborated: third-party p50s for that endpoint are already 547 ms-1.2 s. The 20x figure compares against the slowest product in the AIMultiple run, not against Exa or Tavily.
+[Vendor claim] Brave says LLM Context "reduces latency to under 500ms at P90" and is "up to 20x faster" ([Brave](https://brave.com/search/api/)). The P90 claim is not corroborated: third-party p50s for that endpoint are already 590 ms-1.2 s. The 20x figure compares against the slowest product in the AIMultiple run, not against Exa or Tavily.
 
 ### Suggested settings [Inference, on vendor-documented parameters]
 
