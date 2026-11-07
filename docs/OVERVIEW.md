@@ -4,7 +4,7 @@ An agent that listens to a live debate, checks claims as they are spoken, and st
 
 Built for **WHACK** (student hackathon, London), incident.io track. **Judging is about midday on Sunday 8 November 2026.**
 
-**Status:** planning. No product code exists yet. Items marked **Open** aren't decided, so check the [planning map](https://github.com/JollyPerson/whack-2026/issues/1) for the latest.
+**Status:** building. Brain, the bus and the mocks are in the repo; nothing has run end to end yet. Items marked **Open** aren't decided, so check the [planning map](https://github.com/JollyPerson/whack-2026/issues/1) for the latest.
 
 ## If you are an AI agent
 
@@ -83,16 +83,7 @@ These are targets, and nothing has been measured yet.
 
 ## Shared contracts
 
-This is a **draft and isn't frozen**. Freezing it is tracked in [Are the shared contracts complete enough to freeze?](https://github.com/JollyPerson/whack-2026/issues/3). The integration lead will own the final version in `schemas.py`.
-
-```
-Utterance    {id, speaker, text, t_start, t_end, final}
-Pause        {speaker, t}
-Claim        {id, utterance_id, speaker, text, type, checkable, links[{claim_id, supports|attacks}]}
-Verdict      {claim_id, label, confidence, evidence[{url, title, quote}], explanation, latency_ms}
-SourceCard   {claim_id, url, title, snippet}
-Interjection {id, text, priority, claim_id}
-```
+**Frozen for now at v1.0.** The source of truth is `app/schemas.py`, explained in `docs/CONTRACTS.md`. Existing field names don't change. New fields are added as optional, and extra fields and new event types pass through the bus, so tell the integration lead if one should become official.
 
 **Runtime design**
 
@@ -109,10 +100,12 @@ We are 3 people (GitHub: `JollyPerson`, `dabestthebest`, `dy-dt`).
 |---|---|---|
 | Ears | Thomas (`dy-dt`) | [Ears](https://github.com/JollyPerson/whack-2026/issues/11) |
 | Brain and integration lead | Tong (`dabestthebest`) | [Brain](https://github.com/JollyPerson/whack-2026/issues/12) |
-| Evidence | **Open** | [Who owns Evidence and the Face work?](https://github.com/JollyPerson/whack-2026/issues/2) |
-| Face | **Open** | [Who owns Evidence and the Face work?](https://github.com/JollyPerson/whack-2026/issues/2) |
+| Evidence, eval set and demo script | Harkaran (`JollyPerson`) | [Evidence](https://github.com/JollyPerson/whack-2026/issues/15) |
+| Face (after Ears) | Thomas (`dy-dt`) | [Face](https://github.com/JollyPerson/whack-2026/issues/16) |
 
-Each owner researches their area, chooses their approach and providers, and shares what they chose and why on their ticket. Evidence should go to the strongest, most careful person.
+Each owner researches their area, chooses their approach and providers, and shares what they chose and why on their ticket.
+
+**Falling behind:** hold a 5-minute check-in right after the 20:00 run. Tong makes the call as integration lead, starting with the cut list. If that isn't enough, the person furthest ahead helps whoever is blocking the pipeline.
 
 ### Ears
 
@@ -129,17 +122,22 @@ Each owner researches their area, chooses their approach and providers, and shar
 - **Skills:** prompting, LLM APIs, state machines.
 - **In → out:** `Utterance`, `Pause`, `Verdict` → `Claim`, `Interjection`.
 - **Done when:** extraction takes under 500 ms per sentence, the map makes sense, and Interjections are well timed rather than spammy.
+- **Extraction support:** Harkaran labels the gold claims and, after the 20:00 run, tests a faster extraction model through Brain's provider switch. Tong still owns Brain.
 
-### Evidence (no owner yet)
+### Evidence
 
-- **Owns:** the pre-research job, vector index, web fallback, fact-check cache, verdicts with quote verification and numeric checks, and a **20-claim labelled eval set**.
+- **Owner:** Harkaran.
+- **Owns:** the pre-research job, vector index, web fallback, fact-check cache, verdicts with quote verification and numeric checks, a **20-claim labelled eval set**, and the demo script. The fact-check cache is stretch work, started only if the eval gates pass and the 21:30 live-mic test shows slow web-search checks are hurting.
 - **Skills:** search APIs, embeddings, careful LLM evaluation.
 - **In → out:** motion, `Claim` → `Verdict`, `SourceCard`.
 - **Done when:** verdicts take under 2 s from the index, there are no fabricated quotes, and the eval score is good.
 
-### Face (no owner yet)
+### Face
 
-- **Owns:** the dashboard, the Moderator voice, the demo script and the backup video.
+- **Owner:** Thomas, starting once Ears works standalone at 18:30. Ears comes first.
+- **Owns:** the dashboard, the Moderator voice and the backup video.
+- **Build order:** transcript, claim chips and verdicts with sources; latency meter; Moderator voice (working by 21:30); Motion picker and pre-research progress; argument map; scoreboard.
+- **Final screen:** a plain per-side list of claims and verdicts is the guaranteed version. The argument map and scoreboard replace it if they're ready.
 - **Dashboard contents:** speaker-coloured transcript, claim chips, source cards, per-side argument map, scoreboard, latency meter, motion picker and pre-research progress.
 - **Skills:** frontend, text-to-speech, presenting.
 - **In → out:** all events → UI and audio.
@@ -150,23 +148,38 @@ Each owner researches their area, chooses their approach and providers, and shar
 | Time | Milestone |
 |---|---|
 | By 17:00 Sat | Planning stops. Schemas frozen, repo skeleton pushed, test debate recorded |
-| 18:30 | Every module works standalone on mocks |
-| 20:00 | **First end-to-end run on the recorded debate** (ugly is fine) |
-| 21:30 | Live mics end to end |
+| 18:00 | Recorded test debate and transcript in `fixtures/` (Thomas and Tong), with 8–10 checkable facts covering each verdict label |
+| 18:30 | Every module works standalone on mocks. Gold claim labelling starts (Harkaran) |
+| 19:00 | 5 demo Motions chosen (Harkaran) |
+| 20:00 | **First end-to-end run on the recorded debate** (ugly is fine), watched through the JSONL log. Check-in follows |
+| 21:30 | Live mics end to end, with the Moderator voice working |
 | Overnight | Verdict accuracy, Interjection timing, UI polish |
-| 09:00 Sun | Feature freeze, record the backup video |
-| 09:00–11:30 | Rehearse the demo at least 3 times with a fresh motion |
+| 09:00 Sun | Feature freeze, presenter picked, Thomas records the backup video |
+| 09:00–11:30 | Rehearse the demo at least 3 times, using Motions from the list |
+| 11:00 | Decide whether judges debate or teammates do |
 | about 12:00 | Judging |
 
 **Kickoff, everyone together:** freeze the schemas, push the repo skeleton, and record a 3-minute test debate between two teammates with a timestamped transcript. That recording is the shared fixture all mocks replay, so nobody has to wait on anyone else's module.
 
 ## Demo plan
 
-1. A judge picks a motion, and the agent visibly pre-researches for about 60 s during the intro.
-2. Two judges debate for about 2 minutes. A light motion is fine. Claims light up, verdicts land, and the Moderator interjects once or twice.
-3. End on the argument map and scoreboard: who actually won on the evidence.
+The slot is **3 minutes**. This plan assumes setup and Q&A aren't included, which still needs checking with the organisers. Everything is connected before the slot starts.
 
-**Open:** whether to add a clip of about 1 minute from PMQs (Prime Minister's Questions), streamed as if live, with accuracy compared against Full Fact. The Commons doesn't sit at weekends, so it would have to be a recording. Research found the footage terms look like a problem: don't stream footage without written permission from Parliament's Recording Unit. Hansard text looks usable with attribution, as a replayed `Utterance` stream or read aloud by teammates. This isn't legal advice, and the live terms still need checking in a browser. See [Do we commit to the PMQs segment?](https://github.com/JollyPerson/whack-2026/issues/10).
+| Time | What happens |
+|---|---|
+| 0:00–0:20 | The hook, and a judge picks a Motion from the list |
+| 0:20–2:15 | The debate, with claims, verdicts and at least one spoken Interjection |
+| 2:15–3:00 | The final screen, the agent's effect on the debate, and a nod to prior art |
+
+- **Motions:** the judge chooses from 5 tested Motions that are fun but rich in facts.
+- **Evidence indexes:** these are built in advance for every listed Motion, and we say so on stage. Pre-research progress is shown for a few seconds at most, and isn't presented as happening live.
+- **Debaters:** two teammates debate while the third presents. Judges debate instead only if a stand-in from outside the team passes a rehearsal test by 11:00 on Sunday: the debate starts within 15 seconds and yields at least two verdicts.
+- **Fact cards:** debaters prepare facts for each side of each Motion, including some deliberately wrong ones. Judges are told this upfront.
+- **Dry spells:** after 25 seconds without an Interjection, the Moderator uses a canned line at the next Pause, such as "Neither side has offered a figure yet. Care to name one?"
+- **Fallbacks:** live mics are the default. Switch to the recorded debate replayed through the real pipeline if there's no transcript within 15 seconds, or no verdict by 40 seconds into the debate. The presenter says it's a replay. The backup video is only for when the pipeline is down.
+- **Open:** team phones on a team hotspot, with venue wifi as the backup, are assumed but not confirmed.
+
+**PMQs is dropped**, along with the Full Fact comparison, which leaves the eval set as the accuracy story. See [Do we commit to the PMQs segment?](https://github.com/JollyPerson/whack-2026/issues/10).
 
 ## If we fall behind
 
@@ -176,6 +189,8 @@ Cut in this order:
 2. Prompts to a side about unanswered points
 3. Scoreboard
 4. Argument map, reduced to a plain per-side list
+
+The Moderator's canned dry-spell line is exempt from item 2.
 
 **Never cut:** the per-speaker phone page, verdicts with verified quotes, the latency meter and spoken Interjections.
 
@@ -199,20 +214,23 @@ Earlier desk research is available as a starting point, but it's untested and no
 
 ## Repo layout
 
-One folder per role, so people rarely edit the same files. Modules talk only through the types in `core/schemas.py`, never by importing each other.
+One folder per role under `app/`, so people rarely edit the same files. Modules talk only through the events in `app/schemas.py`, never by importing each other. `README.md` has the run commands and the full layout.
 
 ```
-core/        shared contracts (schemas.py) and event bus. Owner: Brain
-ears/        audio, speech-to-text, pauses, replay mock, phone mic page. Owner: Thomas
-brain/       claims, argument map, Director. Owner: Tong
-evidence/    pre-research, retrieval, verdicts. Owner: open
-face/        dashboard, Moderator voice, demo. Owner: open
-fixtures/    the shared recorded test debate and transcript
-evals/       20-claim labelled set and scoring script
-docs/        overview, research, agent docs
+app/schemas.py  shared contracts. Owner: Brain
+app/bus.py      event bus, JSONL log and replay. Owner: Brain
+app/brain/      claims, argument map, Director. Owner: Tong
+app/ears/       audio, speech-to-text, pauses, phone mic page. Owner: Thomas
+app/evidence/   pre-research, retrieval, verdicts. Owner: Harkaran
+app/face/       dashboard, Moderator voice. Owner: Thomas
+app/mocks/      stand-ins for each role
+ears/           Thomas's uv package, until it moves into app/ears/
+fixtures/       the shared recorded test debate and transcript
+eval/           extraction eval, plus the 20-claim labelled set and scoring script
+docs/           overview, contracts, integration, research, agent docs
 ```
 
-Each role folder is its own project and can pick its own tooling. `ears/` is already a `uv` package, so match that unless you have a reason not to.
+Each role lists its dependencies in `requirements/<role>.txt`.
 
 ## Where things live
 
