@@ -11,6 +11,7 @@ Built for **WHACK** (student hackathon, London), incident.io track. **Judging is
 - Treat this file as the project's source of context. Use the terms in [Vocabulary](#vocabulary) exactly.
 - Don't reopen anything under [Settled decisions](#settled-decisions) unless your human asks you to.
 - Don't assume an **Open** item is decided. Check the map, then ask your human.
+- Treat techniques, numbers and provider notes as starting ideas. Each role owner researches and decides for their role.
 - Don't change the [contracts](#shared-contracts) by yourself. Other people's modules depend on them, so raise changes with the integration lead.
 - Build for one real feed first. Don't build a general framework.
 - Don't add Claude attribution or co-author lines to commits.
@@ -57,16 +58,20 @@ Mic(s), in person or online
   → outputs: live dashboard (main) + occasional spoken Interjections at pauses
 ```
 
-**Key techniques**
+**Starting ideas**
 
-- **One channel per speaker:** avoid separating voices from a single mixed mic. Each speaker's phone opens a web page that streams its mic. Online, use per-participant tracks (for example LiveKit). Streaming diarization is the fallback.
-- **Final text only:** only final speech-to-text segments go downstream. Interim text is only shown in the UI. Prime the speech-to-text with numbers and topic vocabulary.
-- **Pre-research is the speed trick:** given the motion, the agent spends about 60–90 s searching (about 20 queries), fetching, chunking and embedding into a vector index. Lookups during the debate then take about 50 ms. Web search is the 1–3 s fallback.
+These came from early planning and haven't been tested. Role owners can replace any of them, and better ideas are welcome.
+
+- **One channel per speaker:** avoid separating voices from a single mixed mic, for example by having each speaker's phone stream its mic from a web page.
+- **Final text only:** only final speech-to-text segments go downstream. Interim text is only shown in the UI.
+- **Pre-research:** build an evidence index for the motion before the debate, so lookups during it are fast. Web search is the slower fallback.
 - **Anti-hallucination guard:** a verdict must quote its evidence. Code checks that the quote really exists in the retrieved source, and drops the verdict if it doesn't. Numeric claims are compared in code, not by the LLM.
-- **Director policy:** speak only after a Pause, only for high-confidence and important points, and about once per 30 s at most. It can also prompt a side about a point it hasn't answered.
+- **Director policy:** speak only after a Pause, only for high-confidence and important points, and not too often. It can also prompt a side about a point it hasn't answered.
 - **Stale checks:** run checks in parallel and drop any that are out of date.
 
 **Latency budget**
+
+These are targets, and nothing has been measured yet.
 
 | Step | Target |
 |---|---|
@@ -98,12 +103,20 @@ Interjection {id, text, priority, claim_id}
 
 ## Team and roles
 
-We are 3 people (GitHub: `JollyPerson`, `dabestthebest`, `dy-dt`). Ears, Brain and Evidence are separate roles with one person each. Face has no owner yet, and someone picks it up later.
+We are 3 people (GitHub: `JollyPerson`, `dabestthebest`, `dy-dt`).
 
-**Open:** who takes which role, and who picks up Face and when. See [Who owns each role and the unowned Face work?](https://github.com/JollyPerson/whack-2026/issues/2). Evidence should go to the strongest, most careful person.
+| Role | Owner | Ticket |
+|---|---|---|
+| Ears | Thomas (`dy-dt`) | [Ears](https://github.com/JollyPerson/whack-2026/issues/11) |
+| Brain and integration lead | Tong (`dabestthebest`) | [Brain](https://github.com/JollyPerson/whack-2026/issues/12) |
+| Evidence | **Open** | [Who owns Evidence and the Face work?](https://github.com/JollyPerson/whack-2026/issues/2) |
+| Face | **Open** | [Who owns Evidence and the Face work?](https://github.com/JollyPerson/whack-2026/issues/2) |
+
+Each owner researches their area, chooses their approach and providers, and shares what they chose and why on their ticket. Evidence should go to the strongest, most careful person.
 
 ### Ears
 
+- **Owner:** Thomas.
 - **Owns:** audio capture, per-speaker channels (the phone web page), streaming speech-to-text, pause detection, and a mock replayer for a recorded transcript.
 - **Skills:** audio, websockets, streaming APIs.
 - **In → out:** mics → `Utterance`, `Pause`.
@@ -111,12 +124,13 @@ We are 3 people (GitHub: `JollyPerson`, `dabestthebest`, `dy-dt`). Ears, Brain a
 
 ### Brain (and integration lead)
 
+- **Owner:** Tong.
 - **Owns:** claim extraction, argument map state (unanswered points, non-responsive rebuttals), the Director, `schemas.py`, and the event bus.
 - **Skills:** prompting, LLM APIs, state machines.
 - **In → out:** `Utterance`, `Pause`, `Verdict` → `Claim`, `Interjection`.
 - **Done when:** extraction takes under 500 ms per sentence, the map makes sense, and Interjections are well timed rather than spammy.
 
-### Evidence
+### Evidence (no owner yet)
 
 - **Owns:** the pre-research job, vector index, web fallback, fact-check cache, verdicts with quote verification and numeric checks, and a **20-claim labelled eval set**.
 - **Skills:** search APIs, embeddings, careful LLM evaluation.
@@ -167,7 +181,9 @@ Cut in this order:
 
 ## Providers
 
-**Open.** The team has credits, so we are comparing on latency and quality rather than cost. Research results and the final choice are tracked in [Which providers do we use?](https://github.com/JollyPerson/whack-2026/issues/9). This covers the LLM, speech-to-text, text-to-speech, search and embeddings. Findings so far are recommendations, not commitments, and nothing has been latency-tested yet.
+There's no central pick. Each role owner chooses their own providers, comparing on latency and quality rather than cost because the team has credits.
+
+Earlier desk research is available as a starting point, but it's untested and not binding, so try forming your own view first: [speech-to-text](https://github.com/JollyPerson/whack-2026/issues/4), [LLM](https://github.com/JollyPerson/whack-2026/issues/7), [search and embeddings](https://github.com/JollyPerson/whack-2026/issues/6), and [text-to-speech](https://github.com/JollyPerson/whack-2026/issues/5).
 
 ## Vocabulary
 
@@ -181,9 +197,26 @@ Cut in this order:
 - **Moderator:** the agent's on-air persona: the voice and dry referee tone. Avoid "narrator" or "commentator".
 - **Interjection:** a single thing the Director has decided the Moderator should say.
 
+## Repo layout
+
+One folder per role, so people rarely edit the same files. Modules talk only through the types in `core/schemas.py`, never by importing each other.
+
+```
+core/        shared contracts (schemas.py) and event bus. Owner: Brain
+ears/        audio, speech-to-text, pauses, replay mock, phone mic page. Owner: Thomas
+brain/       claims, argument map, Director. Owner: Tong
+evidence/    pre-research, retrieval, verdicts. Owner: open
+face/        dashboard, Moderator voice, demo. Owner: open
+fixtures/    the shared recorded test debate and transcript
+evals/       20-claim labelled set and scoring script
+docs/        overview, research, agent docs
+```
+
+Each role folder is its own project and can pick its own tooling. `ears/` is already a `uv` package, so match that unless you have a reason not to.
+
 ## Where things live
 
-- **Planning map:** [Map: Live Debate Fact-Checker team plan](https://github.com/JollyPerson/whack-2026/issues/1). Decisions and open questions are listed here, and the original handoff is its first comment.
+- **Planning map:** [Map: Live Debate Fact-Checker team plan](https://github.com/JollyPerson/whack-2026/issues/1). Decisions and open questions are listed here, and the original handoff is its first comment. The handoff is more prescriptive than this overview, and this overview wins where they differ.
 - **Issue tracker conventions:** `docs/agents/issue-tracker.md`
 - **Domain docs rules:** `docs/agents/domain.md`
 - **Glossary:** `GLOSSARY.md`
