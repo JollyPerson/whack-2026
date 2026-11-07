@@ -25,8 +25,12 @@ Embeddings are optional. `fastembed` isn't in the requirements because it doesn'
 
 ## Build the demo indexes in advance
 
+The demo Motions are in `motions.json`. The four marked `eval` go in the eval set, and the `holdout` one is the unseen check.
+
 ```bash
-.venv/bin/python -m app.evidence.preresearch "First Motion" "Second Motion"
+.venv/bin/python -m app.evidence.preresearch --all --missing
 ```
 
-Indexes are saved in `cache/evidence/`, which is gitignored, so build them on the demo laptop. Run `./run.sh dev-c` to develop with mock speech and claims.
+Indexes are saved in `cache/evidence/`, which is gitignored, so build them wherever the server runs and keep that folder between deploys. `--missing` skips Motions already built, so it's safe to run on every deploy, and the eval's indexes don't change underneath it. To rebuild a Motion, delete its files first. Set `EVIDENCE_INDEX_DIR` to use another folder.
+
+Run `./run.sh dev-c` to develop with mock speech and claims.

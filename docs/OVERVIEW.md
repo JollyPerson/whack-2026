@@ -172,7 +172,7 @@ The slot is **3 minutes**. This plan assumes setup and Q&A aren't included, whic
 | 0:20–2:15 | The debate, with claims, verdicts and at least one spoken Interjection |
 | 2:15–3:00 | The final screen, the agent's effect on the debate, and a nod to prior art |
 
-- **Motions:** the judge chooses from 5 tested Motions that are fun but rich in facts.
+- **Motions:** the judge chooses from 5 tested Motions that are fun but rich in facts, listed in `app/evidence/motions.json`.
 - **Evidence indexes:** these are built in advance for every listed Motion, and we say so on stage. Pre-research progress is shown for a few seconds at most, and isn't presented as happening live.
 - **Debaters:** two teammates debate while the third presents. Judges debate instead only if a stand-in from outside the team passes a rehearsal test by 11:00 on Sunday: the debate starts within 15 seconds and yields at least two verdicts.
 - **Fact cards:** debaters prepare facts for each side of each Motion, including some deliberately wrong ones. Judges are told this upfront.

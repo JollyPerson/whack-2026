@@ -1,12 +1,13 @@
 """Build the evidence index for a Motion. Owner: C.
 
-Demo Motions are built in advance:  python -m app.evidence.preresearch "This house would ban cars from city centres"
+Demo Motions are built in advance:  python -m app.evidence.preresearch --all --missing
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ from app.evidence.index import EvidenceIndex, build_vectors, chunk_text, make_em
 log = logging.getLogger("evidence.preresearch")
 
 INDEX_DIR = Path(os.environ.get("EVIDENCE_INDEX_DIR", "cache/evidence"))
+MOTIONS_FILE = Path(__file__).with_name("motions.json")
 MAX_CHUNKS = 2000       # about the most a local model can embed in the time; see the search research
 QUERY_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["queries"],
                 "properties": {"queries": {"type": "array", "items": {"type": "string"}}}}
@@ -26,6 +28,10 @@ QUERY_SYSTEM = ("You plan web research for a neutral UK debate fact-checker. Giv
                 "for the checkable facts each side is likely to cite: official statistics, government and regulator "
                 "reports, academic evidence, and notable case studies. Cover both sides equally. Prefer UK sources, "
                 "and add international evidence where the topic needs it. Return JSON only.")
+
+
+def demo_motions() -> list[str]:
+    return [m["text"] for m in json.loads(MOTIONS_FILE.read_text())["motions"]]
 
 
 def index_path(motion: str, root: Optional[Path] = None) -> Path:
@@ -104,8 +110,16 @@ def main() -> int:
     from app.evidence.search import make_search
 
     ap = argparse.ArgumentParser(description="Build and save the evidence index for each Motion")
-    ap.add_argument("motions", nargs="+")
+    ap.add_argument("motions", nargs="*")
+    ap.add_argument("--all", action="store_true", help="every Motion in motions.json")
+    ap.add_argument("--missing", action="store_true", help="skip Motions that already have a saved index")
     args = ap.parse_args()
+    motions = args.motions + (demo_motions() if args.all else [])
+    if args.missing:
+        motions = [m for m in motions if not index_path(m).with_suffix(".json").exists()]
+    if not motions:
+        print("Nothing to build.")
+        return 0
     searcher = make_search()
     if searcher is None:
         raise SystemExit("EXA_API_KEY isn't set")
@@ -115,7 +129,7 @@ def main() -> int:
         print(f"  {stage} {done}/{total} {detail[:70]}", flush=True)
 
     async def go() -> None:
-        for motion in args.motions:
+        for motion in motions:
             print(motion, flush=True)
             index = await build_index(motion, searcher, llm, embedder, show, deadline_s=float(os.environ.get("PRERESEARCH_DEADLINE_S", 240)))
             path = index_path(motion)

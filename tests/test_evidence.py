@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
 
 from app.bus import Bus
 from app.evidence import preresearch
+from app.evidence import run as run_module
 from app.evidence.checks import CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in, quote_in_source
 from app.evidence.index import EvidenceIndex, chunk_text
 from app.evidence.run import Checker, EvidenceModule
@@ -323,3 +325,28 @@ async def test_run_loop_only_checks_checkable_claims():
 
 def test_normalise_only_forgives_typography():
     assert normalise("A–B  “C”") == 'a-b "c"'
+
+
+def test_demo_motions_are_five_and_have_distinct_indexes():
+    motions = preresearch.demo_motions()
+    assert len(motions) == 5 and len({preresearch.index_path(m) for m in motions}) == 5
+
+
+def test_motions_file_has_four_eval_and_one_holdout():
+    data = json.loads(preresearch.MOTIONS_FILE.read_text())["motions"]
+    assert sorted(m["use"] for m in data) == ["eval"] * 4 + ["holdout"]
+
+
+async def test_slow_query_embedding_falls_back_to_bm25(monkeypatch):
+    monkeypatch.setattr(run_module, "QUERY_EMBED_TIMEOUT_S", .01)
+
+    class Slow:
+        name = "slow"
+
+        def embed(self, texts):
+            time.sleep(.2)
+            return [[1.0, 0.0, 0.0]]
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"))
+    found = await Checker(None, embedder=Slow(), index=index).retrieve("bus use in London")
+    assert found[0].url.endswith("/0")

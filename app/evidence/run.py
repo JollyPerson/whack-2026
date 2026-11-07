@@ -26,6 +26,7 @@ log = logging.getLogger("evidence")
 TOP_K = 5
 INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 3.0))
 WEB_SEARCH_TIMEOUT_S = float(os.environ.get("EVIDENCE_WEB_TIMEOUT_S", 3.0))
+QUERY_EMBED_TIMEOUT_S = float(os.environ.get("EVIDENCE_EMBED_TIMEOUT_S", 1.0))   # then BM25 alone
 CONCURRENCY = int(os.environ.get("EVIDENCE_CONCURRENCY", 6))
 
 
@@ -49,7 +50,7 @@ class Checker:
         vector = None
         if self.embedder is not None and self.index.vectors is not None:
             try:
-                vector = (await asyncio.to_thread(self.embedder.embed, [claim]))[0]
+                vector = (await asyncio.wait_for(asyncio.to_thread(self.embedder.embed, [claim]), QUERY_EMBED_TIMEOUT_S))[0]
             except Exception as e:
                 log.warning("query embedding failed, using BM25: %r", e)
         return [Source(c["url"], c["title"], c["text"]) for c in self.index.search(claim, TOP_K, vector)]
