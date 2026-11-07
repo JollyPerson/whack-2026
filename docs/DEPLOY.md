@@ -1,0 +1,77 @@
+# Deploying to Vultr
+
+Every push to `master` is tested, built and deployed to one Vultr server. Pull requests get the tests and the
+image build, and never deploy. The pipeline is [`.github/workflows/ci-cd.yml`](../.github/workflows/ci-cd.yml).
+
+```
+push to master -> test -> build + smoke test -> push to ghcr.io -> deploy over SSH -> check the public URL
+```
+
+The server runs two containers from [`deploy/compose.yml`](../deploy/compose.yml): the app, and Caddy in front of
+it for HTTPS and the site password. Only Caddy is public. Browsers block the microphone without HTTPS, so `live`
+needs it. The app has no auth of its own and `/publish` and `/control` can steer a debate, so everything except
+`/health` needs the password. `/health` stays open for the pipeline, and shows module choices and the log filename.
+
+## First-time setup
+
+```bash
+./scripts/setup-vultr.sh
+```
+
+It walks you through creating the server, sets it up, and fills in the GitHub settings below. Re-run it to change
+any answer. Re-running also replaces the deploy key. Your non-secret answers are kept in `.env.vultr` (gitignored).
+
+| GitHub setting | Kind | What it is |
+|---|---|---|
+| `VULTR_SSH_KEY` | secret | Private key for the server's `deploy` user |
+| `VULTR_KNOWN_HOSTS` | secret | The server's SSH identity, so the pipeline can't be pointed at another machine |
+| `VULTR_HOST` | variable | Server IP |
+| `VULTR_DOMAIN` | variable | Public hostname |
+| `DEPLOY_ENABLED` | variable | Must be `true` for anything to deploy |
+
+Until `DEPLOY_ENABLED` is `true`, the deploy job is skipped and the rest of the pipeline still runs.
+
+The `deploy` user can run Docker, which is equivalent to root on this server, so keep the server dedicated to this app.
+
+## Day to day
+
+**Freeze before a demo.** A deploy restarts the app, and a restart drops the running debate. Merges stop deploying
+until you set this back to `true`:
+
+```bash
+gh variable set DEPLOY_ENABLED --body false
+```
+
+**Roll back** to any of the last ten images. The tag is the commit SHA. A deploy that fails its health check goes
+back to the previous image by itself, so this is for a release that is healthy but wrong.
+
+```bash
+gh workflow run ci-cd.yml --ref master -f image_tag=<commit-sha>
+```
+
+**Redeploy the current commit**, for example after changing settings on the server:
+
+```bash
+gh workflow run ci-cd.yml --ref master
+```
+
+**Change API keys or role overrides.** On the server they live in `/opt/debate-ref/app.env` (`EARS=`, `TAVILY_API_KEY=`, ...),
+and the profile is `APP_PROFILE` in `/opt/debate-ref/.env`. Edit the file, then redeploy. Keys never go through GitHub.
+
+**Look at the server.** Run these from `/opt/debate-ref` as `deploy`. Event logs are in the `logs` volume, and
+`deploys.log` lists past deploys.
+
+```bash
+docker compose --env-file .env --env-file image.env logs -f app
+```
+
+## Good to know
+
+- The default profile is `mock`. `drive` and `live` show red dots until `app/ears`, `app/evidence` and `app/face`
+  have a `run.py` or `routes.py`.
+- The default address `<ip>.sslip.io` is a free shared DNS service. Let's Encrypt limits certificates per domain, so it
+  can occasionally refuse one. Use your own domain for anything that matters.
+- External role processes (`EVIDENCE=external`) must send the site password when they connect to `/ws` or `/publish`.
+  So must any browser page: Safari may not send the saved password on a WebSocket, so test the demo browser first.
+- The pipeline tests on Python 3.12, and the image uses the same version. Requirements aren't pinned, so a rebuild can pick
+  up newer packages.

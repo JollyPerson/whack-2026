@@ -1,0 +1,14 @@
+{$DOMAIN} {
+	# Open so the pipeline can check the public URL without holding the password.
+	handle /health {
+		reverse_proxy app:8000
+	}
+
+	# The app has no auth of its own: /publish and /control can steer a live debate and spend API credit.
+	handle {
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		reverse_proxy app:8000
+	}
+}
