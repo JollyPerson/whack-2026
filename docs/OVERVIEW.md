@@ -4,7 +4,7 @@ An agent that listens to a live debate, checks claims as they are spoken, and st
 
 Built for **WHACK** (student hackathon, London), incident.io track. **Judging is about midday on Sunday 8 November 2026.**
 
-**Status:** planning. No product code is on GitHub yet. Items marked **Open** aren't decided, so check the [planning map](https://github.com/JollyPerson/whack-2026/issues/1) for the latest.
+**Status:** building. Brain, the bus and the mocks are in the repo; nothing has run end to end yet. Items marked **Open** aren't decided, so check the [planning map](https://github.com/JollyPerson/whack-2026/issues/1) for the latest.
 
 ## If you are an AI agent
 
@@ -83,16 +83,7 @@ These are targets, and nothing has been measured yet.
 
 ## Shared contracts
 
-This is a **draft and isn't frozen**. Freezing it is tracked in [Are the shared contracts complete enough to freeze?](https://github.com/JollyPerson/whack-2026/issues/3). The integration lead will own the final version in `schemas.py`.
-
-```
-Utterance    {id, speaker, text, t_start, t_end, final}
-Pause        {speaker, t}
-Claim        {id, utterance_id, speaker, text, type, checkable, links[{claim_id, supports|attacks}]}
-Verdict      {claim_id, label, confidence, evidence[{url, title, quote}], explanation, latency_ms}
-SourceCard   {claim_id, url, title, snippet}
-Interjection {id, text, priority, claim_id}
-```
+**Frozen for now at v1.0.** The source of truth is `app/schemas.py`, explained in `docs/CONTRACTS.md`. Existing field names don't change. New fields are added as optional, and extra fields and new event types pass through the bus, so tell the integration lead if one should become official.
 
 **Runtime design**
 
@@ -223,20 +214,23 @@ Earlier desk research is available as a starting point, but it's untested and no
 
 ## Repo layout
 
-One folder per role, so people rarely edit the same files. Modules talk only through the types in `core/schemas.py`, never by importing each other.
+One folder per role under `app/`, so people rarely edit the same files. Modules talk only through the events in `app/schemas.py`, never by importing each other. `README.md` has the run commands and the full layout.
 
 ```
-core/        shared contracts (schemas.py) and event bus. Owner: Brain
-ears/        audio, speech-to-text, pauses, replay mock, phone mic page. Owner: Thomas
-brain/       claims, argument map, Director. Owner: Tong
-evidence/    pre-research, retrieval, verdicts. Owner: Harkaran
-face/        dashboard, Moderator voice, backup video. Owner: Thomas
-fixtures/    the shared recorded test debate and transcript
-evals/       20-claim labelled set and scoring script
-docs/        overview, research, agent docs
+app/schemas.py  shared contracts. Owner: Brain
+app/bus.py      event bus, JSONL log and replay. Owner: Brain
+app/brain/      claims, argument map, Director. Owner: Tong
+app/ears/       audio, speech-to-text, pauses, phone mic page. Owner: Thomas
+app/evidence/   pre-research, retrieval, verdicts. Owner: Harkaran
+app/face/       dashboard, Moderator voice. Owner: Thomas
+app/mocks/      stand-ins for each role
+ears/           Thomas's uv package, until it moves into app/ears/
+fixtures/       the shared recorded test debate and transcript
+eval/           extraction eval, plus the 20-claim labelled set and scoring script
+docs/           overview, contracts, integration, research, agent docs
 ```
 
-Each role folder is its own project and can pick its own tooling. `ears/` is already a `uv` package, so match that unless you have a reason not to.
+Each role lists its dependencies in `requirements/<role>.txt`.
 
 ## Where things live
 

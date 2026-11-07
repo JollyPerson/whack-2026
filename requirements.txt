@@ -1,0 +1,7 @@
+# Each role owns its own file -> no merge conflicts here.
+-r requirements/base.txt
+-r requirements/brain.txt
+-r requirements/ears.txt
+-r requirements/evidence.txt
+-r requirements/face.txt
+-r requirements/dev.txt
