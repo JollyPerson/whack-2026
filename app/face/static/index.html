@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Debate Referee</title>
+<!-- URL params: ?audio=1 the ONE tab that speaks and sends TTSState · ?admin=1 operator controls
+     ?ws=ws://host:8000/ws connect elsewhere. Protocol reference: app/tools/ws_debug.html -->
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="title">
+    <p class="eyebrow">Debate Referee <span id="conn" class="dot" title="websocket"></span> <span id="mode"></span></p>
+    <h1 id="motion">Waiting for a motion</h1>
+    <div id="referee" class="referee"></div>
+    <div id="research" hidden><span id="research-text"></span><div class="bar"><div id="research-bar"></div></div></div>
+  </div>
+  <div id="meter" class="meter" aria-label="Latency"></div>
+</header>
+
+<main id="live">
+  <section class="panel">
+    <h2>Transcript</h2>
+    <div id="transcript" class="scroll"></div>
+  </section>
+  <section class="panel">
+    <h2>Fact checks</h2>
+    <div id="tally" class="tally"></div>
+    <div id="feed" class="scroll"></div>
+  </section>
+</main>
+
+<main id="final" hidden>
+  <p id="call" class="call"></p>
+  <div id="effect" class="effect"></div>
+  <div class="sides">
+    <section id="final-prop" class="panel side prop"></section>
+    <section id="final-opp" class="panel side opp"></section>
+    <section id="final-referee" class="panel side said-list"></section>
+  </div>
+</main>
+
+<aside id="banner" hidden aria-live="polite"></aside>
+
+<footer>
+  <span id="audio"></span>
+  <span id="modules" class="modules"></span>
+</footer>
+
+<div id="admin" class="admin" hidden></div>
+
+<div id="picker" class="picker" hidden>
+  <form id="session">
+    <h2>Choose a motion</h2>
+    <div id="motions" class="motions"></div>
+    <label>Or type one <input id="motion-input" placeholder="This house would…" autocomplete="off"></label>
+    <div class="names">
+      <label>Proposition (channel A) <input id="name-a" value="Speaker A" autocomplete="off"></label>
+      <label>Opposition (channel B) <input id="name-b" value="Speaker B" autocomplete="off"></label>
+    </div>
+    <div class="row">
+      <button type="submit" class="primary">Start debate</button>
+      <button type="button" id="picker-replay">Replay recorded debate</button>
+      <button type="button" id="picker-close">Close</button>
+    </div>
+  </form>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
