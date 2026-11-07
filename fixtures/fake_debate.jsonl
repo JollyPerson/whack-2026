@@ -1,0 +1,19 @@
+{"event": "SessionStart", "motion": "This house would ban cars from city centres", "speakers": {"A": {"name": "Priya", "side": "prop"}, "B": {"name": "Tom", "side": "opp"}}, "mode": "drive", "ts": 0.0}
+{"event": "Utterance", "id": "u-A-0001", "speaker": "A", "text": "Thank you. Air pollution causes around 40,000 early deaths a year in the UK, and road traffic is the biggest single source in our cities.", "t_start": 0.5, "t_end": 10.12, "final": true, "ts": 10.92}
+{"event": "Utterance", "id": "u-A-0002", "speaker": "A", "text": "When Ghent restricted cars in its centre in 2017, footfall actually went up, according to the council's own report.", "t_start": 10.47, "t_end": 17.78, "final": true, "ts": 18.58}
+{"event": "Pause", "speaker": "A", "t": 18.73, "ts": 18.73}
+{"event": "Utterance", "id": "u-B-0001", "speaker": "B", "text": "That 40,000 figure is a modelled estimate from 2016, not a count of actual deaths.", "t_start": 19.73, "t_end": 25.5, "final": true, "ts": 26.3}
+{"event": "Utterance", "id": "u-B-0002", "speaker": "B", "text": "And banning cars would devastate the small businesses that rely on deliveries and passing trade.", "t_start": 25.85, "t_end": 31.62, "final": true, "ts": 32.42}
+{"event": "Utterance", "id": "u-B-0003", "speaker": "B", "text": "Nearly 70 percent of shoppers on our high streets arrive by car.", "t_start": 31.97, "t_end": 36.59, "final": true, "ts": 37.39}
+{"event": "Pause", "speaker": "B", "t": 37.54, "ts": 37.54}
+{"event": "Utterance", "id": "u-A-0003", "speaker": "A", "text": "Small businesses would actually benefit, because pedestrians spend more per month in local shops than drivers do.", "t_start": 38.54, "t_end": 45.08, "final": true, "ts": 45.88}
+{"event": "Utterance", "id": "u-A-0004", "speaker": "A", "text": "London's ultra low emission zone cut roadside nitrogen dioxide by nearly half in central London.", "t_start": 45.43, "t_end": 51.2, "final": true, "ts": 52.0}
+{"event": "Pause", "speaker": "A", "t": 52.15, "ts": 52.15}
+{"event": "Utterance", "id": "u-B-0004", "speaker": "B", "text": "Honestly, I just think people should be free to choose how they travel.", "t_start": 53.15, "t_end": 58.15, "final": true, "ts": 58.95}
+{"event": "Utterance", "id": "u-B-0005", "speaker": "B", "text": "Public transport in most UK cities is simply too unreliable to replace the car.", "t_start": 58.5, "t_end": 63.88, "final": true, "ts": 64.68}
+{"event": "Pause", "speaker": "B", "t": 64.83, "ts": 64.83}
+{"event": "Utterance", "id": "u-A-0005", "speaker": "A", "text": "The government's own figures show bus use outside London has fallen by a third since 2010.", "t_start": 65.83, "t_end": 71.98, "final": true, "ts": 72.78}
+{"event": "Utterance", "id": "u-A-0006", "speaker": "A", "text": "So the answer is to invest in buses, not to keep clogging our centres with cars.", "t_start": 72.33, "t_end": 78.48, "final": true, "ts": 79.28}
+{"event": "Pause", "speaker": "A", "t": 79.43, "ts": 79.43}
+{"event": "Utterance", "id": "u-B-0006", "speaker": "B", "text": "Can I just finish my point? Electric cars will make the whole pollution argument irrelevant within ten years.", "t_start": 80.43, "t_end": 87.35, "final": true, "ts": 88.15}
+{"event": "Pause", "speaker": "B", "t": 88.3, "ts": 88.3}

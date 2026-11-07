@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>debate-ref debug</title>
+<!-- Reference client for GET /ws (design §4): the protocol's executable spec. Owner: B.
+     D: copy reset()/apply()/connect()/speak(); the rest is debug UI. No build step, no CDN.
+     URL params: ?audio=1  the ONE tab that speaks interjections and sends TTSState (projector laptop)
+                 ?admin=1  operator keys: M mute toggle, Esc mute, F force next, 1-5 aggressiveness,
+                           W web fallback toggle, I interims toggle
+                 ?ws=ws://host:8000/ws  connect elsewhere (e.g. when this file is opened from disk) -->
+<style>
+:root{--bg:#fafafa;--fg:#151515;--mute:#777;--line:#ddd;--panel:#fff;--prop:#1c64d6;--opp:#c2410c;
+  --ok:#2b8a3e;--bad:#c92a2a;--warn:#d97706;--unk:#868e96;--pend:#7048e8}
+@media (prefers-color-scheme:dark){:root{--bg:#101010;--fg:#e8e8e8;--mute:#8a8a8a;--line:#2c2c2c;--panel:#181818;
+  --prop:#5b9bff;--opp:#ff8a4c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line)}
+header .motion{font-weight:600;flex:1 1 260px}
+main{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1.4fr) minmax(0,1.2fr);gap:10px;padding:10px 16px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px;overflow:auto;max-height:46vh}
+section.wide{grid-column:1/-1;max-height:30vh}
+h3{margin:2px 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute)}
+@media (max-width:900px){main{grid-template-columns:1fr}section{max-height:none}}
+.mute{color:var(--mute)} .prop{--side:var(--prop)} .opp{--side:var(--opp)}
+.u,.claim{border-left:3px solid var(--side,var(--unk));padding:1px 0 1px 7px;margin:3px 0}
+.u b,.claim .who{color:var(--side,var(--unk))} .u.interim{color:var(--mute);font-style:italic}
+.chip{display:inline-block;border-radius:9px;padding:0 7px;font-size:11px;color:#fff;background:var(--unk);white-space:nowrap}
+.chip.ok{background:var(--ok)} .chip.bad{background:var(--bad)} .chip.warn{background:var(--warn)} .chip.pend{background:var(--pend)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--unk);margin:0 3px 0 8px}
+.dot.up,.dot.open{background:var(--ok)} .dot.degraded,.dot.connecting{background:var(--warn)} .dot.down,.dot.closed{background:var(--bad)}
+.side{margin-bottom:8px} .side ul{margin:3px 0;padding-left:16px} .call{font-weight:600;margin-top:6px}
+.st{font-size:11px;color:var(--mute)} .st.unanswered,.st.conceded{color:var(--bad);font-weight:600}
+.dec.fired{font-weight:600;color:var(--ok)} .dec.dropped,.dec.skipped{color:var(--mute)}
+.caption{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 0;font-size:15px}
+#raw{font:11px/1.35 ui-monospace,Menlo,monospace;margin:0;white-space:pre-wrap;word-break:break-all}
+form .spk{display:flex;gap:4px;margin:3px 0} input,select,button{font:inherit} #m{width:100%}
+kbd{border:1px solid var(--line);border-radius:3px;padding:0 4px;font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <span>debate-ref<span id="conn" class="dot" title="websocket"></span></span>
+  <span class="motion" id="motion"></span>
+  <span id="research" class="mute"></span>
+  <span id="lat"></span>
+  <span id="mods"></span>
+  <span id="dstat"></span>
+  <span id="audio"></span>
+</header>
+<main>
+  <section><h3>Transcript</h3><div id="transcript"></div></section>
+  <section><h3>Claims</h3><div id="claims"></div></section>
+  <section><h3>Argument map</h3><div id="map"></div></section>
+  <section><h3>Director</h3><div id="director"></div></section>
+  <section><h3>Session</h3>
+    <form id="session">
+      <input id="m" placeholder="Motion, e.g. This house would ban cars from city centres">
+      <div class="spk"><input value="A" size="5" title="speaker id (channel)"><input placeholder="name"><select><option selected>prop</option><option>opp</option></select></div>
+      <div class="spk"><input value="B" size="5" title="speaker id (channel)"><input placeholder="name"><select><option>prop</option><option selected>opp</option></select></div>
+      <div class="spk"><input placeholder="id" size="5" title="optional 3rd speaker"><input placeholder="name"><select><option>prop</option><option>opp</option></select></div>
+      <button>Start session</button> <span class="mute">sends op session_start (resets every module)</span>
+    </form>
+    <div id="admin"></div>
+  </section>
+  <section><h3>Flags</h3><div id="flags"></div></section>
+  <section class="wide"><h3>Raw events (last 200) <label><input type="checkbox" id="hidehb" checked> hide DirectorStatus + interims</label></h3><pre id="raw"></pre></section>
+</main>
+<script>
+'use strict';
+const Q = new URLSearchParams(location.search);
+const AUDIO = Q.get('audio') === '1', ADMIN = Q.get('admin') === '1';
+const WS_URL = Q.get('ws') || (location.host ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+                                             : 'ws://localhost:8000/ws');
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : null;
+const LABEL = {supported: 'ok', contradicted: 'bad', missing_context: 'warn', unverifiable: 'unk'};
+const RAW_MAX = 200;
+
+// ------------------------------------------------------------------ state + the ONE reducer
+let S = null, MODULES = {}, ws = null, lastSeq = 0, snapSeq = 0, backoff = 500;
+const raw = [];
+function reset() {   // SessionStart wipes debate state; flags + module status are process-wide and survive it
+  S = {session: null, sides: {}, names: {}, utts: new Map(), claims: new Map(), verdicts: new Map(),
+       cards: new Map(), map: null, research: null, decisions: [], dstatus: null, interjections: [], tts: null,
+       flags: S ? S.flags : {}, status: S ? S.status : {}};
+}
+function sideOf(spk) {  // sides come from SessionStart; otherwise 1st speaker seen = prop, 2nd = opp, then alternate
+  if (!(spk in S.sides)) S.sides[spk] = Object.keys(S.sides).length % 2 ? 'opp' : 'prop';
+  return S.sides[spk];
+}
+const nameOf = spk => S.names[spk] || spk;
+
+// Used for BOTH snapshot history (live=false) and live events (live=true), so a refreshed tab rebuilds
+// exactly the same state. Side effects (TTS) only ever happen for live events.
+function apply(e, live) {
+  switch (e.event) {
+    case 'SessionStart':
+      reset(); S.session = e;
+      for (const [id, sp] of Object.entries(e.speakers || {})) { S.sides[id] = sp.side || 'prop'; S.names[id] = sp.name || id; }
+      break;
+    case 'Utterance': sideOf(e.speaker); S.utts.set(e.id, e); break;   // interim -> final share the id: replaced in place
+    case 'Claim': sideOf(e.speaker); S.claims.set(e.id, e); break;     // chip shows "checking…" until its Verdict
+    case 'Verdict': S.verdicts.set(e.claim_id, e); break;
+    case 'SourceCard': {
+      const list = S.cards.get(e.claim_id) || S.cards.set(e.claim_id, []).get(e.claim_id);
+      if (!list.some(c => c.url === e.url)) list.push(e);
+      break;
+    }
+    case 'ArgMapSnapshot': S.map = e; break;                            // full map, not a diff
+    case 'ResearchProgress': S.research = e; break;
+    case 'ModuleStatus': S.status[e.module] = e; break;
+    case 'DirectorDecision': S.decisions.push(e); S.decisions.splice(0, S.decisions.length - 50); break;  // live only (not in history)
+    case 'DirectorStatus': S.dstatus = e; break;
+    case 'TTSState': S.tts = e; break;
+    case 'Control': S.flags[e.flag] = e.value; if (live) onControl(e); break;
+    case 'Interjection':
+      S.interjections.push(e);
+      if (live && e.seq > snapSeq) speak(e);   // NEVER speak history: a refresh mid-debate must stay silent
+      break;
+  }
+}
+
+// ------------------------------------------------------------------ transport
+function connect() {
+  setConn('connecting');
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { backoff = 500; setConn('open'); };
+  ws.onmessage = m => {
+    let e;
+    try { e = JSON.parse(m.data); } catch { return; }
+    if (e.event === 'Snapshot') {             // first message after every (re)connect: rebuild from scratch
+      S = null; reset(); raw.length = 0;
+      for (const h of e.events || []) { apply(h, false); logRaw(h); }
+      S.flags = {...(e.flags || {})}; MODULES = e.modules || {};
+      lastSeq = snapSeq = e.last_seq || 0;
+    } else if (e.seq == null) {               // server reply without seq, e.g. {"event":"Error"} for a bad op
+      logRaw(e); console.warn('server:', e);
+    } else if (e.seq > lastSeq) {              // live event; seq <= lastSeq would be a duplicate
+      lastSeq = e.seq; apply(e, true); logRaw(e);
+    } else return;
+    render();
+  };
+  ws.onclose = () => {                         // also after code 1013 (we were too slow): reconnect + resync
+    setConn('closed');
+    setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 5000);
+  };
+}
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(msg)); return true; }
+  return false;
+}
+const control = (flag, value) => send({op: 'control', flag, value});
+const ttsState = (speaking, id) => send({op: 'publish', src: 'dashboard:audio',
+                                         event: {event: 'TTSState', speaking, interjection_id: id ?? null}});
+
+// ------------------------------------------------------------------ audio master (?audio=1)
+// speechSynthesis stands in for the real TTS. Browsers block speech until the page got a click: hence the button.
+let audioReady = false;
+function speak(e) {
+  if (!AUDIO || !audioReady || S.flags.tts === false || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(e.text);
+  u.onstart = () => ttsState(true, e.id);       // Director won't talk over itself; A gates the mics
+  u.onend = u.onerror = () => ttsState(false, e.id);
+  speechSynthesis.speak(u);
+}
+function onControl(e) {                          // panic: mute / director off / tts off cut the voice at once
+  const cut = (e.flag === 'mute' && e.value) || (['director', 'tts'].includes(e.flag) && e.value === false);
+  if (AUDIO && cut && window.speechSynthesis && (speechSynthesis.speaking || speechSynthesis.pending)) {
+    speechSynthesis.cancel(); ttsState(false);
+  }
+}
+
+// ------------------------------------------------------------------ rendering (rAF-throttled)
+let queued = false;
+function render() { if (!queued) { queued = true; requestAnimationFrame(draw); } }
+function setConn(s) { $('conn').className = `dot ${s}`; $('conn').title = `websocket ${s}: ${WS_URL}`; }
+function logRaw(e) { raw.push(e); if (raw.length > 2 * RAW_MAX) raw.splice(0, raw.length - RAW_MAX); }
+function pct(xs, q) {   // same formula as app/latency.py
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b), k = (s.length - 1) * q, f = Math.floor(k), c = Math.min(f + 1, s.length - 1);
+  return s[f] + (s[c] - s[f]) * (k - f);
+}
+const secs = v => v == null ? '–' : `${v.toFixed(1)} s`;
+
+function latencyHtml() {
+  const e2e = [...S.verdicts.values()].map(v => v.latency_ms ? v.latency_ms / 1000   // fallback = app/latency.py's
+    : ((v.marks || {}).verdict || v.ts) - (v.marks || {}).speech_end).filter(x => x > 0).slice(-20);
+  const chip = [...S.claims.values()].map(c => (c.marks || {}).claim - (c.marks || {}).speech_end)
+                                     .filter(x => x > 0).slice(-20);
+  const replay = S.session && S.session.mode === 'replay' ? ' (recorded)' : '';
+  return `verdict p50 <b>${secs(pct(e2e, .5))}</b> · p90 ${secs(pct(e2e, .9))} <span class="mute">(last ${e2e.length}${replay})</span>`
+       + ` · chip p50 <b>${secs(pct(chip, .5))}</b>`;
+}
+function modulesHtml() {
+  const names = [...new Set([...Object.keys(MODULES), ...Object.keys(S.status)])];
+  return names.map(n => {
+    const st = S.status[n], cls = st ? st.state : '';
+    const tip = st ? `${st.state}: ${st.detail}` : `${MODULES[n] || ''} (no status yet)`;
+    return `<span class="dot ${esc(cls)}" title="${esc(tip)}"></span>${esc(n)}`;
+  }).join('');
+}
+function directorChip() {
+  const d = S.dstatus;
+  if (!d) return '<span class="chip">director: no status</span>';
+  const why = d.muted ? ['bad', 'MUTED'] : d.tts_busy ? ['pend', 'speaking'] : d.cooldown_left_s > 0
+    ? ['warn', `cooldown ${Math.ceil(d.cooldown_left_s)} s`] : d.floor_open ? ['ok', 'floor open'] : ['unk', 'floor closed'];
+  return `<span class="chip ${why[0]}" title="pending: ${esc(JSON.stringify(d.pending || []))}">${why[1]} · aggr ${esc(d.aggr)}</span>`;
+}
+function audioHtml() {
+  const now = S.tts && S.tts.speaking ? ` <span class="chip pend">speaking ${esc(S.tts.interjection_id || '')}</span>` : '';
+  if (!AUDIO) return `<span class="mute" title="open ONE tab with ?audio=1 to hear the moderator">captions only</span>${now}`;
+  return (audioReady ? '<span class="chip ok">audio master</span>' : '<button id="enable">Enable audio</button>') + now;
+}
+function transcriptHtml() {
+  const showInterims = S.flags.interims !== false;
+  return [...S.utts.values()].filter(u => u.final || showInterims).slice(-60).map(u =>
+    `<div class="u ${esc(S.sides[u.speaker])}${u.final ? '' : ' interim'}"><b>${esc(nameOf(u.speaker))}</b> ${esc(u.text)}</div>`
+  ).join('') || '<span class="mute">waiting for speech…</span>';
+}
+function claimHtml(c) {
+  const v = S.verdicts.get(c.id), cards = S.cards.get(c.id) || [];
+  const src = safeUrl((v && v.evidence && v.evidence[0] && v.evidence[0].url) || (cards[0] && cards[0].url));
+  const chip = v ? `<span class="chip ${LABEL[v.label] || 'unk'}" title="${esc(v.explanation)}">${esc(v.label.replace('_', ' '))} ${Math.round(v.confidence * 100)}%</span>`
+    : c.checkable ? '<span class="chip pend">checking…</span>' : `<span class="chip" title="not checkable">${esc(c.type)}</span>`;
+  return `<div class="claim ${esc(S.sides[c.speaker])}">${chip} <span class="who">${esc(nameOf(c.speaker))}</span> ${esc(c.text)}`
+    + (v && v.short_fact ? ` <i class="mute">${esc(v.short_fact)}</i>` : '')
+    + (src ? ` <a href="${esc(src)}" target="_blank" rel="noopener">source${v && v.via ? ` (${esc(v.via)})` : ''}</a>` : '') + '</div>';
+}
+function mapHtml() {
+  const m = S.map;
+  if (!m) return '<span class="mute">no ArgMapSnapshot yet</span>';
+  const sides = [...new Set(['prop', 'opp', ...Object.keys(m.score || {})])];
+  return sides.map(side => {
+    const nodes = (m.nodes || []).filter(n => (n.side || S.sides[n.speaker]) === side), sc = (m.score || {})[side] || {};
+    const counts = {};
+    nodes.forEach(n => counts[n.status] = (counts[n.status] || 0) + 1);
+    return `<div class="side ${esc(side)}"><b style="color:var(--side)">${esc(side)}</b> score ${sc.score != null ? sc.score.toFixed(2) : '–'}`
+      + ` <span class="mute">✓${sc.supported || 0} ✗${sc.contradicted || 0} ~${sc.missing_context || 0} unanswered ${sc.unanswered || 0}`
+      + ` · ${nodes.length} claims: ${Object.entries(counts).map(([k, v]) => `${esc(k)} ${v}`).join(', ')}</span><ul>`
+      + nodes.slice(-8).map(n => `<li><span class="st ${esc(n.status)}">${esc(n.status)}</span> ${esc((n.text || '').slice(0, 100))}`
+        + (n.verdict ? ` <span class="chip ${LABEL[n.verdict] || 'unk'}">${esc(n.verdict)}</span>` : '') + '</li>').join('')
+      + '</ul></div>';
+  }).join('') + (m.nonresponsive || []).map(r =>
+    `<div class="mute">${esc(r.side)} turn ${esc(r.turn)} ignored ${(r.ignored || []).length} point(s)</div>`).join('')
+    + (m.call ? `<div class="call">${esc(m.call)}</div>` : '');
+}
+function directorHtml() {
+  const last = S.interjections[S.interjections.length - 1];
+  const ev = last && last.evidence && last.evidence[0], src = ev && safeUrl(ev.url);
+  const caption = last ? `<div class="caption"><span class="chip pend">${esc(last.kind)}</span> ${last.target ? `→ ${esc(nameOf(last.target))}: ` : ''}`
+    + `${esc(last.text)}${src ? ` <a href="${esc(src)}" target="_blank" rel="noopener">${esc(ev.title || 'source')}</a>` : ''}</div>` : '';
+  const d = S.dstatus, pending = d && d.pending && d.pending.length
+    ? `<div class="mute">pending: ${d.pending.slice(0, 3).map(p => `${esc(p.kind)} ${(+p.score || 0).toFixed(2)}`).join(', ')}</div>` : '';
+  const lines = S.decisions.slice(-8).reverse().map(x => `<div class="dec ${esc(x.action)}">${esc(x.action)} <b>${esc(x.kind)}</b> ${esc(x.key)}`
+    + ` <span class="mute">${esc(x.reason)} ${(+x.score || 0).toFixed(2)}</span>`
+    + (ADMIN && ['candidate', 'held'].includes(x.action) ? ` <button data-veto="${esc(x.key)}">veto</button>` : '') + '</div>').join('');
+  return directorChip() + caption + pending + (lines || '<div class="mute">no decisions since this tab connected</div>');
+}
+function rawText() {
+  const hide = $('hidehb').checked;
+  return raw.filter(e => !hide || (e.event !== 'DirectorStatus' && !(e.event === 'Utterance' && !e.final))).slice(-RAW_MAX).reverse()
+    .map(e => { const {event, seq, src, ts, ...rest} = e; return `${String(seq ?? '-').padStart(5)} ${(src || '').padEnd(14)} ${event} ${JSON.stringify(rest).slice(0, 240)}`; })
+    .join('\n');
+}
+function draw() {
+  queued = false;
+  $('motion').textContent = S.session ? S.session.motion || '(no motion)' : 'no session yet: start one below';
+  const r = S.research;
+  $('research').textContent = r ? `research ${r.stage} ${r.done}/${r.total}` : '';
+  $('lat').innerHTML = latencyHtml();
+  $('mods').innerHTML = modulesHtml();
+  $('dstat').innerHTML = directorChip();
+  $('audio').innerHTML = audioHtml();
+  if ($('enable')) $('enable').onclick = () => { speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); audioReady = true; render(); };
+  $('transcript').innerHTML = transcriptHtml();
+  $('claims').innerHTML = [...S.claims.values()].slice(-40).reverse().map(claimHtml).join('') || '<span class="mute">no claims yet</span>';
+  $('map').innerHTML = mapHtml();
+  $('director').innerHTML = directorHtml();
+  $('flags').innerHTML = Object.entries(S.flags).map(([k, v]) => `${esc(k)}=<b>${esc(JSON.stringify(v))}</b>`).join(' · ');
+  $('raw').textContent = rawText();
+  if (ADMIN) $('admin').innerHTML = adminHtml();
+}
+function adminHtml() {
+  const muted = S.dstatus ? S.dstatus.muted : !!S.flags.mute;
+  return '<p><b>Operator keys</b>: <kbd>M</kbd> mute toggle · <kbd>Esc</kbd> mute · <kbd>F</kbd> force next · '
+    + '<kbd>1</kbd>-<kbd>5</kbd> aggressiveness · <kbd>W</kbd> web fallback · <kbd>I</kbd> interims</p>'
+    + `<button data-ctl="mute" data-val="${!muted}">${muted ? 'unmute' : 'MUTE'}</button> <button data-ctl="force_next" data-val="true">force next</button> `
+    + Object.keys(S.sides).map(spk => `<button data-ctl="time" data-val='${esc(JSON.stringify(spk))}'>time: ${esc(nameOf(spk))}</button>`).join(' ');
+}
+
+// ------------------------------------------------------------------ session form + operator keys
+$('session').onsubmit = ev => {
+  ev.preventDefault();
+  const speakers = {};
+  for (const row of document.querySelectorAll('.spk')) {
+    const [id, name, side] = row.querySelectorAll('input,select');
+    if (id.value.trim()) speakers[id.value.trim()] = {name: name.value.trim() || id.value.trim(), side: side.value};
+  }
+  send({op: 'session_start', motion: $('m').value.trim(), speakers, mode: 'live'});
+};
+$('hidehb').onchange = render;
+if (ADMIN) {
+  document.addEventListener('click', ev => {   // buttons re-render constantly, so delegate
+    const b = ev.target.closest && ev.target.closest('button[data-ctl],button[data-veto]');
+    if (b && b.dataset.veto) control('veto', b.dataset.veto);
+    else if (b) control(b.dataset.ctl, JSON.parse(b.dataset.val));
+  });
+  document.addEventListener('keydown', ev => {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;                  // leave browser shortcuts alone
+    if (ev.target.closest && ev.target.closest('input,select,textarea') && ev.key !== 'Escape') return;
+    const k = ev.key.toLowerCase(), f = S.flags;
+    const muted = S.dstatus ? S.dstatus.muted : !!f.mute;   // the Director's own view wins
+    if (ev.key === 'Escape') control('mute', true);
+    else if (k === 'm') control('mute', !muted);
+    else if (k === 'f') control('force_next', true);
+    else if (/^[1-5]$/.test(k)) control('aggr', +k);
+    else if (k === 'w') control('web_fallback', f.web_fallback === false);
+    else if (k === 'i') control('interims', f.interims === false);
+    else return;
+    ev.preventDefault();
+  });
+}
+reset(); render(); connect();
+</script>
+</body>
+</html>

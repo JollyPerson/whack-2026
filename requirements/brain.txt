@@ -1,0 +1,2 @@
+# B (brain). The anthropic SDK is optional at runtime: without it/without a key, claims fall back to heuristics.
+anthropic>=0.40

@@ -1,0 +1,349 @@
+"""brain/run.py: ingress guards (echo, bleed, late interims), pause synthesis, time rebasing and crash-restore.
+
+Units are tested directly; the wiring runs the real brain on a real Bus with a fake wall clock that only moves
+when a test says so (brain, bus and Director all read time.time()). asyncio sleeps stay real but short.
+Claims/verdicts under test come from a stand-in extractor/evidence (src="ext"), so these tests don't depend
+on claim-extraction details.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+
+import pytest
+
+from app import config
+from app.brain import run as brain_run
+from app.brain.run import BleedGuard, EchoGuard, LateInterims, PauseSynth, _fill_times
+from app.bus import Bus
+from app.schemas import Claim, Control, Evidence, Pause, SessionStart, TTSState, Utterance, Verdict
+
+T0 = 1_762_532_400.0
+EVID = [Evidence(url="https://www.ons.gov.uk/x", title="ONS", quote="q")]
+
+
+def U(spk, text, a, b, final=True, uid=None, ts=None):
+    kw = {"id": uid} if uid else {}
+    return Utterance(speaker=spk, text=text, t_start=a, t_end=b, final=final, ts=b if ts is None else ts, **kw)
+
+
+# ----------------------------------------------------------------------------- units
+def test_fill_times_rebases_unknown_stream_relative_and_other_clock_times():
+    T = T0
+    u = _fill_times(Utterance(speaker="A", text="x", t_start=0.4, t_end=2.8, ts=T))      # Deepgram start/end
+    assert (u.t_start, u.t_end) == pytest.approx((T - 2.4, T))
+    u = _fill_times(Utterance(speaker="A", text="x", t_start=T - 3604, t_end=T - 3600, ts=T))   # a clock an hour off
+    assert (u.t_start, u.t_end) == (T - 4, T)
+    assert _fill_times(Utterance(speaker="A", text="x", ts=T)).model_dump(include={"t_start", "t_end"}) == \
+        {"t_start": T, "t_end": T}
+    u = _fill_times(Utterance(speaker="A", text="x", t_end=T - 1, ts=T))                 # start unknown
+    assert (u.t_start, u.t_end) == (T - 1, T - 1)
+    u = _fill_times(Utterance(speaker="A", text="x", t_start=T - 3, ts=T))               # end unknown
+    assert (u.t_start, u.t_end) == (T - 3, T)
+    good = Utterance(speaker="A", text="x", t_start=T - 4, t_end=T - .2, ts=T)
+    assert _fill_times(good) is good and _fill_times(good, now=T + 1) is good
+    assert _fill_times(Pause(speaker="A", t=3.6, ts=T)).t == T and _fill_times(Pause(speaker="A", ts=T)).t == T
+    assert _fill_times(Claim(id="c", speaker="A", text="x", t_end=2.8, ts=T)).t_end == T
+    assert _fill_times(Claim(id="c", speaker="A", text="x", ts=T)).t_end == 0             # 0 stays "unknown"
+    u = _fill_times(Utterance(speaker="A", text="x", t_start=1.0, t_end=3.0, ts=5.0), now=T)   # producer-set ts
+    assert (u.ts, u.t_start, u.t_end) == (T, T - 2, T)
+
+
+def test_echo_guard_drops_our_voice_and_expires_a_lost_speaking_false():
+    e = EchoGuard()
+    e.speaking(True, T0)
+    assert e.is_echo(U("A", "hello there everyone", T0 + 1, T0 + 2), T0 + 2)
+    assert e.is_echo(U("A", "hello there everyone", T0 + 14, T0 + 14.5), T0 + 14.5)
+    assert not e.is_echo(U("A", "a human is talking now", T0 + 16, T0 + 18), T0 + 18)   # speaking:false never came
+    assert e.speaking_since is None and e.windows[-1] == (T0, T0 + 15.5)
+    assert e.is_echo(U("A", "words words words", T0 + 10, T0 + 12), T0 + 19)            # late final from inside it
+    e.speaking(True, T0 + 30)
+    e.speaking(False, T0 + 33)
+    assert e.is_echo(U("A", "x", T0 + 33.2, T0 + 34), T0 + 34) and not e.is_echo(U("A", "x", T0 + 34, T0 + 35), T0 + 35)
+    e.spoke("Point of fact: the ONS says it is 4.1 percent.", T0 + 40)
+    assert e.is_echo(U("B", "the ONS says it is 4.1 percent", T0 + 41, T0 + 42), T0 + 42)
+    assert not e.is_echo(U("B", "that is a modelled estimate though", T0 + 41, T0 + 42), T0 + 42)
+    e.reset()
+    assert e.speaking_since is None and e.windows == [] and e.said == []
+
+
+def test_pause_synth_waits_longer_until_interims_are_seen():
+    ps = PauseSynth("auto", gap=1.2)
+    ps.on_utterance(U("A", "x", T0, T0 + 3), T0 + 3.3)              # finals only: max(6, 3 + 1.2)
+    assert ps.due(T0 + 9.2) == [] and [p.speaker for p in ps.due(T0 + 9.4)] == ["A"]
+    ps.on_utterance(U("A", "x", T0 + 10, T0 + 20), T0 + 20.3)       # a 10 s final: the next may be 10 s away
+    assert ps.due(T0 + 31.4) == [] and len(ps.due(T0 + 31.6)) == 1
+    ps.on_utterance(U("A", "x", T0 + 40, T0 + 100), T0 + 100)       # capped at 15 s
+    assert ps.due(T0 + 114.9) == [] and len(ps.due(T0 + 115.1)) == 1
+    ps.on_utterance(U("A", "x", T0 + 120, T0 + 121, final=False), T0 + 121)   # first interim: the usual 1.2 s
+    ps.on_utterance(U("A", "x", T0 + 120, T0 + 122), T0 + 122)
+    assert ps.due(T0 + 123.1) == [] and len(ps.due(T0 + 123.3)) == 1
+    ps.on_utterance(U("A", "x", T0 + 124, T0 + 125), T0 + 125)
+    ps.on_utterance(U("A", "more", T0 + 125, T0 + 126, final=False), T0 + 126)  # speech resumes: pushed out
+    assert ps.due(T0 + 126.5) == [] and len(ps.due(T0 + 127.3)) == 1
+    ps.on_pause(Pause(speaker="B", src="brain:pause_synth"))
+    assert ps.active
+    ps.on_pause(Pause(speaker="B", src="ears"))                     # a real VAD Pause: synthesis off
+    ps.on_utterance(U("A", "x", T0 + 130, T0 + 131), T0 + 131)
+    assert not ps.active and ps.due(T0 + 200) == []
+    ps.reset()
+    assert ps.active and not ps.interims_seen
+
+
+def test_bleed_guard_drops_the_other_mic_hearing_a_speaker():
+    b = BleedGuard()
+    assert not b.is_bleed(U("A", "Air pollution causes 40,000 early deaths a year", T0, T0 + 4))
+    assert b.is_bleed(U("B", "air pollution causes 40,000 early deaths a year", T0 + .3, T0 + 4.2))
+    assert not b.is_bleed(U("B", "That figure is a modelled estimate, not a count", T0 + 1, T0 + 4))
+    assert not b.is_bleed(U("A", "Air pollution causes 40,000 early deaths a year", T0 + 5, T0 + 9))   # same speaker
+    assert not b.is_bleed(U("B", "air pollution causes 40,000 early deaths a year", T0 + 20, T0 + 24))  # no overlap
+    assert not b.is_bleed(U("B", "yes yes", T0 + 5, T0 + 6))                                         # too short
+    b.reset()
+    assert b.recent == []
+
+
+def test_late_interims_after_their_final_are_ignored():
+    g = LateInterims(keep=2)
+    assert not g.is_late(U("A", "air", T0, T0 + 1, final=False, uid="u1"))
+    assert not g.is_late(U("A", "air pollution kills", T0, T0 + 3, uid="u1"))
+    assert g.is_late(U("A", "air", T0, T0 + 1, final=False, uid="u1"))
+    assert not g.is_late(U("A", "air pollution kills people", T0, T0 + 3, uid="u1"))   # a re-sent final is fine
+    for i in (2, 3):
+        g.is_late(U("A", "x", T0, T0 + 1, uid=f"u{i}"))
+    assert not g.is_late(U("A", "air", T0, T0 + 1, final=False, uid="u1"))             # bounded memory
+    g.reset()
+    assert not g.is_late(U("A", "x", T0, T0 + 1, final=False, uid="u3"))
+
+
+# ----------------------------------------------------------------------------- the wiring, on a real Bus
+class Clock:
+    def __init__(self, t: float):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class Brain:
+    """Real Bus + real brain/run.py. pub() publishes, step(dt) moves the clock and lets the brain run."""
+
+    def __init__(self, clock: Clock):
+        self.clock, self.bus, self.evs, self.task = clock, Bus(), [], None
+        self.bus.subscribe("rec", where=lambda ev: self.evs.append(ev), maxsize=1)   # records synchronously
+
+    def now(self) -> float:
+        return self.clock.t
+
+    async def start(self) -> None:
+        n = len(self.of("DirectorStatus"))
+        self.task = asyncio.create_task(brain_run.run(self.bus))
+        for _ in range(400):                       # ready once its ticker publishes the first status
+            await asyncio.sleep(.005)
+            if len(self.of("DirectorStatus")) > n:
+                return
+        raise AssertionError("brain did not start")
+
+    async def crash(self) -> None:                 # supervise() restarts run(bus) on the same bus
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        await self.start()
+
+    async def stop(self) -> None:
+        if self.task:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+
+    def pub(self, ev, src: str = "test"):
+        return self.bus.publish(ev, src=src)
+
+    async def step(self, dt: float = 0.0) -> None:
+        for _ in range(5):
+            await asyncio.sleep(0)                 # the brain handles what was just published, at the current time
+        self.clock.t += dt
+        await asyncio.sleep(.03)                   # then ticks a few times at the new time (TICK_S is shrunk)
+
+    def of(self, name: str) -> list:
+        return [e for e in self.evs if e.event == name]
+
+    def said(self) -> list:
+        return [(i.claim_id, i.kind) for i in self.of("Interjection")]
+
+    def session(self) -> None:
+        self.pub(SessionStart(motion="This house would ban cars from city centres",
+                              speakers={"A": {"side": "prop"}, "B": {"side": "opp"}}))
+
+    def claim(self, cid: str, spk: str, t_end: float) -> None:      # a swapped-in extractor
+        self.pub(Claim(id=cid, speaker=spk, text=f"claim {cid} about 40 percent", type="statistic", checkable=True,
+                       importance=1.0, topic="road traffic", t_end=t_end), src="ext")
+
+    def verdict(self, cid: str) -> None:
+        self.pub(Verdict(claim_id=cid, label="contradicted", confidence=.95, evidence=EVID,
+                         short_fact="it is 4.1 percent"), src="ext")
+
+
+@pytest.fixture
+async def brain(monkeypatch, caplog):
+    clock = Clock(time.time())
+    monkeypatch.setattr(time, "time", clock)
+    monkeypatch.setattr(config, "LLM_PROVIDER", "heuristic")         # offline, whatever the shell exports
+    monkeypatch.setattr(config, "FLAGS", {"director": True})
+    monkeypatch.setattr(config, "PAUSE_SYNTH", "auto")
+    monkeypatch.setattr(config, "DIRECTOR_AGGR", 3)
+    monkeypatch.setattr(brain_run, "TICK_S", .005)
+    caplog.set_level(logging.WARNING)
+    b = Brain(clock)
+    yield b
+    await b.stop()
+    assert not [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.parametrize("variant", ["lost_false", "string_false"])
+async def test_tts_state_never_leaves_the_brain_deaf(brain, variant):
+    """Review #1: a lost TTSState{speaking:false}, or agent_speaking "false" as a string, made every later
+    utterance 'echo': the floor model stopped hearing B and the referee spoke over them."""
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    h.claim("a1", "A", t - .2)
+    h.claim("a2", "A", t - .2)
+    h.verdict("a1")
+    h.pub(Pause(speaker="A", t=t))
+    await h.step(.5)
+    assert h.said() == [("a1", "correction")]
+    if variant == "lost_false":
+        h.pub(TTSState(speaking=True))                         # the audio tab dies: speaking:false never comes
+        await h.step(16)
+    else:
+        raw = lambda v: Control.model_construct(flag="agent_speaking", value=v)   # noqa: E731 - unvalidated strings
+        h.pub(raw("true"))
+        await h.step(3)
+        h.pub(raw("false"))                                    # bool("false") is True: the guard must parse it
+        await h.step(1)
+    h.pub(Control(flag="force_next"))                          # skip cooldowns: only the floor decides
+    a = h.now()
+    words = "Cars are not the main source of pollution in our city centres at all".split()
+    for k in (1, 2, 3):
+        await h.step(1)
+        h.pub(U("B", " ".join(words[:3 * k]), a, h.now(), final=False, uid="u-B-1"))
+    h.pub(U("B", "Cars are not the main source of pollution.", a, a + 3, uid="u-B-1"))
+    h.pub(Pause(speaker="B", t=a + 3.5))                       # VAD: a breath, then B goes on
+    for k in (4, 5, 6, 7):
+        await h.step(1)
+        h.pub(U("B", " ".join(words[:2 * (k - 3)]), a + 3.8, h.now(), final=False, uid="u-B-2"))
+        if k == 5:
+            h.verdict("a2")                                    # C's slow verdict lands while B is talking
+    await h.step(.3)
+    assert h.said() == [("a1", "correction")]                  # never over B
+    h.pub(U("B", "Diesel buses produce more nitrogen dioxide than cars.", a + 3.8, h.now() - .1, uid="u-B-2"))
+    await h.step(.6)
+    assert h.said() == [("a1", "correction")]
+    h.pub(Pause(speaker="B", t=h.now()))
+    await h.step()
+    assert h.said() == [("a1", "correction"), ("a2", "correction")]
+
+
+@pytest.mark.parametrize("vad", [False, True])
+async def test_finals_only_ears_never_talk_over_a_monologue(brain, vad):
+    """Review #2: with no interims, a synthetic Pause 1.2 s after each final (or the 2.5 s floor timeout with
+    VAD on) opened the floor mid-monologue."""
+    h = brain
+    await h.start()
+    h.session()
+    if vad:                                                    # a real VAD Pause switches pause synthesis off
+        t = h.now()
+        h.pub(U("B", "Over to you then.", t - 2, t - .5))
+        h.pub(Pause(speaker="B", t=t))
+        await h.step(.5)
+    for i in range(7):                                         # 21 s of non-stop speech, a final every 3 s
+        await h.step(3)
+        h.pub(U("A", f"Sentence number {i} of a long speech about road traffic.", h.now() - 3.3, h.now() - .3,
+                uid=f"u-A-{i}"))
+        if i == 0:
+            h.claim("a1", "A", h.now() - .3)
+            h.verdict("a1")
+    last = h.now()
+    await h.step(.3)
+    assert h.said() == [] and not [p for p in h.of("Pause") if p.src.startswith("brain")]
+    if vad:
+        h.pub(Pause(speaker="A", t=last + .6))
+        await h.step(.4)
+        assert h.said() == [("a1", "correction")]
+    else:
+        await h.step(5.3)                                      # 5.6 s after the last final: still nothing
+        assert h.said() == []
+        await h.step(.7)
+        assert h.said() == [("a1", "correction")] and h.of("Interjection")[0].ts >= last + 6
+
+
+async def test_stream_relative_times_still_interject(brain):
+    """Review #3 / flexibility #5: STT stream-relative t_start/t_end/t made every claim 'stale'."""
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", .4, 2.8, uid="u-A-1", ts=0))
+    await h.step(.4)
+    h.pub(Claim(id="x1", speaker="A", text="Air pollution causes 40,000 early deaths a year.", type="statistic",
+                checkable=True, importance=1.0, t_end=2.8), src="ext")
+    h.verdict("x1")
+    h.pub(Pause(speaker="A", t=3.6))
+    await h.step(.3)
+    assert ("x1", "correction") in h.said()
+    assert not [d for d in h.of("DirectorDecision") if d.reason == "stale_ttl"]
+    own = [c for c in h.of("Claim") if c.src == "brain"]
+    assert own and all(abs(c.t_end - t) < 5 for c in own)     # the brain's own claims are on the server clock
+
+
+async def test_crash_restart_never_respeaks_and_keeps_vetoes_cooldown_and_aggr(brain):
+    """Review #4 / demo-robustness #7: restore replays our Interjections and the operator's Controls."""
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    for cid in ("a1", "a2", "a3"):
+        h.claim(cid, "A", t - .2)
+    h.verdict("a1")
+    h.pub(Pause(speaker="A", t=t))
+    await h.step(.3)
+    assert h.said() == [("a1", "correction")]
+    h.pub(TTSState(speaking=True))
+    await h.step(2)
+    h.pub(TTSState(speaking=False))
+    await h.step(1)
+    h.verdict("a2")
+    h.pub(Control(flag="veto", value="a2"))
+    h.pub(Control(flag="aggr", value=4))
+    h.verdict("a3")
+    await h.step(.3)
+    await h.crash()
+    n = len(h.of("DirectorDecision"))
+    t2 = h.now()
+    h.pub(U("B", "Well, okay then, fine.", t2 - .5, t2, uid="u-B-1"))   # after the (restored) TTS echo window
+    h.pub(Pause(speaker="B", t=t2 + .2))
+    await h.step(1.2)
+    assert h.said() == [("a1", "correction")]                  # not re-spoken, a2 still vetoed, a3 in cooldown
+    assert ("correction:a3", "held", "cooldown") in [(d.key, d.action, d.reason) for d in h.of("DirectorDecision")[n:]]
+    st = h.of("DirectorStatus")[-1]
+    assert st.aggr == 4 and st.cooldown_left_s > 0 and st.pressure.get("A") == 1
+    h.pub(Control(flag="force_next"))                          # the floor is open: force skips the cooldown only
+    await h.step(.1)
+    assert h.said() == [("a1", "correction"), ("a3", "correction")]
+
+
+async def test_late_interim_after_its_final_is_not_new_speech(brain):
+    """Review #7 (brain side): an out-of-order interim must not push the synthetic Pause out."""
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution", t - 2, t - 1, final=False, uid="u-A-1"))
+    await h.step(.3)
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year.", t - 2, t + .2, uid="u-A-1"))
+    await h.step(1.0)
+    h.pub(U("A", "Air pollution causes", t - 2, t - .5, final=False, uid="u-A-1"))   # the late callback
+    await h.step(.3)                                           # 1.3 s after the final
+    assert [p.speaker for p in h.of("Pause") if p.src.startswith("brain")] == ["A"]
