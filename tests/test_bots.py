@@ -247,7 +247,8 @@ async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bo
      "True, but that's against a modelled baseline. (unsourced)"),
     ("46%? True, but only 20% was measured.",                                    # a figure beyond claim + context
      "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
-    ("Sure, but that's a misleading baseline.", "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
+    ("Sure, but that's a misleading baseline.",                                 # a judgement word
+     "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
     ("", "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
 ])
 async def test_a_misleading_challenge_carries_only_the_claims_and_its_context_figures(line, text):
@@ -288,7 +289,8 @@ def test_a_concede_carries_only_the_claims_figures():
     assert lines.concede(claim, "Fair. Annoyingly, that's right. (Unsourced).") == \
         "Fair. Annoyingly, that's right. (unsourced)"
     assert lines.concede(claim, "{x} checks out") == "Annoyingly, that one checks out. (unsourced)"   # braces: odd
-    assert lines.concede(claim, "Bob, that checks out.", names=["Bob"]) == "Annoyingly, that one checks out. (unsourced)"
+    assert lines.concede(claim, "Bob, that checks out.", names=["Bob"]) == \
+        "Annoyingly, that one checks out. (unsourced)"
     assert lines.concede(claim, used=["Annoyingly, that one checks out. (unsourced)"]) == \
         "Fine, that one is actually true. (unsourced)"
     assert lines.guard("Annoyingly, it checks out.", "concede") is None                       # untagged
@@ -881,7 +883,8 @@ async def test_writer_calls_are_bounded_and_never_raise(monkeypatch):
     got = await Writer(None, FakeLLM(check=false_check("90%"))).check(C("c1"))
     assert got.likely_false and got.confidence == 0.9 and got.correction == "it was nearer 4%"
     got = await Writer(None, FakeLLM(check=misleading_check(0.8))).check(C("c1"))
-    assert (got.assessment, got.context, got.likely_false) == ("misleading", "that's against a modelled baseline", False)
+    assert (got.assessment, got.context, got.likely_false) == \
+        ("misleading", "that's against a modelled baseline", False)
     got = await Writer(None, FakeLLM(check=check_answer("Surprising_True", 0.9, "Fine."))).check(C("c1"))
     assert (got.assessment, got.line) == ("surprising_true", "Fine.")
     got = await Writer(None, FakeLLM(check=check_answer("half_true", 0.99))).check(C("c1"))

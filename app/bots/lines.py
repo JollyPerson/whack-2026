@@ -236,8 +236,8 @@ def challenge(claim: Any, text: Any = "", correction: Any = "", names: Iterable[
     fix = voice.clean(correction)
     if not fix:
         return None
-    return _tagged("challenge", [f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}", f"Last I checked, {{fix}}. {UNSOURCED}"],
-                   {"fig": figure(str(_get(claim, "text", "") or "")), "fix": fix}, "", names)
+    tpls = [f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}", f"Last I checked, {{fix}}. {UNSOURCED}"]
+    return _tagged("challenge", tpls, {"fig": figure(str(_get(claim, "text", "") or "")), "fix": fix}, "", names)
 
 
 _TRUE_BUT = re.compile(r"^(?:true|granted|sure|yes)?[,.;:]?\s*but\s+", re.I)
