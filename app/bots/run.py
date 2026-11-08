@@ -16,7 +16,7 @@ finished non-responsive turn), that bot nudges the opponent: "Still waiting on t
 Banter (BOTS_BANTER): after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S across both, the
 other bot may answer it with one dry line, if it is idle (banter never delays a real line). Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
-A crash-restart rebuilds what was already said from the bus history, silently.
+A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
 from __future__ import annotations
 
@@ -300,11 +300,14 @@ class Bots:
             self.publish(ev)
 
     def restore(self, history: list[Event]) -> None:
-        """After a crash-restart: the session, claims, verdicts, map statuses and lines already posted, silently."""
+        """After a crash-restart: the session, claims, verdicts, map statuses and lines already posted, silently.
+        A line whose BotTalk(on=false) the crash cut off still gets it, at its own ts + hold_s (or at the next tick)."""
+        open_lines: dict[str, BotLine] = {}
         for ev in history:
             try:
                 if ev.event == "SessionStart":
                     self.reset(ev)
+                    open_lines.clear()                # the face bridge closes every mouth on SessionStart
                 elif ev.event == "Claim":
                     self.remember(ev)
                 elif ev.event == "Verdict":
@@ -315,13 +318,18 @@ class Bots:
                 elif ev.event == "BotLine" and ev.src == "bots":
                     self.pacer.posted(ev, ev.ts)
                     self.said.append(ev.text)
+                    open_lines[ev.id] = ev
                     if ev.kind == "nudge" and ev.claim_id:
                         self.nudged.add(ev.claim_id)
                     if ev.kind == "banter":
                         self.last_banter = ev.ts
                         self.banters.append(ev.text)
+                elif ev.event == "BotTalk" and ev.src == "bots" and not ev.on:
+                    open_lines.pop(ev.line_id, None)
             except Exception:
                 log.exception("bots: restore skipped %s", ev.event)
+        for line in open_lines.values():
+            self.pacer.close_at(line, line.ts + line.hold_s)
 
 
 def final_nr(snap: ArgMapSnapshot) -> list[dict]:

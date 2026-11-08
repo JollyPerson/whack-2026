@@ -81,9 +81,13 @@ class Pacer:
                 best = max(q, key=lambda x: x.rank)
                 q.remove(best)
                 self.posted(best.line, now)
-                self.offs.append((now + best.line.hold_s, BotTalk(persona=p, line_id=best.line.id, on=False)))
+                self.close_at(best.line, now + best.line.hold_s)
                 out.append(best.line)
         return out
+
+    def close_at(self, line: BotLine, t: float) -> None:
+        """Schedule `line`'s BotTalk(on=false) for `t` (tick() publishes it once due)."""
+        self.offs.append((t, BotTalk(persona=line.persona, line_id=line.id, on=False)))
 
     def posted(self, line: BotLine, now: float) -> None:
         """Count a line as said (tick() does this; a crash-restart replays the session's lines through it)."""

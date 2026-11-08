@@ -566,6 +566,27 @@ async def test_restore_after_a_crash_remembers_what_was_said():
     assert len(said(out2)) == 1                                                 # already unanswered: no nudge
 
 
+async def test_restore_closes_a_mouth_the_crash_left_open():
+    bots, out, clock = make()
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c2", "A", "prop", typ="value", checkable=False, text="Fair pay is a moral duty."))
+    await settle(bots)
+    closed, cut = said(out)                                                     # For, then Against
+    clock.t += closed.hold_s
+    bots.tick()
+    talks = [e for e in out if e.event == "BotTalk"]
+    history = [SessionStart(motion="m", speakers=SPEAKERS, ts=T0), *said(out), *talks]
+    assert [t.line_id for t in talks] == [closed.id, cut.id]
+    history.remove(talks[1])                                                    # the crash came before cut's off
+    again, out2, clock2 = make()
+    clock2.t = clock.t
+    again.restore(history)
+    assert [e for e in out2 if e.event == "BotTalk"] == []                      # silent until the next tick
+    again.tick()
+    [off] = [e for e in out2 if e.event == "BotTalk"]
+    assert (off.persona, off.line_id, off.on) == ("against", cut.id, False)
+
+
 # ----------------------------------------------------------------------------- writer
 async def test_writer_calls_are_bounded_and_never_raise(monkeypatch):
     monkeypatch.setattr(writer_mod, "FAST_TIMEOUT_S", 0.6)
