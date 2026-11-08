@@ -56,13 +56,27 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
    - Each avatar gets its own config, channel, window and model.
    - The launcher also copies the three verdict dances into the build.
    - `place` re-positions the windows for another screen size (`FOR_GEOM`, `AGAINST_GEOM`); `stop` ends both.
-4. **Dashboard.** Open `http://127.0.0.1:8000/?admin=1` full screen behind the avatars. Start the debate from the
-   motion picker, which declares A = Prop and B = Opp.
-5. **During the debate.**
+4. **Backdrop.** Open `http://127.0.0.1:8000/arena` full screen (F11) behind the avatars: a lit platform for each
+   bot to stand on, with a name plate and a card under it showing the bot's latest citation (or its latest line), the
+   motion and speakers on top, and the latest fact checks and U-turns in the middle. At the Final screen it shows
+   "Judging…", then lights the winner's platform (both on a draw), shows the verdict and each bot's dance.
+   - The default platforms sit under the launcher's default windows on a 1920x1080 screen. If you move the windows
+     (`FOR_GEOM`, `AGAINST_GEOM`) or the feet don't land on the discs, move the platforms with
+     `?for=x,y,w&against=x,y,w`: centre x, feet line y and width. Plain numbers are pixels; with `%`, x and w are a
+     share of the screen width and y of its height. The default is `?for=23.44%,88%,25%&against=76.56%,88%,25%`
+     (450,950,480 and 1470,950,480 px).
+   - `?guides=1` outlines the avatar windows (the launcher's defaults, or `?forwin=x,y,w,h&againstwin=x,y,w,h`) to
+     line things up at rehearsal. `?theme=light` suits a washed-out projector.
+   - For more room under the platforms, raise both windows (e.g. `FOR_GEOM=0,120,900,820` and
+     `AGAINST_GEOM=1020,120,900,820`, then `tools/mate-bots.sh place`) and the platforms with them
+     (`?for=450,870,480&against=1470,870,480`).
+5. **Dashboard.** Open `http://127.0.0.1:8000/?admin=1` on the operator's screen (or full screen behind the avatars
+   instead of the arena). Start the debate from the motion picker, which declares A = Prop and B = Opp.
+6. **During the debate.**
    - Bubbles appear as soon as a line is ready: each bot at most once every `BOTS_MIN_GAP_S` (10 s).
    - In admin, **B** toggles the bots and **M** mutes everything.
    - Every own-knowledge check is logged ("bots: check …"), so the bars can be tuned at rehearsal.
-6. **End.** Click **Final screen**.
+7. **End.** Click **Final screen**.
    - The bots stop.
    - The judge writes `logs/summaries/<run>-summary.md` (and `.json`), and the verdict card appears.
    - The winner's bot dances `MMD-Conqueror` with music, and the loser's bot dances `MMD-Lost One_s Weeping` in
