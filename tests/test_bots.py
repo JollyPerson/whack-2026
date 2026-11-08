@@ -1427,3 +1427,18 @@ def test_the_figure_a_template_quotes_survives_stt_spacing_ranges_and_fractions(
     assert lines.figure(text) == fig
     line = lines.followup(C("c1", text=text))
     assert line == (f"Source for that {fig}?" if fig else "Source for that number?")
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("Your team is running out of road.", "banter"),          # the sides, by another name
+    ("Your side needs a better second.", "banter"),
+    ("Your opponent seems unconvinced.", "banter"),
+    ("Your client is not buying it.", "banter"),
+    ("Pure drivel, delivered with confidence.", "banter"),     # "nonsense", by another name
+    ("Baloney, but nicely phrased.", "banter"),
+    ("Spare us the claptrap.", "banter"),
+    ("That was hogwash with a bow on it.", "banter"),
+    ("Is that drivel or a policy?", "followup"),
+])
+def test_the_guards_catch_the_synonyms_an_llm_reaches_for(text, kind):
+    assert lines.guard(text, kind, "Source for that 40%?", strict=True) is None

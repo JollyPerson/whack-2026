@@ -44,7 +44,8 @@ INSULTS = frozenset({
     "dishonest", "shameful", "disgrace", "disgraceful", "garbage", "trash", "crap", "hell", "damn", "bloody",
     "lazy", "weak", "bully", "bullies", "arrogant", "arrogance", "smug", "rude", "desperate", "desperation",
     "panic", "panicking", "panicked", "rattled", "flailing", "floundering", "sloppy", "lame", "childish", "naive",
-    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing"})
+    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing",
+    "drivel", "hogwash", "baloney", "balderdash", "claptrap", "twaddle", "tosh", "codswallop", "poppycock"})
 PUT_DOWNS = re.compile(   # questions about a debater's honesty or wits ("Did you just make that up?")
     r"\b(?:make|made|making) (?:that|this|it|those|these) up\b|\b(?:do|did|does) you even\b|\bthin air\b|"
     r"\bout of (?:your|their) depth\b", re.I)
@@ -55,7 +56,7 @@ PERSONAL = frozenset({   # LLM lines never remark on the debaters as people (als
 DEBATERS = frozenset({   # banter is bot to bot: it never mentions the debaters (or anyone else) at all
     "debater", "debaters", "speaker", "speakers", "prop", "proposition", "opp", "opposition", "they", "them",
     "their", "theirs", "themselves", "person", "people", "human", "humans", "champion", "guy", "guys", "man",
-    "woman", "folks"})
+    "woman", "folks", "side", "sides", "team", "teams", "opponent", "opponents", "client", "clients"})
 SOURCE_WORDS = frozenset({"according", "study", "studies", "survey", "surveys", "poll", "polls", "census",
                           "researchers", "report", "reports"})
 NUMBER_WORDS = frozenset({   # not "one": "which one", "no one" (and "one in five" has its "five")
