@@ -1,7 +1,11 @@
 """The side bots' avatar channels: /face/mate/next/{referee|for|against}, their dances and status dots. All offline."""
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -354,3 +358,29 @@ def test_the_source_line_is_short_plain_text():
     assert speech.bot_text(_bl([ONS], sourced=False)) == "Try again."
     assert speech.bot_text(_bl([])) == "Try again."
 
+
+# ----------------------------------------------------------------------------- the shared show: bots on /stage
+STATIC = Path(__file__).resolve().parent.parent / "app/face/static"
+
+
+def test_stage_and_dashboard_load_the_shared_bot_card():
+    """index.html and stage.html load botcard.js before the scripts that use it; the stage has one bot card per
+    half, hidden until a bot speaks."""
+    index, stage = (STATIC / "index.html").read_text(), (STATIC / "stage.html").read_text()
+    scripts = lambda html: re.findall(r'<script src="/static/([\w-]+\.js)"', html)
+    assert scripts(index) == ["botcard.js", "app.js"]
+    assert scripts(stage) == ["botcard.js", "stage-cast.js", "stage-centre.js", "stage-bots.js", "stage.js"]
+    for side in ("prop", "opp"):
+        half = stage.split(f'<section id="{side}"')[1].split("</section>")[0]
+        assert '<div class="botcard" hidden' in half
+
+
+@pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run the stage")
+def test_stage_js_bot_cards():
+    """The whole stage against a fake DOM: each bot's latest line on its team's half, with the source card or the
+    "AI knowledge" tag, as text only, hidden with no bot line, and shown without animation from a Snapshot
+    (tests/js/stage_bots.js)."""
+    files = [str(STATIC / f) for f in re.findall(r'<script src="/static/([\w-]+\.js)"', (STATIC / "stage.html").read_text())]
+    r = subprocess.run(["deno", "run", "--allow-read", str(STATIC.parent.parent.parent / "tests/js/stage_bots.js"), *files],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr

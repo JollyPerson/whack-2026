@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Debate Referee · Stage</title>
-<!-- Two-sided "stage" view: each fact check pops up a character on the side that made the claim.
+<!-- Two-sided "stage" view: each fact check pops up a character on the side that made the claim; with the side bots
+     on, each bot's latest line sits on its team's half (stage-bots.js).
      Served at /stage (also /static/stage.html). Display only: it never speaks, the main dashboard (/?audio=1) does.
      URL params: ?theme=light · ?ws=ws://host:8000/ws · ?all=1 also shows "unverifiable" checks -->
 <link rel="stylesheet" href="/static/stage.css">
@@ -27,6 +28,7 @@
       <div class="tally"></div>
     </div>
     <p class="caption"></p>
+    <div class="botcard" hidden aria-live="polite"></div>
     <div class="stage" aria-live="polite"></div>
     <div class="history"></div>
   </section>
@@ -44,6 +46,7 @@
       <div class="tally"></div>
     </div>
     <p class="caption"></p>
+    <div class="botcard" hidden aria-live="polite"></div>
     <div class="stage" aria-live="polite"></div>
     <div class="history"></div>
   </section>
@@ -80,8 +83,10 @@
     </div>
   </form>
 </div>
+<script src="/static/botcard.js"></script>
 <script src="/static/stage-cast.js"></script>
 <script src="/static/stage-centre.js"></script>
+<script src="/static/stage-bots.js"></script>
 <script src="/static/stage.js"></script>
 </body>
 </html>
