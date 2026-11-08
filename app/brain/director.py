@@ -122,10 +122,15 @@ class State:
 
 
 # ----------------------------------------------------------------------------- config
+def _step(v: Any) -> int:
+    """+1/-1 for a relative aggr value ("+"/"up"/"-"/"down"), else 0."""
+    return {"+": 1, "up": 1, "-": -1, "down": -1}.get(v.strip().lower(), 0) if isinstance(v, str) else 0
+
+
 def clamp_aggr(v: Any, cur: int = 3) -> int:
     """1..5 from an int, a numeric string, or relative "+"/"-"/"up"/"down"; anything else keeps `cur`."""
-    if isinstance(v, str) and v.strip().lower() in ("+", "up", "-", "down"):
-        v = cur + (1 if v.strip().lower() in ("+", "up") else -1)
+    if _step(v):
+        v = cur + _step(v)
     if isinstance(v, bool):
         return cur
     try:
@@ -560,8 +565,10 @@ class Director:
     def __init__(self, aggr: int = 3, side_names: Optional[dict] = None, cfg: Optional[Cfg] = None):
         self.side_names = dict(side_names or {})   # operator overrides: speaker id or side -> spoken name
         self._custom_cfg = cfg
+        flags = getattr(config, "FLAGS", {}) or {}  # a crash-restart keeps the operator's mute and aggr
         a = clamp_aggr(aggr)
-        flags = getattr(config, "FLAGS", {}) or {}  # a crash-restart keeps the operator's mute
+        if not _step(flags.get("aggr")):            # a relative step can't be replayed onto a fresh level
+            a = clamp_aggr(flags.get("aggr"), a)
         self.st = State(cfg=cfg or level_cfg(a), aggr=a, muted=truthy(flags.get("mute", False)),
                         director_off=not truthy(flags.get("director", True)))
         self.reset()

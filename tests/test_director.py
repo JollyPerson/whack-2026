@@ -842,3 +842,14 @@ def test_restated_claim_replacing_a_pending_line_is_logged():
                      ("c9", "Point of fact: the ONS says crime fell 5 percent.")]
     assert ("correction:k", "dropped", "superseded") in logs(o)
     assert fired(o) == [(10, "correction", "A", "c9")] and lines(o)[0].text == cands[1][1]
+
+
+def test_restart_keeps_the_operators_aggr_from_flags(monkeypatch):
+    monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": 5})
+    assert Director(aggr=3).aggr == 5
+    monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": "2"})
+    assert Director(aggr=3).aggr == 2 and Director(aggr=3).st.cfg.min_gap_s == 45
+    for rel in ("up", "+", None, "junk"):                      # a relative step can't be replayed onto a fresh level
+        monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": rel})
+        assert Director(aggr=3).aggr == 3
+
