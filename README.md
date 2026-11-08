@@ -76,6 +76,39 @@ BOTS=real ./run.sh live                    # or drive, mock, ...
 - They use the same Anthropic key as the brain (`BOTS_MODEL` for follow-ups and banter, `BOTS_CHECK_MODEL` for the
   check). With no LLM they still rebut, nudge and ask template follow-ups, but never challenge or banter.
 
+## Debate summary and verdict dances
+
+After the debate, **Final screen** in the admin bar (`Control` screen=final) has the judge rate both sides, name a
+winner and write a summary file. No profile starts it; add `JUDGE=real`:
+
+```bash
+JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
+```
+
+- Code first computes a fixed scorecard per side from the session's record: speaking time and words, claims, sourced
+  verdicts, the bots' AI-knowledge flags, points left unanswered, non-responsive turns, and the referee's and bots'
+  interventions per side (to show whether the system itself was even-handed). From it come four 0-10 criteria and a
+  formula overall: 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (`app/judge/scorecard.py`).
+- Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript and the fact checks, scores each side on six
+  criteria (plus argument quality and civility), concludes on bias and factuality, picks the winner and writes
+  reasoning that cites the scorecard. A narrow margin is a draw. If Claude is unavailable, slower than
+  `JUDGE_TIMEOUT_S` (60 s; about 25 s on the golden run) or answers something invalid or inconsistent, the formula
+  decides (`via: formula`): a gap below 0.5 is a draw, 2.0 or more is decisive.
+- The summary goes to `logs/summaries/<run>-summary.md`, with the same content as `.json` beside it (`JUDGE_DIR`;
+  `<run>` is the run's log name). It holds the verdict, the scorecard, the scores with reasons, bias, factuality,
+  the reasoning, the fact checks (sourced kept apart from "AI knowledge, unsourced"), the system's balance and the
+  dances. The judgement runs once per session: Final screen again re-judges only if someone spoke since.
+- **Verdict dances.** The `DebateResult` makes both side bots dance on their Mate Engine channels (see
+  [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot `MMD-Conqueror` with its music,
+  the loser's `MMD-Lost One_s Weeping` without; on a draw both do `MMD-皆大欢喜-卜逻desu`, silently. The titles are
+  the dance files' names in Mate Engine's `CustomDances` (matched case-insensitively) and are shown on screen.
+  `JUDGE_MUSIC=winner|none|both` picks who gets music; the dances stop after `JUDGE_DANCE_S` (30 s) or at the next
+  debate. Tunables: the `JUDGE_*` names in `app/config.py` and `.env.example`.
+- **Later upgrade: Mixamo.** Proper victory and defeat animations instead of dances: on
+  [mixamo.com](https://www.mixamo.com) (free with an Adobe account) download "Victory" and "Defeated" (or "Sad Idle")
+  as FBX without skin, export each to a Mate Engine dance mod with the fork's `DanceModCli`, and set
+  `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE` to their titles.
+
 ## Layout and ownership
 
 ```
@@ -85,6 +118,7 @@ app/main.py      B  module registry, /ws, /publish, /session, /control, /health,
 app/config.py    B  flags + tunables (all env-overridable)
 app/brain/       B  claims.py (+llm.py, prompts.py), argmap.py, director.py (+voice.py), run.py
 app/bots/        B  side bots (BOTS=real): lines.py (wording, guards), pacer.py, writer.py (LLM), run.py
+app/judge/       B  post-debate judge (JUDGE=real): scorecard.py, writer.py (LLM), report.py, run.py
 app/ears/        A  run.py with `run(bus)` (async or plain) and/or routes.py (FastAPI router) — or external
 app/evidence/    C  run.py with `run(bus)` (async or plain) — or external
 app/face/        D  static/index.html (served at /), routes.py, run.py — or any frontend on /ws
