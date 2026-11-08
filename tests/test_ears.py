@@ -358,22 +358,110 @@ def wait_until(cond, timeout=3.0):
 @pytest.fixture
 def quick_restarts(monkeypatch):
     monkeypatch.setattr(ears, "PAREC_BACKOFF", (0.01,))
+    monkeypatch.setattr(ears, "listed_sources", lambda: None)      # pactl cannot say: parec starts anyway
 
 
-def test_parec_never_falls_back_to_another_source(monkeypatch, quick_restarts):
+class Listings:
+    """listed_sources() standing in for pactl: each call takes the next set of names in turn, the last repeating."""
+
+    def __init__(self, *listings):
+        self.listings, self.calls = list(listings), 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
+
+
+def test_parec_never_moves_to_another_source(monkeypatch, quick_restarts):
     # PipeWire moves a stream whose source vanished (phone app restarted, USB mic unplugged) to the default: the
     # speakers' monitor for a monitor source like MicYouVirtualSink.monitor, else the laptop mic. Probed on this
-    # laptop: without node.dont-fallback, parec keeps running there, so mic1 would transcribe the laptop's speakers.
+    # laptop: node.dont-reconnect makes parec exit then ("Entity killed"). node.dont-fallback must not be used: with
+    # it parec cannot record the default source or the default sink's monitor at all, and PipeWire often makes a
+    # freshly plugged USB mic the default source.
     popen = FakePopen(ScriptedParec(block=True))
     monkeypatch.setattr(ears.subprocess, "Popen", popen)
     capture = ears.start_audio_capture("mic1", "MicYouVirtualSink.monitor", ears.AudioBuffer())
     try:
         assert wait_until(lambda: popen.commands)
-        assert "--property=node.dont-fallback=true" in popen.commands[0]
+        assert "--property=node.dont-reconnect=true" in popen.commands[0]
+        assert not any("dont-fallback" in arg for arg in popen.commands[0])
         assert popen.commands[0][popen.commands[0].index("--device") + 1] == "MicYouVirtualSink.monitor"
     finally:
         capture.terminate()
         capture.wait(2)
+
+
+def test_a_source_that_is_not_there_is_never_recorded_until_it_is(monkeypatch, quick_restarts, capsys):
+    # parec started on a missing source records the default one instead (probed: 64000 bytes in 3 s from
+    # no_such_source.monitor). So ears looks the source up first and waits for it, deaf, as if parec had ended.
+    listings = Listings({"28063", "laptop-mic"}, {"laptop-mic"}, {"laptop-mic", "usb-mic"})
+    monkeypatch.setattr(ears, "listed_sources", listings)
+    popen = FakePopen(ScriptedParec([pcm(7)], block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic2", "usb-mic", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 1)
+        assert listings.calls == 3 and len(popen.commands) == 1
+    finally:
+        capture.terminate()
+        capture.wait(2)
+    err = capsys.readouterr().err
+    assert err.count("usb-mic is not a current source") == 2 and "mic2 is deaf; retrying" in err
+    assert "pactl list short sources" in err and "hearing mic2 again" in err
+
+
+@pytest.mark.parametrize("device, listing", [("@DEFAULT_SOURCE@", set()), ("28063", {"28063", "laptop-mic"}),
+                                             ("usb-mic", None)])
+def test_a_default_alias_an_index_or_no_pactl_starts_parec_at_once(monkeypatch, quick_restarts, device, listing):
+    monkeypatch.setattr(ears, "listed_sources", Listings(listing))
+    popen = FakePopen(ScriptedParec(block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    capture = ears.start_audio_capture("mic1", device, ears.AudioBuffer())
+    try:
+        assert wait_until(lambda: popen.commands)
+    finally:
+        capture.terminate()
+        capture.wait(2)
+
+
+def test_listed_sources_reads_names_and_indexes_from_pactl(monkeypatch):
+    listing = ("28061\talsa_output.x.HiFi__Headphones__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING\n"
+               "28070\tMicYouVirtualSink.monitor\tPipeWire\ts16le 1ch 16000Hz\tIDLE\n")
+    ran = []
+
+    def run(command, **kw):
+        ran.append(command)
+        return types.SimpleNamespace(stdout=listing, returncode=0)
+
+    monkeypatch.setattr(ears.subprocess, "run", run)
+    assert ears.listed_sources() == {"28061", "alsa_output.x.HiFi__Headphones__sink.monitor", "28070",
+                                     "MicYouVirtualSink.monitor"}
+    assert ran == [["pactl", "list", "short", "sources"]]
+
+    def broken(command, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "pactl")
+
+    monkeypatch.setattr(ears.subprocess, "run", broken)
+    assert ears.listed_sources() is None
+
+
+def test_a_mic_deaf_for_good_says_so_now_and_then_not_every_retry(monkeypatch, quick_restarts, capsys):
+    # A missing source retried every 2 s for the whole debate buried the level and falling-behind lines.
+    monkeypatch.setattr(ears, "DEAF_LOUD", 3)
+    popen = FakePopen(*[ScriptedParec(rc=1) for _ in range(30)], ScriptedParec([pcm(9)], block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic1", "gone", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 1)
+    finally:
+        capture.terminate()
+        capture.wait(2)
+    err = capsys.readouterr().err
+    assert err.count("mic1 is deaf") == 3
+    assert f"every {ears.DEAF_EVERY:g} s" in err
+    assert "hearing mic1 again" in err
 
 
 def test_a_capture_that_ends_is_restarted_and_says_so_loudly(monkeypatch, quick_restarts, capsys):
@@ -392,6 +480,24 @@ def test_a_capture_that_ends_is_restarted_and_says_so_loudly(monkeypatch, quick_
     err = capsys.readouterr().err
     assert "mic2" in err and "usb-mic" in err and "deaf" in err and "retrying" in err
     assert "hearing mic2 again" in err
+
+
+def test_a_mic_that_came_back_and_drops_again_says_so_at_once(monkeypatch, quick_restarts, capsys):
+    # Probed live: after 'hearing mic2 again', unloading its sink a few seconds later printed no deaf line at all.
+    monkeypatch.setattr(ears, "DEAF_LOUD", 3)
+    runs = [ScriptedParec(rc=1) for _ in range(5)] + [ScriptedParec([pcm(1)], rc=1), ScriptedParec(rc=1),
+                                                      ScriptedParec([pcm(2)], block=True)]
+    monkeypatch.setattr(ears.subprocess, "Popen", FakePopen(*runs))
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic2", "usb-mic", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 2)
+    finally:
+        capture.terminate()
+        capture.wait(2)
+    err = capsys.readouterr().err
+    assert err.count("mic2 is deaf") == 3 + 2
+    assert err.count("hearing mic2 again") == 2
 
 
 def test_ctrl_c_stops_the_restarts(monkeypatch, quick_restarts):

@@ -29,6 +29,9 @@ ABBREVIATION = re.compile(r"(?:[a-z]\.){2,}|(?:mr|mrs|ms|dr|prof|st|vs|jr|sr)\."
 # Seconds before each parec restart, the last one repeating; a capture that ran PAREC_HEALTHY seconds starts over.
 PAREC_BACKOFF = (0.5, 1.0, 2.0)
 PAREC_HEALTHY = 10.0
+# A mic still deaf after this many tries says so only every DEAF_EVERY seconds: the level lines stay readable.
+DEAF_LOUD = 3
+DEAF_EVERY = 30.0
 # Levels: exact digital silence this long is a deaf source, not a quiet room (a live mic always has some noise).
 SILENCE_WARN = 15.0
 SILENT_PEAK = 2 / 32768
@@ -299,12 +302,27 @@ class LevelWatch:
         return said
 
 
+def listed_sources():
+    """The names and indexes of the sources there are now, or None when pactl cannot say."""
+
+    try:
+        listing = subprocess.run(
+            ["pactl", "list", "short", "sources"], capture_output=True, text=True, timeout=5, check=True
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {field for line in listing.splitlines() for field in line.split("\t")[:2] if field}
+
+
 class Capture:
     """One source's parec, started again with backoff whenever it ends, so a mic that drops out (phone app
-    restarted, Wi-Fi drop, USB replug) comes back by itself instead of staying deaf. parec is told never to fall
-    back to another source: PipeWire would otherwise move it to the default one (the speakers' monitor, for a
-    monitor source) and this mic would transcribe the wrong audio. So a missing source makes parec exit, and the
-    restarts wait for it to come back. terminate(), wait() and kill() are those of the parec running now."""
+    restarted, Wi-Fi drop, USB replug) comes back by itself instead of staying deaf. It must never record another
+    source: PipeWire moves a stream whose source vanished to the default one (the speakers' monitor, for a
+    monitor source) and this mic would transcribe the wrong audio. node.dont-reconnect makes parec exit then, but a
+    parec started on a missing source still records the default, so the source is looked up before each start and
+    a missing one counts as a failed start. (node.dont-fallback would cover both, but with it parec cannot record
+    the default source, which a freshly plugged USB mic often becomes.) terminate(), wait() and kill() are those
+    of the parec running now."""
 
     def __init__(self, source_name, device, buffer):
         self.name, self.device, self.buffer = source_name, device, buffer
@@ -315,7 +333,7 @@ class Capture:
             "--rate=16000",
             "--channels=1",
             "--raw",
-            "--property=node.dont-fallback=true",
+            "--property=node.dont-reconnect=true",
         ]
         self.levels = LevelWatch(source_name, device)
         self.lock = threading.Lock()
@@ -324,10 +342,23 @@ class Capture:
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"capture-{source_name}")
         self.thread.start()
 
+    def _missing(self):
+        if self.device.startswith("@"):
+            return False
+        sources = listed_sources()
+        return sources is not None and self.device not in sources
+
     def _start(self):
+        """parec on this source, or None and what went wrong."""
+
+        if self._missing():
+            return None, (
+                f"{self.device} is not a current source (unplugged, phone app not connected, or renamed: "
+                "see pactl list short sources)"
+            )
         with self.lock:
             if self.stopping.is_set():
-                return None
+                return None, "stopping"
             try:
                 # Its own session: Ctrl+C reaches ears alone, which then stops parec itself (not taken for a
                 # dropped mic). If ears dies, parec's next write to the closed pipe ends it.
@@ -340,16 +371,19 @@ class Capture:
                 )
             except OSError as error:
                 self.process = None
-                say(f"!! ears: cannot start parec for {self.name}: {error}")
-            return self.process
+                return None, f"cannot start parec for {self.name}: {error}"
+            return self.process, None
 
     def _read(self, process, restarted):
+        """Feed parec's audio to the buffer until it ends; True if it sent any."""
+
         odd = b""
+        heard = False
         while True:
             raw = process.stdout.read(CHUNK_BYTES)
 
             if not raw:
-                return
+                return heard
 
             # Keep any odd byte for the next read: dropping it would misalign every later sample.
             raw = odd + raw
@@ -361,6 +395,7 @@ class Capture:
             if restarted:
                 say(f"ears: capturing {self.device} again: hearing {self.name} again")
                 restarted = False
+            heard = True
 
             audio = np.frombuffer(raw, dtype=np.int16)
             audio = audio.astype(np.float32) / 32768.0
@@ -370,25 +405,27 @@ class Capture:
 
     def _run(self):
         failures = 0
+        said = 0.0
         while not self.stopping.is_set():
-            process = self._start()
             started = time.monotonic()
-            code = None
+            heard = False
+            process, problem = self._start()
             if process is not None:
-                self._read(process, restarted=failures > 0)
-                code = process.wait()
+                heard = self._read(process, restarted=failures > 0)
+                problem = f"audio capture for {self.name} ({self.device}) ended (parec exit {process.wait()})"
 
             if self.stopping.is_set():
                 break
 
-            if time.monotonic() - started >= PAREC_HEALTHY:
-                failures = 0
+            now = time.monotonic()
+            if heard or now - started >= PAREC_HEALTHY:
+                failures = 0        # a new drop after 'hearing again' is news: say it at once
             delay = PAREC_BACKOFF[min(failures, len(PAREC_BACKOFF) - 1)]
             failures += 1
-            say(
-                f"!! ears: audio capture for {self.name} ({self.device}) ended (parec exit {code}): "
-                f"{self.name} is deaf; retrying in {delay:g} s"
-            )
+            if failures <= DEAF_LOUD or now - said >= DEAF_EVERY:
+                said = now
+                later = f" (saying so again only every {DEAF_EVERY:g} s)" if failures == DEAF_LOUD else ""
+                say(f"!! ears: {problem}: {self.name} is deaf; retrying in {delay:g} s{later}")
             self.stopping.wait(delay)
 
         say(f"Audio capture ended for {self.name}")
