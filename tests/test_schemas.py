@@ -12,7 +12,7 @@ from app.bus import Bus, load_jsonl
 from app.mocks import mock_ears
 from app.schemas import (EVENT_TYPES, ArgMapSnapshot, Claim, Control, DirectorDecision, DirectorStatus, Event,
                          Evidence, Interjection, Link, MapEdge, MapNode, ModuleStatus, Numeric, Pause,
-                         ResearchProgress, ResearchRequest, FactSheet, Fact, Score, SessionStart, SourceCard, SpeakerInfo, TTSState, Utterance,
+                         ResearchProgress, ResearchRequest, FactSheet, Fact, Consistency, DebateSummary, SummaryPoint, DisputedPoint, Score, SessionStart, SourceCard, SpeakerInfo, TTSState, Utterance,
                          ValidationError, Verdict, parse_event)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +41,14 @@ def producer_samples() -> dict[str, Event]:
         "evidence/SourceCard": SourceCard(claim_id="c7", url=EV[0].url, title="ONS", snippet="... 31% ..."),
         "evidence/ResearchProgress": ResearchProgress(stage="embedding", done=12, total=20, detail="ons.gov.uk"),
         "stage/ResearchRequest": ResearchRequest(motion="This house would ban cars", brief="Focus on UK cities."),
+        "brain/Consistency": Consistency(id="k1", kind="self_contradiction", claim_id="c9", earlier_claim_id="c3",
+                                         side="prop", speaker="A", now="cost two billion", then="cost almost nothing",
+                                         explanation="Prop gave two incompatible costs.", confidence="85%"),
+        "brain/DebateSummary": DebateSummary(motion="ban cars", version=12,
+                                             agreed=[SummaryPoint(statement="Buses need investment", claim_ids=["c5", "c8"])],
+                                             disputed=[DisputedPoint(issue="Effect on shops", prop="Footfall rises",
+                                                                     opp="Shops lose trade", evidence_leans="prop")],
+                                             self_contradictions={"prop": 1}, score={"prop": .6, "opp": .4}),
         "evidence/FactSheet": FactSheet(motion="This house would ban cars", facts=[
             Fact(statement="Bus use outside London fell 31% since 2010.", side="prop", quote="fell by 31%",
                  url=EV[0].url, title="ONS", number=31, unit="%")]),

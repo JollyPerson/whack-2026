@@ -28,6 +28,21 @@
         "8766"
       ],
       "port": 8766
+    },
+    {
+      "name": "consistency-mock",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "FIXTURE=fixtures/consistency_debate.jsonl",
+        "SPEED=2",
+        "../../../.venv/bin/python",
+        "-m",
+        "app.main",
+        "mock",
+        "--port",
+        "8767"
+      ],
+      "port": 8767
     }
   ]
 }

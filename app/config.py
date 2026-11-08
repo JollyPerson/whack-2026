@@ -86,6 +86,15 @@ DIRECTOR_MIN_GAP_S = _env("DIRECTOR_MIN_GAP_S", 30.0)
 DIRECTOR_MIN_CONF = _env("DIRECTOR_MIN_CONF", 0.75)
 DIRECTOR_AGGR = _env("DIRECTOR_AGGR", 3)                   # 1 (quiet) .. 5 (chatty)
 DIRECTOR_VOICE_NONRESPONSIVE = _env("DIRECTOR_VOICE_NONRESPONSIVE", False)   # default: dashboard only
+
+# --- brain: consistency checker (self-contradictions, concessions, agreement) + end-of-debate summary -----------
+CONSISTENCY = _env("CONSISTENCY", True)                     # off: no checks, no findings, the summary still works
+CONSISTENCY_MODEL = _env("CONSISTENCY_MODEL", "")           # "" = LLM_MODEL (Haiku); profile test-haiku pins Haiku
+SUMMARY_MODEL = _env("SUMMARY_MODEL", "")                   # "" = CONSISTENCY_MODEL / LLM_MODEL
+CONSISTENCY_DELAY_S = _env("CONSISTENCY_DELAY_S", 3.0)      # after a turn closes, so its last claims have landed
+CONSISTENCY_MIN_CONF = _env("CONSISTENCY_MIN_CONF", 0.7)    # findings below this are dropped
+CONSISTENCY_TIMEOUT_S = _env("CONSISTENCY_TIMEOUT_S", 8.0)  # then the heuristic answers for that turn
+CONSISTENCY_VOICE = _env("CONSISTENCY_VOICE", False)        # the referee may SAY U-turns and concessions (else screen only)
 DIRECTOR_DRY_FIRST_S = _env("DIRECTOR_DRY_FIRST_S", 25.0)  # canned dry-spell line; 0 = off
 
 # --- evidence (C) defaults the mocks also honour ----------------------------------------------

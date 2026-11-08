@@ -43,6 +43,8 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 |---|---|---|---|
 | `SessionStart` | dashboard/CLI → all | — | `motion`, `speakers{id:{name, side: prop\|opp}}`, `mode`, `brief` (organiser's debate brief: steers pre-research, shown on the stage) |
 | `ResearchRequest` | stage setup screen → C | `motion` | `brief`. Researches before the debate without resetting anything; the later `SessionStart` with the same motion + brief loads the result |
+| `Consistency` | B → D | `id`, `kind` (self_contradiction\|concession\|agreement\|correction), `claim_id`, `earlier_claim_id` | `side`, `speaker`, `earlier_side`, `now`, `then` (both verbatim from the claims), `explanation`, `confidence`, `topic`, `turn`. Published once per pair, after the turn closes |
+| `DebateSummary` | B → D | — | `agreed[{statement, claim_ids}]`, `disputed[{issue, prop, opp, evidence_leans: prop\|opp\|even, claim_ids}]`, `self_contradictions{side:n}`, `concessions{side:n}`, `score{side:0..1}`, `call`, `version`, `source`. Made on `Control(screen=final)` or `Control(summary)`, cached per argument-map version. `evidence_leans` comes from verdicts, never from the model |
 | `FactSheet` | C → D | — | `motion`, `brief`, `facts[{statement, side: prop\|opp\|both, quote, url, title, number, unit}]`, each quote checked verbatim by code. Re-sent on `SessionStart`; never trimmed from the snapshot |
 | `Utterance` | A → B, D | `speaker`, `text` | `id` (interims share their final's id), `t_start`, `t_end`, `final` (default true; `is_final` accepted) |
 | `Pause` | A → B (Director) | `speaker` | `t` (end-of-turn detected) |

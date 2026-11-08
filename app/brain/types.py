@@ -13,8 +13,10 @@ class Notice:
       "unanswered"     - claim_id by one side has gone unanswered; `speaker` is who should answer it
       "answered"       - a previously unanswered claim got a reply; Director cancels its pending prompt
       "nonresponsive"  - `speaker`'s turn ignored the opponent's points listed in detail["ignored"]
+      "consistency"    - claim_id by `speaker` contradicts / concedes / agrees with detail["earlier_claim_id"];
+                         detail["kind"] is the Consistency kind
     """
-    kind: Literal["unanswered", "answered", "nonresponsive"]
+    kind: Literal["unanswered", "answered", "nonresponsive", "consistency"]
     speaker: str                     # speaker addressed by a prompt (who should answer)
     t: float                         # wall-clock time the map detected it
     claim_id: Optional[str] = None

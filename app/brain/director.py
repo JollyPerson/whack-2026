@@ -35,15 +35,18 @@ from app.brain.types import Notice
 from app.schemas import (Claim, Control, DirectorDecision, DirectorStatus, Event, Interjection, Pause, SessionStart,
                          TTSState, Utterance, Verdict, parse_event)
 
-KINDS = ("time", "correction", "context", "prompt", "source_req", "confirm", "dry")   # order = tie-break rank
-KIND_W = {"time": .9, "correction": 1.0, "context": .7, "prompt": .6, "source_req": .55, "confirm": .35, "dry": .15}
+KINDS = ("time", "correction", "context", "consistency", "prompt", "source_req", "confirm", "dry")   # order = tie-break rank
+KIND_W = {"time": .9, "correction": 1.0, "context": .7, "consistency": .65, "prompt": .6, "source_req": .55,
+          "confirm": .35, "dry": .15}
 # prompt/source_req carry no model confidence (conf 1.0): KIND_W alone ranks them under a confident context
 # of equal importance. At aggr 3 an importance-0.67 prompt stays >= .35 for ~12 s after detection (2x half-life:
 # the argmap only notices once the next speaker is already talking), an importance-0.8 source request ~10 s
 # after the claim. Both stay under override_score/streak_override, so cooldown and balance still bind them.
 HL_MULT = {"prompt": 2.0}
-TTL_S = {"time": 15, "correction": 45, "context": 40, "prompt": 90, "source_req": 30, "confirm": 25, "dry": 3600}
-PRESSURE = {"time", "correction", "context", "prompt", "source_req"}   # kinds that put a speaker on the spot
+TTL_S = {"time": 15, "correction": 45, "context": 40, "consistency": 60, "prompt": 90, "source_req": 30, "confirm": 25,
+         "dry": 3600}
+PRESSURE = {"time", "correction", "context", "consistency", "prompt", "source_req"}
+VOICED_CONSISTENCY = ("self_contradiction", "concession")   # agreements and corrections are shown, never said   # kinds that put a speaker on the spot
 LABEL2KIND = {"contradicted": "correction", "missing_context": "context", "supported": "confirm"}
 AGGR = {1: dict(min_conf=.85, fire_threshold=.55, min_gap_s=60.0), 2: dict(min_conf=.80, fire_threshold=.45, min_gap_s=45.0),
         3: dict(min_conf=.75, fire_threshold=.35, min_gap_s=30.0), 4: dict(min_conf=.70, fire_threshold=.28, min_gap_s=20.0),
@@ -89,6 +92,7 @@ class Cand:
     claim: Optional[Claim] = None
     verdict: Optional[Verdict] = None
     score: float = 0.0
+    detail: dict = field(default_factory=dict)   # consistency: {kind, earlier_claim_id, topic, ...}
 
 
 @dataclass
@@ -260,6 +264,8 @@ def on_notice(st: State, n: Notice, now: float) -> list[Event]:
         cd = st.pending.pop(f"prompt:{n.claim_id}", None)
         if cd:
             _log(st, out, cd, "dropped", "answered")
+    elif n.kind == "consistency":
+        _consistency(st, n, out, now)
     elif n.kind == "nonresponsive":
         detail = n.detail or {}
         ignored = [st.claims[i] for i in detail.get("ignored", []) if i in st.claims]
@@ -273,6 +279,26 @@ def on_notice(st: State, n: Notice, now: float) -> list[Event]:
             _log(st, out, Cand(key, "prompt", n.speaker, side_of(st, n.speaker), st.cfg.prompt_conf,
                                _imp(top) if top else 0.0, n.t or now, cid, top), "skipped", "dashboard_only")
     return out + try_fire(st, now)
+
+
+def _consistency(st: State, n: Notice, out: list, now: float) -> None:
+    """A U-turn or a concession may be said ("Proposition, that contradicts your earlier point..."), only with
+    CONSISTENCY_VOICE on, and ranked under factual corrections. Everything else is shown on screen only."""
+    d = n.detail or {}
+    cl = st.claims.get(n.claim_id) if n.claim_id else None
+    key = f"consistency:{(cl.canonical_key if cl else None) or n.claim_id}"
+    cd = Cand(key, "consistency", n.speaker, side_of(st, n.speaker, d.get("side")), float(d.get("confidence") or 0.0),
+              _imp(cl) if cl else 0.0, n.t or now, n.claim_id, cl, detail=dict(d))
+    why = None
+    if not truthy(getattr(config, "CONSISTENCY_VOICE", False)):
+        why = "dashboard_only"
+    elif d.get("kind") not in VOICED_CONSISTENCY:
+        why = "not_voiced"
+    elif cl is None:
+        why = "unknown_claim"
+    elif cd.conf < st.cfg.min_conf:
+        why = "low_conf"
+    _add(st, cd, out, now, why)
 
 
 def _imp(cl: Claim) -> float:
@@ -494,6 +520,9 @@ def _streak(st: State, side: str) -> int:
 def _text(st: State, cd: Cand, now: float) -> str:
     if cd.kind == "dry":
         return voice.render("dry_again" if st.figure_heard else "dry")
+    if cd.kind == "consistency":
+        topic = {"topic": cd.detail.get("topic")} if cd.detail.get("topic") else None
+        return voice.render(cd.detail.get("kind", "generic"), claim=topic or cd.claim, side=spoken_name(st, cd.target))
     return voice.render(cd.kind, claim=cd.claim, verdict=cd.verdict, side=spoken_name(st, cd.target),
                         age_s=now - cd.t0)
 
