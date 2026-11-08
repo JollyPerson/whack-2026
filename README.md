@@ -92,9 +92,10 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
   formula overall: 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (`app/judge/scorecard.py`).
 - Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript and the fact checks, scores each side on six
   criteria (plus argument quality and civility), concludes on bias and factuality, picks the winner and writes
-  reasoning that cites the scorecard. A narrow margin is a draw. If Claude is unavailable, slower than
-  `JUDGE_TIMEOUT_S` (60 s; about 25 s on the golden run) or answers something invalid or inconsistent, the formula
-  decides (`via: formula`): a gap below 0.5 is a draw, 2.0 or more is decisive.
+  reasoning that cites the scorecard. The margin is read off Claude's own two overalls with the formula's bands: a
+  gap below 0.5 is narrow, and a narrow margin is a draw; 2.0 or more is decisive. If Claude is unavailable, slower
+  than `JUDGE_TIMEOUT_S` (60 s; about 25 s on the golden run) or answers something invalid or inconsistent (a
+  winner its own overalls don't favour, a draw 0.5 or more apart), the formula decides (`via: formula`).
 - The summary goes to `logs/summaries/<run>-summary.md`, with the same content as `.json` beside it (`JUDGE_DIR`;
   `<run>` is the run's log name). It holds the verdict, the scorecard, the scores with reasons, bias, factuality,
   the reasoning, the fact checks (sourced kept apart from "AI knowledge, unsourced"), the system's balance and the

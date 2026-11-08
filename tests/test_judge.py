@@ -94,7 +94,7 @@ def on_bus(events, bus=None) -> Bus:
     return bus
 
 
-def answer(winner="prop", margin="clear", prop=7.0, opp=5.0, **kw) -> dict:
+def answer(winner="prop", margin="clear", prop=7.0, opp=5.5, **kw) -> dict:
     def side(ov):
         return {**{k: {"score": ov, "why": f"{k} because reasons"} for k in writer.CRITERIA}, "overall": ov}
     d = {"scores": {"prop": side(prop), "opp": side(opp)},
@@ -262,11 +262,38 @@ async def test_a_narrow_margin_is_a_draw():
     assert (j.winner, j.margin, j.headline, j.note) == ("draw", "", "A draw.", "")
 
 
+@pytest.mark.parametrize("winner, margin, prop, opp, got", [
+    ("prop", "clear", 6.1, 6.0, ("draw", "")),           # 0.1 apart: narrow, whatever Claude called it
+    ("prop", "decisive", 6.2, 6.0, ("draw", "")),
+    ("opp", "decisive", 5.0, 5.4, ("draw", "")),
+    ("prop", "decisive", 7.0, 6.0, ("prop", "clear")),   # 1.0 apart: clear, not decisive
+    ("opp", "clear", 3.0, 6.0, ("opp", "decisive")),     # 3.0 apart: decisive
+    ("prop", "clear", 6.5, 6.0, ("prop", "clear")),      # 0.5 is not below the draw threshold
+    ("draw", "narrow", 6.4, 6.0, ("draw", "")),
+])
+async def test_the_margin_follows_claudes_own_overalls(winner, margin, prop, opp, got):
+    rec = sc.collect(synthetic())
+    j = await writer.decide(FakeLLM(answer(winner, margin, prop=prop, opp=opp)), rec, sc.scorecard(rec))
+    assert j.via == "llm" and (j.winner, j.margin) == got
+    assert (j.note == "") == (winner == got[0] and (winner == "draw" or margin == got[1]))
+    if got[0] == "draw" and winner != "draw":
+        assert "less than 0.5" in j.note and j.headline == f"Too close to call: {prop:.1f} to {opp:.1f}. A draw."
+    elif winner != "draw" and got[1] != margin:
+        assert f"make it {got[1]}" in j.note and j.headline == "The Proposition wins on the evidence."
+
+
+def test_a_headline_naming_the_wrong_margin_is_replaced():
+    j = writer.from_llm(answer("prop", "decisive", prop=7.0, opp=6.0, headline="The Proposition wins decisively."))
+    assert (j.winner, j.margin, j.headline) == ("prop", "clear", "Proposition wins clearly, 7.0 to 6.0.")
+
+
 @pytest.mark.parametrize("out, why", [
     (answer("opp", "clear", prop=7.0, opp=5.0), "inconsistent"),                # its own overalls favour Prop
     (answer("prop", "narrow", prop=5.0, opp=6.0), "inconsistent"),              # even when narrow
     (answer("prop", "clear", prop=6.0, opp=6.0), "inconsistent"),               # a tie is no win
     (answer("draw", "narrow", prop=8.0, opp=5.0), "draw"),                      # a draw 3 points apart
+    (answer("draw", "narrow", prop=7.0, opp=5.2), "draw"),                      # ... or 1.8
+    (answer("draw", "narrow", prop=6.5, opp=6.0), "below 0.5"),                 # ... or 0.5: not narrow
     (answer(prop=11.0), "0 to 10"),
     (answer(reasoning="The Proposition was better overall."), "number"),       # cites no scorecard number
     (answer(winner="both"), "winner"),
@@ -383,7 +410,7 @@ async def test_the_final_screen_publishes_one_debate_result_and_writes_the_summa
     judge.handle(bus.publish(FINAL))
     r = (await wait_for(lambda: results(judge)))[0]
     assert (r.src, r.winner, r.margin, r.via, r.dance_s) == ("judge", "prop", "clear", "llm", 30.0)
-    assert r.headline == "The Proposition wins on the evidence." and r.scores["opp"]["overall"] == 5.0
+    assert r.headline == "The Proposition wins on the evidence." and r.scores["opp"]["overall"] == 5.5
     assert r.dances == {"for": WIN, "against": LOSE} and r.music == {"for": True, "against": False}
     md = Path(r.report)
     assert md == tmp_path / "summaries" / "20261108-120000-live-summary.md"   # outside the repo: absolute

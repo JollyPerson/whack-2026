@@ -10,9 +10,12 @@ decide(llm, record, card) -> Judgement, and never raises:
   bias conclusion (each side, and whether the system's interventions were even), a factuality conclusion, other
   observations, the winner, the margin, a headline of at most HEADLINE_WORDS words and a reasoning paragraph that
   cites scorecard numbers. Both sides are judged by the same standard (SYSTEM).
-- Rules in code: a narrow margin is a draw (with a draw headline). No LLM, a timeout, an API error or refusal, a
-  missing or invalid field (a score outside 0-10, reasoning without a number), a winner whose own overall is not
-  higher than the loser's, or a draw although its own overalls differ by DECISIVE_FROM or more -> the scorecard
+- Rules in code: the margin is read off Claude's OWN overalls with the formula's bands (scorecard.margin_of: below
+  DRAW_BELOW narrow, below DECISIVE_FROM clear, else decisive). A narrow margin is a draw (with a draw headline),
+  whether Claude called it narrow or its overalls are that close; a clear/decisive label its overalls don't bear out
+  is corrected to theirs (and a headline naming the wrong margin is replaced). No LLM, a timeout, an API error or
+  refusal, a missing or invalid field (a score outside 0-10, reasoning without a number), a winner whose own overall
+  is not higher than the loser's, or a draw although its own overalls differ by DRAW_BELOW or more -> the scorecard
   formula decides (via="formula", `note` says why).
 """
 from __future__ import annotations
@@ -86,8 +89,11 @@ procedure: neither is pressure (the scorecard counts them apart, and the interve
 - reasoning: one paragraph of at most 120 words explaining the decision. It MUST cite numbers from the scorecard, \
 written as digits (e.g. "3 of its 6 checked claims were contradicted"). The formula's verdict is a reference, not \
 a ruling: you may disagree with it, and then say why.
-- winner: prop, opp or draw. margin: narrow, clear or decisive. A narrow margin is a draw: if it is too close to \
-call, answer winner "draw" and margin "narrow". The winner's overall must be higher than the loser's.
+- winner: prop, opp or draw. margin: narrow, clear or decisive. The margin follows from YOUR two overalls, by the \
+scorecard's bands: a difference below {DRAW_BELOW} is narrow, below {DECISIVE_FROM} clear, {DECISIVE_FROM} or more \
+decisive; the code applies these bands to your overalls. A narrow margin is a draw: if it is too close to call, \
+answer winner "draw" and margin "narrow", with overalls less than {DRAW_BELOW} apart. The winner's overall must be \
+higher than the loser's.
 - headline: one sentence of at most {HEADLINE_WORDS} words for the final screen, neutral in tone, naming the winner \
 or the draw.
 
@@ -305,6 +311,12 @@ def draw_headline(prop: float, opp: float, by: str = "") -> str:
     return f"Too close to call: {prop:.1f} to {opp:.1f}{by}. A draw."
 
 
+def win_headline(winner: str, margin: str, scores: dict, by: str = "") -> str:
+    how = {"clear": "clearly", "decisive": "decisively"}.get(margin, "")
+    own, other = scores[winner], scores[OTHER[winner]]
+    return f"{' '.join(w for w in (SIDE_LABEL[winner], 'wins', how, by) if w)}, {own:.1f} to {other:.1f}."
+
+
 def from_llm(out: Any, model: str = "") -> Judgement:
     """Claude's answer as a Judgement, with the rules in code applied. Raises Invalid if it can't be used."""
     if not isinstance(out, dict):
@@ -338,15 +350,24 @@ def from_llm(out: Any, model: str = "") -> Judgement:
     if not re.search(r"\d", reasoning):
         raise Invalid("the reasoning cites no scorecard number")
     p, o = scores["prop"]["overall"], scores["opp"]["overall"]
-    note = ""
+    band, note = sc.margin_of(p - o), ""          # the margin Claude's own overalls show
     if winner != "draw":
         if scores[winner]["overall"] <= scores[OTHER[winner]]["overall"]:
             raise Invalid(f"winner {winner} is inconsistent with its own overall scores ({p:.1f} to {o:.1f})")
-        if margin == "narrow":
-            note = f"Claude called a narrow {SIDE_LABEL[winner]} win ({p:.1f} to {o:.1f}): a narrow margin is a draw."
+        if margin == "narrow" or band == "narrow":
+            why = "" if margin == "narrow" else f", but its own overalls differ by less than {DRAW_BELOW}"
+            note = (f"Claude called a {margin} {SIDE_LABEL[winner]} win ({p:.1f} to {o:.1f}){why}: a narrow margin "
+                    f"is a draw.")
             winner, headline = "draw", draw_headline(p, o)
-    elif abs(p - o) >= DECISIVE_FROM:
-        raise Invalid(f"a draw, although its own overall scores differ by {abs(p - o):.1f}")
+        elif margin != band:
+            note = (f"Claude called the margin {margin}; its own overalls ({p:.1f} to {o:.1f}) make it {band}, so "
+                    f"{band} it is.")
+            if re.search(r"(?i)\b(clear|decisive|narrow)", headline):
+                headline = win_headline(winner, band, {s: scores[s]["overall"] for s in SIDES})
+            margin = band
+    elif band != "narrow":
+        raise Invalid(f"a draw, although its own overall scores differ by {abs(p - o):.1f} "
+                      f"(a draw is below {DRAW_BELOW})")
     bias = out.get("bias") if isinstance(out.get("bias"), dict) else {}
     obs = out.get("observations") if isinstance(out.get("observations"), list) else []
     return Judgement(winner=winner, margin="" if winner == "draw" else margin, headline=headline, scores=scores,
@@ -383,9 +404,7 @@ def formula_headline(f: dict) -> str:
     a, b = (f["overall"][s] for s in SIDES)
     if f["winner"] == "draw":
         return draw_headline(a, b, " on the scorecard")
-    w = f["winner"]
-    how = {"clear": "clearly ", "decisive": "decisively "}.get(f["margin"], "")
-    return f"{SIDE_LABEL[w]} wins {how}on the scorecard, {f['overall'][w]:.1f} to {f['overall'][OTHER[w]]:.1f}."
+    return win_headline(f["winner"], f["margin"], f["overall"], "on the scorecard")
 
 
 def from_formula(card: dict, note: str) -> Judgement:
