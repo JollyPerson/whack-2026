@@ -1,0 +1,367 @@
+From c6739a4f019a56008526f1fc2fe419410baebab0 Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 04:59:37 +0000
+Subject: [PATCH 02/12] Referee bridge: bubble beside the head, sizes in screen
+ pixels
+
+Two speech_bridge.json options for running several avatars side by side
+(the debate's For/Against side bots). Both default to off, which keeps
+ME's own bubble spot and units exactly as before.
+
+- screenPixels: fontSize and bubbleWidth (and ME's padding, spacing and
+  sprite corners) are screen pixels. The bubble lives on TalkPanel, a
+  0.8-scaled panel on a canvas that CanvasScaler "Expand" shrinks with
+  the window (1536x1024 reference), so a 540-wide window drew it at 0.28.
+  The pixels per unit are measured through the container's transform.
+- bubbleSide "left"/"right": the bubble starts beside the avatar's head
+  bone, projected through ME's camera (it draws both the avatar and the
+  canvas), bubbleGap to the side and bubbleTop above it in metres at the
+  avatar's scale, and grows downwards so the typing line stays put. It
+  is narrowed to fit the window and follows the head sideways while
+  ME's idle animations sway the avatar. No head bone: ME's spot.
+
+The bubble log line now shows the size used and, with bubbleSide, the
+head and corner positions; verbose also logs each mouth open/close.
+Text-only lines (say + talk on, talk off later) needed no change.
+---
+ Assets/MATE ENGINE - Referee/README.md        |  29 +++-
+ .../Runtime/SpeechBridge.cs                   |  16 +-
+ .../Runtime/SpeechBridgeConfig.cs             |  17 ++-
+ .../Runtime/SpeechBubble.cs                   | 139 +++++++++++++++++-
+ 4 files changed, 185 insertions(+), 16 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 039bb79..df1f19e 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -39,6 +39,10 @@ its default:
+   "pollPath": "/face/mate/next",
+   "fontSize": 40,
+   "bubbleWidth": 720,
++  "screenPixels": false,
++  "bubbleSide": "",
++  "bubbleGap": 0.15,
++  "bubbleTop": 0.25,
+   "lingerSeconds": 3,
+   "stopDanceOnSay": true,
+   "verbose": false
+@@ -50,10 +54,29 @@ its default:
+ | `enabled` | Start the bridge without the command-line flag |
+ | `server` | Base URL of the server. Overridden by `-speech-bridge <url>` or `MEX_SPEECH_BRIDGE` |
+ | `pollPath` | Path of the long-poll route |
+-| `fontSize`, `bubbleWidth` | Bubble size in pixels. ME's own bubbles are 26 and 600; the defaults here are sized for a projector |
++| `fontSize`, `bubbleWidth` | Bubble size. ME's own bubbles are 26 and 600; the defaults here are sized for a projector. They are canvas units, which shrink with the window (below), unless `screenPixels` is set |
++| `screenPixels` | Make `fontSize` and `bubbleWidth` screen pixels whatever the window size. ME's padding and the sprite's corners scale with them |
++| `bubbleSide` | `""` keeps ME's own spot, left of the avatar. `"left"` or `"right"` puts the bubble beside the avatar's head on that side (below) |
++| `bubbleGap`, `bubbleTop` | With `bubbleSide` only: the bubble's near edge is `bubbleGap` to the side of the head bone and its top edge `bubbleTop` above it, in metres at the avatar's scale |
+ | `lingerSeconds` | How long the bubble stays after the voice stops |
+ | `stopDanceOnSay` | Stop a running dance when a new line arrives |
+-| `verbose` | Log every poll and every `talk` |
++| `verbose` | Log every poll and every `talk`, and every time the bridge opens or closes the mouth |
++
++**Size and placement.** ME parents its bubbles to the `TalkPanel` of the avatar's `AvatarRandomMessages`. That panel sits
++at a fixed spot left of the window's centre, on a canvas that scales with the window (`CanvasScaler` "Expand",
++1536x1024 reference: the scale is the smaller of width / 1536 and height / 1024), and the panel itself is scaled 0.8.
++So by default a bubble is drawn at 0.8 of its size in a 1536-wide window and about 0.28 in a 540-wide one, and it hangs
++left of the avatar, where a neighbouring avatar or the screen edge can cut it off.
++- `screenPixels` converts the configured sizes through that chain when each bubble is created, so the text has the
++  same size in any window.
++- `bubbleSide` projects the avatar's head bone to the screen through ME's camera, which draws both the avatar and the
++  canvas. The bubble then starts beside the head and grows downwards, so the first line stays put while the text types.
++  It is narrowed to fit when the window edge is closer than `bubbleWidth`, and its top is kept inside the window. ME's
++  idle animations sway the avatar by up to about a head's width, so the bubble follows the head sideways (smoothly,
++  never past the window edge) until it is removed. The offsets are in metres at the avatar's scale, so they fit any
++  window or avatar size. An avatar without a humanoid head bone falls back to ME's spot.
++- The size is fixed when each bubble is created. The log line `bubble shown on 'TalkPanel' (...)` shows it and, with
++  `bubbleSide`, the head's and the bubble corner's screen positions at that moment (pixels from the bottom left).
+ 
+ ## Wire protocol v1
+ 
+@@ -85,7 +108,7 @@ GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default
+ - Ignores an id it has already shown (it remembers the last 50 ids).
+ - Replaces the current bubble and, if `stopDanceOnSay` is set, stops a running dance.
+ - Builds the bubble exactly like ME's random-message bubble (same container, sprite, font, colours, padding and
+-  material) at the configured size, with no typing sound. The text is shown verbatim; rich text is off.
++  material) at the configured size and placement, with no typing sound. The text is shown verbatim; rich text is off.
+ - If something else destroys the bubble, the line is dropped.
+ - The text appears at about 18 characters per second while the voice plays.
+ - If no `talk on` arrives within 3 s, it shows the whole line at once and removes it after
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs
+index 7674b59..f95dd08 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
+@@ -305,13 +305,13 @@ namespace MateReferee
+                 LogOnce("nostyle", "[SpeechBridge] cannot show a bubble: no AvatarRandomMessages with a chatContainer in the scene");
+                 return false;
+             }
+-            try { bubble = SpeechBubble.Create(bubbleStyle, cfg.fontSize, cfg.bubbleWidth); }
++            try { bubble = SpeechBubble.Create(bubbleStyle, cfg, animator); }
+             catch (Exception e)
+             {
+                 LogOnce("create:" + e.GetType().Name, "[SpeechBridge] cannot create the bubble: " + e);
+                 return false;
+             }
+-            Debug.Log("[SpeechBridge] bubble shown on '" + bubbleStyle.chatContainer.name + "' (fontSize " + cfg.fontSize + ", width " + cfg.bubbleWidth + ")");
++            Debug.Log("[SpeechBridge] bubble shown on '" + bubbleStyle.chatContainer.name + "' (" + bubble.Layout + ")");
+             return true;
+         }
+ 
+@@ -358,7 +358,11 @@ namespace MateReferee
+                     if (p.nameHash == IsTalkingHash && p.type == AnimatorControllerParameterType.Bool) { hasTalkParam = true; break; }
+                 if (!hasTalkParam) LogOnce("noparam", "[SpeechBridge] the avatar's animator has no 'isTalking' bool; the mouth will not move");
+             }
+-            if (hasTalkParam && a.GetBool(IsTalkingHash) != open) a.SetBool(IsTalkingHash, open);
++            if (hasTalkParam && a.GetBool(IsTalkingHash) != open)
++            {
++                a.SetBool(IsTalkingHash, open);
++                if (cfg.verbose) Debug.Log("[SpeechBridge] mouth " + (open ? "open" : "closed") + " (isTalking=" + a.GetBool(IsTalkingHash) + ")");
++            }
+         }
+ 
+         // ---------------------------------------------------------------- scene lookup
+@@ -431,8 +435,14 @@ namespace MateReferee
+         }
+ 
+         // ME's own scripts may reset isTalking (e.g. when a random-message bubble finishes), so re-apply it while talking.
++        // A bubble beside the head (bubbleSide) moves with it here, after the animation has posed the avatar.
+         void LateUpdate()
+         {
++            if (bubble != null)
++            {
++                try { bubble.Follow(Time.unscaledDeltaTime); }
++                catch (Exception e) { LogOnce("follow:" + e.GetType().Name, "[SpeechBridge] moving the bubble failed: " + e); }
++            }
+             if (!talking) return;
+             try
+             {
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs
+index 96784a5..c2e61ff 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
+@@ -21,6 +21,10 @@ namespace MateReferee
+         public string pollPath = DefaultPollPath;
+         public int fontSize = 40;
+         public int bubbleWidth = 720;
++        public bool screenPixels = false;   // fontSize and bubbleWidth are screen pixels, whatever the window size
++        public string bubbleSide = "";      // "" = ME's own spot (left of the avatar); "left" | "right" = beside its head
++        public float bubbleGap = 0.15f;     // bubbleSide: head bone to the bubble's near edge, in metres at avatar scale
++        public float bubbleTop = 0.25f;     // bubbleSide: head bone up to the bubble's top edge, in metres at avatar scale
+         public float lingerSeconds = 3f;
+         public bool stopDanceOnSay = true;
+         public bool verbose = false;
+@@ -77,11 +81,20 @@ namespace MateReferee
+             if (!pollPath.StartsWith("/", StringComparison.Ordinal)) pollPath = "/" + pollPath;
+             fontSize = Mathf.Clamp(fontSize, 8, 200);
+             bubbleWidth = Mathf.Clamp(bubbleWidth, 120, 4000);
++            bubbleSide = (bubbleSide ?? "").Trim().ToLowerInvariant();
++            if (bubbleSide != "left" && bubbleSide != "right")
++            {
++                if (bubbleSide.Length > 0) Debug.LogWarning("[SpeechBridge] bubbleSide '" + bubbleSide + "' is neither left nor right; using ME's own spot");
++                bubbleSide = "";
++            }
++            bubbleGap = Mathf.Clamp(bubbleGap, -2f, 2f);
++            bubbleTop = Mathf.Clamp(bubbleTop, -2f, 2f);
+             lingerSeconds = Mathf.Clamp(lingerSeconds, 0f, 60f);
+         }
+ 
+         public override string ToString() =>
+-            server + pollPath + " fontSize=" + fontSize + " bubbleWidth=" + bubbleWidth + " lingerSeconds=" + lingerSeconds +
+-            " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
++            server + pollPath + " fontSize=" + fontSize + " bubbleWidth=" + bubbleWidth + (screenPixels ? " screenPixels" : "") +
++            (bubbleSide.Length > 0 ? " bubbleSide=" + bubbleSide + " bubbleGap=" + bubbleGap + " bubbleTop=" + bubbleTop : "") +
++            " lingerSeconds=" + lingerSeconds + " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
+     }
+ }
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs
+index e6c2558..6e3fb93 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs	
+@@ -4,6 +4,9 @@
+ // It creates the UI objects itself, mirroring Bubble's construction step for step, because Bubble is internal to
+ // Assembly-CSharp: using only public types, this Runtime folder also compiles as a separate DLL against a released
+ // build's Managed/Assembly-CSharp.dll (the no-rebuild fallback).
++// Two options change where and how big it is (both off by default, which gives exactly ME's spot and units):
++// screenPixels makes the configured sizes screen pixels, and bubbleSide puts it beside the avatar's head and keeps it
++// there while ME's idle animations sway the avatar from side to side.
+ using UnityEngine;
+ using UnityEngine.UI;
+ 
+@@ -11,21 +14,63 @@ namespace MateReferee
+ {
+     sealed class SpeechBubble
+     {
++        const float EdgeMarginPx = 8f;  // bubbleSide: closest the bubble gets to the window edge
++        const float MinWidthPx = 120f;  // bubbleSide: narrowest it gets when the window edge is near
++        const float FollowRate = 6f;    // bubbleSide: how fast it catches up with the head (1/s)
++
+         readonly GameObject root;
+         readonly Text label;
+ 
+-        SpeechBubble(GameObject root, Text label)
++        // bubbleSide only (avatar stays null otherwise): what Follow needs.
++        Animator avatar;
++        SpeechBridgeConfig cfg;
++        Transform container;
++        RectTransform rect;
++        float width, pad; // outer width and padding, in container units
++        float edgeX;      // screen x of the outer edge next to the head
++
++        SpeechBubble(GameObject root, Text label, string layout)
+         {
+             this.root = root;
+             this.label = label;
++            Layout = layout;
+         }
+ 
+         // False once the bubble's GameObject is gone (removed by us, or destroyed by someone else).
+         public bool Alive => root != null;
+ 
+-        public static SpeechBubble Create(AvatarRandomMessages style, int fontSize, int width)
++        // Size and placement, for the log.
++        public string Layout { get; }
++
++        public static SpeechBubble Create(AvatarRandomMessages style, SpeechBridgeConfig cfg, Animator avatar)
+         {
+             float pad = style.textPadding, offset = style.bubbleSpacing;
++            float fontSize = cfg.fontSize, width = cfg.bubbleWidth;
++
++            // The bubble's units are chatContainer's (TalkPanel's) local units. ME's canvas shrinks with the window
++            // (CanvasScaler "Expand", 1536x1024 reference) and TalkPanel is scaled 0.8 on top, so both options start
++            // from how many screen pixels one unit is.
++            Camera uiCam = null;
++            Vector2 origin = Vector2.zero;
++            float px = 1f;
++            bool measured = (cfg.screenPixels || cfg.bubbleSide.Length > 0) && Measure(style.chatContainer, out uiCam, out origin, out px);
++            bool pixels = cfg.screenPixels && measured;
++            if (pixels)
++            {
++                // ME's padding and spacing become pixels too, so the bubble keeps its proportions.
++                fontSize /= px; width /= px; pad /= px; offset /= px;
++            }
++            Vector2 head = Vector2.zero, corner = Vector2.zero;
++            bool beside = cfg.bubbleSide.Length > 0 && measured && BesideHead(avatar, uiCam, cfg, out head, out corner);
++            bool right = cfg.bubbleSide == "right";
++            if (beside)
++            {
++                // Narrow the bubble rather than let the window edge cut it off, and keep its top inside the window.
++                float room = (right ? Screen.width - corner.x : corner.x) - EdgeMarginPx;
++                width = Mathf.Min(width, Mathf.Max(room, MinWidthPx) / px);
++                corner.x = ClampEdge(corner.x, width * px, right);
++                corner.y = Mathf.Min(corner.y, Screen.height - EdgeMarginPx);
++            }
+ 
+             // Bubble.CreateTextObject: fixed width (bubbleWidth != -1), height follows the text (bubbleHeight == -1).
+             var textGo = new GameObject("SpeechBridgeBubble", typeof(RectTransform), typeof(Text), typeof(Canvas));
+@@ -34,7 +79,7 @@ namespace MateReferee
+             textGo.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+             text.text = "";
+             if (style.font != null) text.font = style.font;
+-            text.fontSize = fontSize;
++            text.fontSize = Mathf.Max(1, Mathf.RoundToInt(fontSize));
+             text.color = style.fontColor;
+             text.supportRichText = false;
+ 
+@@ -46,12 +91,25 @@ namespace MateReferee
+             image.sprite = style.bubbleSprite;
+             image.color = style.bubbleColor;
+             if (style.bubbleMaterial != null) image.material = style.bubbleMaterial;
++            if (pixels) image.pixelsPerUnitMultiplier = px; // the sprite's rounded corners in pixels too
+ 
+-            // Bubble.SetBubblePosition with leftPosition = 1, bottomPosition = 0: anchored bottom-right.
+             var rt = textGo.GetComponent<RectTransform>();
+-            rt.pivot = rt.anchorMin = rt.anchorMax = new Vector2(1f, 0f);
+-            rt.localScale = Vector3.one;
+-            rt.anchoredPosition = new Vector2(-(offset + pad), offset + pad);
++            if (beside)
++            {
++                // The outer edge (the image, padding included) starts at the corner and the bubble grows down, so
++                // the first line stays put while the text types.
++                rt.pivot = new Vector2(right ? 0f : 1f, 1f);
++                rt.anchorMin = rt.anchorMax = style.chatContainer is RectTransform c ? c.pivot : new Vector2(0.5f, 0.5f);
++                rt.localScale = Vector3.one;
++                rt.anchoredPosition = (corner - origin) / px + new Vector2(right ? pad : -pad, -pad);
++            }
++            else
++            {
++                // Bubble.SetBubblePosition with leftPosition = 1, bottomPosition = 0: anchored bottom-right.
++                rt.pivot = rt.anchorMin = rt.anchorMax = new Vector2(1f, 0f);
++                rt.localScale = Vector3.one;
++                rt.anchoredPosition = new Vector2(-(offset + pad), offset + pad);
++            }
+             rt.sizeDelta = new Vector2(width - 2f * pad, rt.sizeDelta.y - 2f * pad);
+             var irt = imageGo.GetComponent<RectTransform>();
+             irt.anchorMin = Vector2.zero;
+@@ -68,7 +126,72 @@ namespace MateReferee
+             imageCanvas.overrideSorting = true;
+             imageCanvas.sortingOrder = 1;
+ 
+-            return new SpeechBubble(textGo, text);
++            string unit = pixels ? " px" : "";
++            string layout = "fontSize " + cfg.fontSize + unit + ", width " + Mathf.RoundToInt(pixels ? width * px : width) + unit;
++            if (beside)
++                layout += ", " + cfg.bubbleSide + " of the head at (" + Mathf.RoundToInt(head.x) + "," + Mathf.RoundToInt(head.y) +
++                          "), outer corner (" + Mathf.RoundToInt(corner.x) + "," + Mathf.RoundToInt(corner.y) + ") in a " +
++                          Screen.width + "x" + Screen.height + " window";
++            else if (cfg.bubbleSide.Length > 0) layout += ", ME's own spot: no head bone or canvas to place it " + cfg.bubbleSide;
++            var bubble = new SpeechBubble(textGo, text, layout);
++            if (beside)
++            {
++                bubble.avatar = avatar;
++                bubble.cfg = cfg;
++                bubble.container = style.chatContainer;
++                bubble.rect = rt;
++                bubble.width = width;
++                bubble.pad = pad;
++                bubble.edgeX = corner.x;
++            }
++            return bubble;
++        }
++
++        // bubbleSide: called every frame after the animation, keeps the bubble beside the head. ME's idle animations
++        // move the avatar by up to about a head's width; the bubble follows sideways only (its top stays, so the text
++        // does not bob) and stops at the window edge.
++        public void Follow(float dt)
++        {
++            if (avatar == null || root == null) return; // not placed beside a head, gone, or the avatar was replaced
++            if (!Measure(container, out var uiCam, out var origin, out var px) ||
++                !BesideHead(avatar, uiCam, cfg, out _, out var corner)) return;
++            bool right = cfg.bubbleSide == "right";
++            edgeX = Mathf.Lerp(edgeX, ClampEdge(corner.x, width * px, right), 1f - Mathf.Exp(-FollowRate * dt));
++            rect.anchoredPosition = new Vector2((edgeX - origin.x) / px + (right ? pad : -pad), rect.anchoredPosition.y);
++        }
++
++        // Keeps a bubble of the given outer width (pixels) whose near edge is at x inside the window.
++        static float ClampEdge(float x, float widthPx, bool right) => right
++            ? Mathf.Max(EdgeMarginPx, Mathf.Min(x, Screen.width - EdgeMarginPx - widthPx))
++            : Mathf.Min(Screen.width - EdgeMarginPx, Mathf.Max(x, EdgeMarginPx + widthPx));
++
++        // Screen point of the container's pivot and screen pixels per container unit, measured through its transform
++        // so that the canvas scaler and every scale in between count. False while the canvas has no size yet.
++        static bool Measure(Transform container, out Camera uiCam, out Vector2 origin, out float px)
++        {
++            var canvas = container.GetComponentInParent<Canvas>();
++            if (canvas != null) canvas = canvas.rootCanvas;
++            uiCam = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay ? canvas.worldCamera : null;
++            origin = RectTransformUtility.WorldToScreenPoint(uiCam, container.position);
++            px = (RectTransformUtility.WorldToScreenPoint(uiCam, container.TransformPoint(100f, 0f, 0f)) - origin).x / 100f;
++            return px > 1e-4f;
++        }
++
++        // Screen points (pixels from the bottom left) of the avatar's head bone and of the bubble's outer corner
++        // beside it: bubbleGap to the chosen side and bubbleTop above, in metres scaled with the avatar, so they keep
++        // their place next to the head whatever the window or avatar size. False for an avatar without a head bone.
++        static bool BesideHead(Animator avatar, Camera uiCam, SpeechBridgeConfig cfg, out Vector2 head, out Vector2 corner)
++        {
++            head = corner = Vector2.zero;
++            Transform bone = avatar != null && avatar.isHuman ? avatar.GetBoneTransform(HumanBodyBones.Head) : null;
++            Camera eye = uiCam != null ? uiCam : Camera.main; // ME draws the avatar and its UI with the same camera
++            if (bone == null || eye == null) return false;
++            Vector3 p = bone.position, sideways = eye.transform.right * (cfg.bubbleSide == "right" ? 1f : -1f);
++            float scale = avatar.transform.lossyScale.y;
++            head = eye.WorldToScreenPoint(p);
++            corner = new Vector2(eye.WorldToScreenPoint(p + sideways * (cfg.bubbleGap * scale)).x,
++                                 eye.WorldToScreenPoint(p + eye.transform.up * (cfg.bubbleTop * scale)).y);
++            return true;
+         }
+ 
+         public void SetText(string text)

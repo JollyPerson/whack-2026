@@ -30,10 +30,10 @@ How it works and what each event means: `README.md` ("Side bots", "Debate summar
 - **Optional:** `EXA_API_KEY`, or saved evidence indexes, for **sourced** fact checks. Without them, verdicts are
   "unverifiable" and the bots fall back to AI knowledge, tagged as such.
 - **[uv](https://docs.astral.sh/uv/)** and `parec` for the ears.
-- **The Mate Engine fork**, branch `side-bots`:
-  [dabestthebest/Mate-Engine-Linux-Port](https://github.com/dabestthebest/Mate-Engine-Linux-Port/tree/side-bots), a
-  fork of [Marksonthegamer/Mate-Engine-Linux-Port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port). Build
-  it with Unity 6000.2.6f2: `./build-referee.sh <out-dir>` takes about 2 minutes after the first project import.
+- **Our Mate Engine changes**, kept in [`mate-engine/`](../mate-engine/README.md) as patches for
+  [Marksonthegamer/Mate-Engine-Linux-Port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port). Apply them
+  with `git am` and build with Unity 6000.2.6f2: `./build-referee.sh <out-dir>` takes about 2 minutes after the first
+  project import.
 - **For the verdict dances,** the Mate Engine community CustomDances collection. It is not included here; see
   Credits.
 
@@ -46,7 +46,7 @@ How it works and what each event means: `README.md` ("Side bots", "Debate summar
    ```bash
    MIC1=<prop mic> MIC2=<opp mic> scripts/ears-two-mics.sh
    ```
-3. **Avatars,** from the fork's checkout:
+3. **Avatars,** from the patched Mate Engine checkout:
    ```bash
    PAYLOAD=<out-dir>/Payload DANCE_LIBRARY=<CustomDances folder> tools/mate-bots.sh start
    ```
@@ -92,9 +92,10 @@ How it works and what each event means: `README.md` ("Side bots", "Debate summar
   contributors, under the MateEngine Pro License v2.0: non-commercial, source public, attribution kept.
   - The **Linux port** is [Mate-Engine-Linux-Port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port) by
     Marksonthegamer.
-  - Our fork's additions are under the same licence, and their source is public in the fork above.
+  - Our changes (`mate-engine/` patches) are under the same licence. It requires their source to be public, so
+    make this repository (or that folder) public before distributing a build.
   - Neither project is affiliated with or endorses whack-2026.
-  - The fork's speech bubble mirrors `LLMUnitySamples.Bubble` from [LLMUnity](https://github.com/undreamai/LLMUnity)
+  - The speech bubble in our changes mirrors `LLMUnitySamples.Bubble` from [LLMUnity](https://github.com/undreamai/LLMUnity)
     by Undream AI (MIT).
 - **Verdict dances.** They come from the Mate Engine community's CustomDances collection: "MMD-Conqueror",
   "MMD-Lost One_s Weeping" and "MMD-皆大欢喜-卜逻desu". The motions and songs belong to their original MMD motion and

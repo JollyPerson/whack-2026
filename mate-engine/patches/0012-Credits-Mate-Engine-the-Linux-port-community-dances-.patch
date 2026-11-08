@@ -1,0 +1,71 @@
+From 4395de46a27c19391b20325757e78f2247ac662c Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 07:24:20 +0000
+Subject: [PATCH 12/12] Credits: Mate Engine, the Linux port, community dances;
+ say what this fork is
+
+The top-level README gets a short note about this fork (debate referee and
+side bots, for whack-2026) that keeps upstream attribution and the
+MateEngine Pro License terms. The Referee README now credits
+Marksonthegamer's Linux port and the community dance creators, and says
+the dances are not redistributed.
+---
+ Assets/MATE ENGINE - Referee/README.md | 13 +++++++++++--
+ README.md                              | 19 +++++++++++++++++++
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 9dc834f..d18582a 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -323,8 +323,10 @@ no-rebuild fallback). No scene, prefab or project setting is changed: everything
+ ## Licence and credits
+ 
+ - **Mate Engine**
+-  - This fork, including these additions, is a derivative of Mate Engine by Shiny and is distributed under the
+-    **MateEngine Pro License v2.0** (see `LICENSE`).
++  - This fork, including these additions, is a derivative of [Mate Engine](https://github.com/shinyflvre/Mate-Engine)
++    by shinyflvre (Shiny / Johnson Jason) and contributors, by way of the unofficial
++    [Linux port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port) by Marksonthegamer. It is distributed
++    under the **MateEngine Pro License v2.0** (see `LICENSE`).
+   - The source stays public, attribution must be kept, and commercial use is not allowed.
+   - The components required to build and run this version (this folder, the build script and the mock server)
+     are included.
+@@ -339,3 +341,10 @@ no-rebuild fallback). No scene, prefab or project setting is changed: everything
+   - No code from maoxig's separate CustomDancePlayer repository is used: it has no licence.
+ - **Third-party packages** are unchanged from upstream; see `Third Party Licenses/`.
+ - **Programs that talk to the bridge** use only the HTTP protocol above. They contain no Mate Engine code.
++- **Community dances.** The verdict dances (`tools/mate-bots.sh` copies "MMD-Conqueror", "MMD-Lost One_s Weeping" and
++  "MMD-皆大欢喜-卜逻desu" into a local build) come from the Mate Engine community's CustomDances collection. The
++  motions and music belong to their creators: the original MMD motion and song authors, and the collection's
++  contributors (folders such as Yongqisang and Xenophn). They are **not** included in this repository or any build we
++  publish. Get them from that collection and point `DANCE_LIBRARY` at it.
++- **Made for** whack-2026 ([JollyPerson/whack-2026](https://github.com/JollyPerson/whack-2026)), the debate server
++  these channels talk to.
+diff --git a/README.md b/README.md
+index 82f41cd..53e3e35 100755
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,22 @@
++# Mate-Engine-Linux-Port: debate referee and side-bot fork
++
++> [!NOTE]
++> This is a fork made for **whack-2026**, a live debate fact-checker
++> ([JollyPerson/whack-2026](https://github.com/JollyPerson/whack-2026)). Branch `side-bots` adds a speech bridge, so
++> Mate Engine avatars can show the debate server's lines in speech bubbles. It also adds two side-bot avatars (For
++> and Against), verdict dances with music on or off and an automatic stop, a command-line build and dance export, and
++> the launcher `tools/mate-bots.sh`. Details, the wire protocol and credits are in
++> [`Assets/MATE ENGINE - Referee/README.md`](Assets/MATE%20ENGINE%20-%20Referee/README.md).
++>
++> **Credits.** [Mate Engine](https://github.com/shinyflvre/Mate-Engine) is by shinyflvre (Shiny / Johnson Jason) and
++> contributors. The Linux port this fork is based on, [Mate-Engine-Linux-Port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port),
++> is by Marksonthegamer. Everything here, the fork's additions included, is distributed under the
++> **MateEngine Pro License v2.0** (`LICENSE`): free of charge, non-commercial, source public, attribution kept.
++> This fork is not affiliated with or endorsed by the Mate Engine project or the Linux port's author.
++> The upstream README follows unchanged.
++
++---
++
+ # 🌐 Language / 语言选择
+ - [English](#English)
+ - [简体中文](#简体中文)

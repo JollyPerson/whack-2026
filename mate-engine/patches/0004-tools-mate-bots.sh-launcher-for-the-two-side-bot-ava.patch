@@ -1,0 +1,370 @@
+From 6dbc762580f153f60e22f45fe8294aeb05a30f24 Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 04:59:54 +0000
+Subject: [PATCH 04/12] tools/mate-bots.sh: launcher for the two side-bot
+ avatars
+
+start|stop|status|place [for|against] runs the debate's side bots from
+the fork's build ($PAYLOAD, default mex-builds/bots/Payload): "for" in
+the lower left with its bubble on the right, "against" in the lower
+right with its bubble on the left, each polling
+$SERVER/face/mate/next/<persona>.
+
+- Each instance has its own XDG_CONFIG_HOME, TMPDIR (Vulkan shader
+  cache) and logs under ~/.local/state/whack-mate/<persona>/, so the two
+  share no settings, prefs or caches.
+- start rewrites settings.json (tutorial done, 30 FPS cap, Discord off,
+  sounds 0, no random/Minecraft messages or auto-dance apps, on top, a
+  built-in avatar each: default / Ayrina), speech_bridge.json (channel,
+  bubble side, 30/320 px) and Unity's prefs (window geometry; a new file
+  also gets the "Default" entries, without which Unity ignores it).
+- Defaults: 900x820 windows at y=200, clear of the panel; both showed
+  about 29 FPS at the 30 cap. XDG_SESSION_TYPE=x11 skips ME's 30 s
+  "Wayland is not fully supported" notice per launch.
+- PIDs in <persona>/pid, checked by executable and log argument before
+  any signal; stop sends SIGTERM to both, then SIGKILL after 10 s
+  (Unity sometimes hangs on SIGTERM, old and new builds alike).
+- place moves running windows with _NET_MOVERESIZE_WINDOW via libX11.
+---
+ Assets/MATE ENGINE - Referee/README.md |  21 +-
+ tools/mate-bots.sh                     | 292 +++++++++++++++++++++++++
+ 2 files changed, 312 insertions(+), 1 deletion(-)
+ create mode 100755 tools/mate-bots.sh
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 93753c0..1933d1c 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -224,6 +224,25 @@ sends one text-only line every 12 s to each in turn, and `POST /say?channel=for&
+ For the cleanest demo, turn off ME's random messages, Minecraft messages and Discord presence. Set its pet, effect
+ and menu volumes to 0, and keep `allowedApps` empty, so that playing audio does not trigger auto-dancing.
+ 
++## Side bots: two avatars at once
++
++The debate server can drive several avatars, one per channel: `GET /face/mate/next/{referee|for|against}` (the plain
++route is `referee`). An instance picks its channel with `pollPath` in its own `speech_bridge.json`; a query string
++cannot work, because the bridge appends `?after=` itself. Side-bot lines are text only: `say` + `talk on`, then
++`talk off`, which the bridge handles like a voiced line (the mouth moves and the text types at about 18 characters a
++second, then the bubble lingers for `lingerSeconds`).
++
++`tools/mate-bots.sh start|stop|status|place [for|against]` runs the two side bots from this build:
++- "for" in the lower left with its bubble on the right, "against" in the lower right with its bubble on the left;
++- each with its own `XDG_CONFIG_HOME` and `TMPDIR` under `~/.local/state/whack-mate/<persona>/`, so the instances
++  share no settings, Unity prefs or caches (Unity's prefs hold the window position and size, which the script seeds);
++- PIDs in `<persona>/pid`, stopped with SIGTERM by PID; `status` shows whether each is alive and its last bridge lines.
++
++Its header lists the settings (`SERVER`, `PAYLOAD`, window geometry, avatar, bubble size). On the i5-10310U laptop
++this was built on, the two default 900x820 windows each showed about 29 frames per second at the 30 FPS cap (about
++1 GB of memory each). Much bigger windows, or windows reaching under the desktop panel, cut every instance's frame
++rate.
++
+ ## Files
+ 
+ | File | Purpose |
+@@ -238,7 +257,7 @@ and menu volumes to 0, and keep `allowedApps` empty, so that playing audio does
+ | `Editor/RefereeBuild.cs` | Command-line player build |
+ | `../Editor/ModExporterWindow.cs` | (modified) default target, missing-target error, shared dance export |
+ | `../MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs` | (modified) the dance player fixes above |
+-| `/build-referee.sh`, `/tools/mock_mate_server.py` | Build script and mock server at the repository root |
++| `/build-referee.sh`, `/tools/mock_mate_server.py`, `/tools/mate-bots.sh` | Build script, mock server and side-bot launcher at the repository root |
+ 
+ This folder has no assembly definition on purpose: the code uses ME's classes, so it must compile into
+ `Assembly-CSharp` (an assembly definition cannot reference it). The runtime scripts use only public types, so
+diff --git a/tools/mate-bots.sh b/tools/mate-bots.sh
+new file mode 100755
+index 0000000..74b2b5a
+--- /dev/null
++++ b/tools/mate-bots.sh
+@@ -0,0 +1,292 @@
++#!/usr/bin/env bash
++# The debate fact-checker's two side-bot avatars: Mate Engine instances "for" (Prop's second, lower left of the
++# screen) and "against" (Opp's second, lower right). Each polls its own channel, <server>/face/mate/next/<persona>,
++# and shows that bot's lines in a speech bubble beside its head on the inner side, sized in screen pixels
++# (the bridge and its options: "Assets/MATE ENGINE - Referee/README.md").
++#   tools/mate-bots.sh start|stop|status|place [for|against]     (default: both)
++# Each instance has its own state in $STATE/<persona>/: xdg (its XDG_CONFIG_HOME), tmp (its TMPDIR, which keeps the
++# Vulkan shader cache) and logs (player.log, stdout.log). So the two share no settings, prefs or caches with each other
++# or with a normal Mate Engine. Before launching, start rewrites these in xdg/unity3d/Shinymoon/MateEngineX/:
++#   settings.json       (other keys kept) tutorial done, FPS cap, Discord presence off, sounds at 0, random and
++#                       Minecraft messages off, no auto-dance apps, always on top, the bot's avatar
++#   speech_bridge.json  bridge on, the bot's channel, bubble size and side
++#   prefs               Unity's saved window position and size, which the player restores at launch (KWin puts the
++#                       window about 14 px higher than asked; place moves it exactly)
++# stop sends SIGTERM to the PIDs in $STATE/<persona>/pid (SIGKILL after 10 s); on a clean exit Unity saves its prefs.
++# place moves running windows to the configured geometry without a restart (for a different screen or projector).
++# Environment:
++#   SERVER                    debate server (default http://127.0.0.1:8000)
++#   PAYLOAD                   the fork's build (default /home/dabest/claudesandbox/mex-builds/bots/Payload)
++#   STATE                     state root (default ~/.local/state/whack-mate)
++#   FOR_GEOM, AGAINST_GEOM    window "x,y,w,h" in screen pixels (default: the lower corners of a 1920x1080 screen,
++#                             above a bottom panel). The avatar stands in the middle of its window, so the width sets
++#                             the room for the bubble. Frame rates drop with big windows or ones under the panel.
++#   FOR_AVATAR, AGAINST_AVATAR  built-in avatar ("" = ME's default, Ayrina, aldina, Lazuli_VRM_Clothes) or a .vrm
++#                             path (default: "" and Ayrina)
++#   FONT_SIZE, BUBBLE_WIDTH   bubble text size and width, in screen pixels (default 30 and 320)
++#   FPS                       frame-rate cap (default 30)
++#   VERBOSE=1                 log every poll and every mouth change in player.log
++set -euo pipefail
++
++SERVER=${SERVER:-http://127.0.0.1:8000}
++PAYLOAD=${PAYLOAD:-/home/dabest/claudesandbox/mex-builds/bots/Payload}
++STATE=${STATE:-$HOME/.local/state/whack-mate}
++FOR_GEOM=${FOR_GEOM:-0,200,900,820}
++AGAINST_GEOM=${AGAINST_GEOM:-1020,200,900,820}
++FOR_AVATAR=${FOR_AVATAR-}
++AGAINST_AVATAR=${AGAINST_AVATAR-Ayrina}
++FONT_SIZE=${FONT_SIZE:-30}
++BUBBLE_WIDTH=${BUBBLE_WIDTH:-320}
++FPS=${FPS:-30}
++VERBOSE=${VERBOSE:-0}
++EXE=MateEngineX.x86_64
++
++usage() { echo "usage: $0 start|stop|status|place [for|against]" >&2; exit 2; }
++
++# persona -> geometry, avatar, bubble side (the inner side: towards the middle of the screen)
++geom() { if [ "$1" = for ]; then echo "$FOR_GEOM"; else echo "$AGAINST_GEOM"; fi; }
++avatar() { if [ "$1" = for ]; then echo "$FOR_AVATAR"; else echo "$AGAINST_AVATAR"; fi; }
++side() { if [ "$1" = for ]; then echo right; else echo left; fi; }
++cfgdir() { echo "$STATE/$1/xdg/unity3d/Shinymoon/MateEngineX"; }
++
++# The PID in $STATE/<persona>/pid if that process is still this persona's player (by its executable and its log
++# file argument, so a reused PID is never signalled), else nothing.
++live_pid() {
++    local f="$STATE/$1/pid" pid
++    [ -f "$f" ] || return 0
++    pid=$(cat "$f")
++    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
++    [ "$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null)")" = "$EXE" ] || return 0
++    tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -xF -- "$STATE/$1/logs/player.log" > /dev/null && echo "$pid"
++    return 0
++}
++
++check_geom() {
++    [[ "$2" =~ ^-?[0-9]+,-?[0-9]+,[0-9]+,[0-9]+$ ]] || { echo "$1: geometry '$2' is not x,y,w,h" >&2; exit 2; }
++}
++
++# Writes the three config files of one persona (see the header).
++seed() {
++    local p=$1 dir
++    dir=$(cfgdir "$p")
++    mkdir -p "$dir" "$STATE/$p/tmp" "$STATE/$p/logs"
++    python3 -I - "$dir" "$p" "$(avatar "$p")" "$FPS" "$SERVER" "$FONT_SIZE" "$BUBBLE_WIDTH" "$(side "$p")" \
++        "$(geom "$p")" "$VERBOSE" <<'PY'
++import json, os, re, sys
++d, persona, model, fps, server, font, width, side, geom, verbose = sys.argv[1:]
++
++def write(name, text):
++    tmp = os.path.join(d, name + ".tmp")
++    with open(tmp, "w") as f:
++        f.write(text)
++    os.replace(tmp, os.path.join(d, name))
++
++# settings.json: Mate Engine's own settings (SaveLoadHandler.SettingsData); keys not set here are kept.
++path = os.path.join(d, "settings.json")
++try:
++    with open(path) as f:
++        settings = json.load(f)
++except (OSError, ValueError):
++    settings = {}
++settings.update(tutorialDone=True, fpsLimit=int(fps), enableDiscordRPC=False, petVolume=0.0, effectsVolume=0.0,
++                menuVolume=0.0, enableRandomMessages=False, enableMinecraftMessages=False, allowedApps=[],
++                isTopmost=True, selectedModelPath=model)
++write("settings.json", json.dumps(settings, indent=2))
++
++# speech_bridge.json: the bridge, owned by this script.
++write("speech_bridge.json", json.dumps({
++    "enabled": True, "server": server, "pollPath": "/face/mate/next/" + persona, "fontSize": int(font),
++    "bubbleWidth": int(width), "screenPixels": True, "bubbleSide": side, "verbose": verbose == "1"}, indent=2))
++
++# prefs: Unity's PlayerPrefs XML; the window position and size are restored from it at launch. Unity ignores them
++# unless the "Default" entries match the build's player settings (1536x1024, native, windowed), so a new file gets
++# those too; once Unity has written the file itself, its own values stay.
++x, y, w, h = map(int, geom.split(","))
++path = os.path.join(d, "prefs")
++try:
++    with open(path) as f:
++        prefs = f.read()
++except OSError:
++    prefs = '<unity_prefs version_major="1" version_minor="1">\n</unity_prefs>\n'
++for name, value, keep in (("Screenmanager Window Position X", x, False), ("Screenmanager Window Position Y", y, False),
++                          ("Screenmanager Resolution Width", w, False), ("Screenmanager Resolution Height", h, False),
++                          ("Screenmanager Fullscreen mode", 3, False), ("Screenmanager Resolution Use Native", 0, False),
++                          ("Screenmanager Resolution Width Default", 1536, True),
++                          ("Screenmanager Resolution Height Default", 1024, True),
++                          ("Screenmanager Resolution Use Native Default", 1, True),
++                          ("Screenmanager Fullscreen mode Default", 3, True)):
++    entry = f'<pref name="{name}" type="int">{value}</pref>'
++    pattern = rf'<pref name="{re.escape(name)}" type="int">-?\d*</pref>'
++    if re.search(pattern, prefs):
++        if not keep:
++            prefs = re.sub(pattern, entry, prefs)
++    else:
++        prefs = prefs.replace("</unity_prefs>", f"\t{entry}\n</unity_prefs>")
++write("prefs", prefs)
++PY
++}
++
++# The 32-bit ARGB visual a transparent window needs, found the way the build's launch.sh does.
++argb_visual() {
++    local v
++    v=$(glxinfo 2>/dev/null | grep -i "32 tc  0  32  0 r  y .   8  8  8  8 .  .   0 24  8" | head -n1 | awk '{print $1}' || true)
++    [ -n "$v" ] || v=$(glxinfo 2>/dev/null | grep -i "32 tc  0  32  0 r  y" | head -n1 | awk '{print $1}' || true)
++    echo "$v"
++}
++
++start_one() {
++    local p=$1 pid visual
++    pid=$(live_pid "$p")
++    if [ -n "$pid" ]; then echo "$p: already running (pid $pid)"; return 0; fi
++    check_geom "$p" "$(geom "$p")"
++    seed "$p"
++    visual=$(argb_visual)
++    [ -n "$visual" ] || echo "$p: warning: no 32-bit visual found (glxinfo); the window may not be transparent" >&2
++    local logs="$STATE/$p/logs"
++    [ -f "$logs/player.log" ] && mv -f "$logs/player.log" "$logs/player-prev.log"
++    local env=(GDK_BACKEND=x11 XDG_CONFIG_HOME="$STATE/$p/xdg" TMPDIR="$STATE/$p/tmp"
++               # Mate Engine pops a 30 s "Wayland is not fully supported" notice per launch; it runs on XWayland anyway.
++               XDG_SESSION_TYPE=x11)
++    [ -n "$visual" ] && env+=(SDL_VIDEO_X11_VISUALID="$visual")
++    # setsid: own session, so closing this terminal or Ctrl-C here does not stop the avatar; exec keeps the PID.
++    (cd "$PAYLOAD" && exec setsid env "${env[@]}" "./$EXE" -logFile "$logs/player.log" \
++        > "$logs/stdout.log" 2>&1 < /dev/null) &
++    echo $! > "$STATE/$p/pid"
++    for _ in $(seq 1 20); do # until the subshell has become the player
++        pid=$(live_pid "$p")
++        [ -z "$pid" ] || break
++        sleep 0.1
++    done
++    if [ -z "$pid" ]; then echo "$p: did not start; see $logs/stdout.log" >&2; return 1; fi
++    echo "$p: started pid $pid ($SERVER/face/mate/next/$p, window $(geom "$p"), avatar '$(avatar "$p")', bubble $(side "$p"))"
++}
++
++# SIGTERM to every running persona at once, then SIGKILL to any still running after 10 s: the player usually exits at
++# once, but now and then hangs on SIGTERM (seen with this fork's builds before and after the bubble options).
++stop_all() {
++    local p pid alive names=() pids=()
++    for p in "$@"; do
++        pid=$(live_pid "$p")
++        if [ -z "$pid" ]; then echo "$p: not running"; rm -f "$STATE/$p/pid"; continue; fi
++        kill -TERM "$pid" 2>/dev/null || true
++        names+=("$p")
++        pids+=("$pid")
++    done
++    [ ${#names[@]} -gt 0 ] || return 0
++    for _ in $(seq 1 40); do
++        alive=0
++        for p in "${names[@]}"; do [ -z "$(live_pid "$p")" ] || alive=1; done
++        [ "$alive" = 1 ] || break
++        sleep 0.25
++    done
++    for i in "${!names[@]}"; do
++        p=${names[$i]}
++        pid=${pids[$i]}
++        if [ -n "$(live_pid "$p")" ]; then
++            echo "$p: still running 10 s after SIGTERM; SIGKILL"
++            kill -KILL "$pid" 2>/dev/null || true
++        fi
++        rm -f "$STATE/$p/pid"
++        echo "$p: stopped (pid $pid)"
++    done
++}
++
++status_one() {
++    local p=$1 pid log="$STATE/$1/logs/player.log"
++    pid=$(live_pid "$p")
++    if [ -n "$pid" ]; then echo "$p: alive (pid $pid)"; else echo "$p: dead"; fi
++    if [ -f "$log" ]; then
++        grep -a "\[SpeechBridge\]" "$log" | grep -av "\] GET \|\] cursor=" | tail -n 4 | sed 's/^/    /' || true
++    fi
++}
++
++# Moves the windows of the running instances with _NET_MOVERESIZE_WINDOW (what Mate Engine itself uses), through
++# libX11, since none of xdotool, wmctrl or kdotool is installed here.
++place() {
++    local args=() p pid
++    for p in "$@"; do
++        pid=$(live_pid "$p")
++        if [ -z "$pid" ]; then echo "$p: not running"; continue; fi
++        check_geom "$p" "$(geom "$p")"
++        args+=("$p" "$pid" "$(geom "$p")")
++    done
++    [ ${#args[@]} -gt 0 ] || return 0
++    python3 -I - "${args[@]}" <<'PY'
++import ctypes as C, sys
++X = C.cdll.LoadLibrary("libX11.so.6")
++X.XOpenDisplay.restype = C.c_void_p
++X.XOpenDisplay.argtypes = [C.c_char_p]
++X.XDefaultRootWindow.restype = C.c_ulong
++X.XDefaultRootWindow.argtypes = [C.c_void_p]
++X.XInternAtom.restype = C.c_ulong
++X.XInternAtom.argtypes = [C.c_void_p, C.c_char_p, C.c_int]
++X.XGetWindowProperty.argtypes = [C.c_void_p, C.c_ulong, C.c_ulong, C.c_long, C.c_long, C.c_int, C.c_ulong,
++                                 C.POINTER(C.c_ulong), C.POINTER(C.c_int), C.POINTER(C.c_ulong),
++                                 C.POINTER(C.c_ulong), C.POINTER(C.c_void_p)]
++X.XFree.argtypes = [C.c_void_p]
++X.XFlush.argtypes = [C.c_void_p]
++
++class ClientMessage(C.Structure):
++    _fields_ = [("type", C.c_int), ("serial", C.c_ulong), ("send_event", C.c_int), ("display", C.c_void_p),
++                ("window", C.c_ulong), ("message_type", C.c_ulong), ("format", C.c_int), ("l", C.c_long * 5)]
++
++class Event(C.Union):
++    _fields_ = [("xclient", ClientMessage), ("pad", C.c_long * 24)]
++
++X.XSendEvent.argtypes = [C.c_void_p, C.c_ulong, C.c_int, C.c_long, C.POINTER(Event)]
++d = X.XOpenDisplay(None)
++if not d:
++    sys.exit("cannot open the X display (is DISPLAY set?)")
++root = X.XDefaultRootWindow(d)
++
++def cardinals(w, name, count):
++    at, fmt, n, rem, data = C.c_ulong(), C.c_int(), C.c_ulong(), C.c_ulong(), C.c_void_p()
++    X.XGetWindowProperty(d, w, X.XInternAtom(d, name, 0), 0, count, 0, 0, C.byref(at), C.byref(fmt),
++                         C.byref(n), C.byref(rem), C.byref(data))
++    if not data:
++        return []
++    try:
++        return list(C.cast(data, C.POINTER(C.c_ulong))[: n.value]) if fmt.value == 32 else []
++    finally:
++        X.XFree(data)
++
++# The window manager's client list holds the player's real window, not its hidden helper windows.
++def windows_of(pid):
++    return [w for w in cardinals(root, b"_NET_CLIENT_LIST", 4096) if cardinals(w, b"_NET_WM_PID", 1) == [pid]]
++
++a = sys.argv[1:]
++for persona, pid, geom in zip(a[0::3], a[1::3], a[2::3]):
++    x, y, w, h = map(int, geom.split(","))
++    wins = windows_of(int(pid))
++    for win in wins:
++        ev = Event()
++        ev.xclient.type = 33  # ClientMessage
++        ev.xclient.window = win
++        ev.xclient.message_type = X.XInternAtom(d, b"_NET_MOVERESIZE_WINDOW", 0)
++        ev.xclient.format = 32
++        # static gravity, x/y/width/height given, sent as a pager (source indication 2)
++        ev.xclient.l[0] = 10 | (0xF << 8) | (2 << 12)
++        ev.xclient.l[1], ev.xclient.l[2], ev.xclient.l[3], ev.xclient.l[4] = x, y, w, h
++        X.XSendEvent(d, root, 0, (1 << 20) | (1 << 19), C.byref(ev))
++    X.XFlush(d)
++    print(f"{persona}: moved {len(wins)} window(s) to {geom}" if wins else f"{persona}: no window found for pid {pid}")
++PY
++}
++
++[ $# -ge 1 ] || usage
++cmd=$1
++shift
++case "${1:-}" in
++    "") personas=(for against) ;;
++    for|against) personas=("$1") ;;
++    *) usage ;;
++esac
++case "$cmd" in
++    start)
++        [ -x "$PAYLOAD/$EXE" ] || { echo "no build at $PAYLOAD/$EXE (set PAYLOAD=<build>/Payload)" >&2; exit 2; }
++        for p in "${personas[@]}"; do start_one "$p"; done ;;
++    stop) stop_all "${personas[@]}" ;;
++    status) for p in "${personas[@]}"; do status_one "$p"; done ;;
++    place) place "${personas[@]}" ;;
++    *) usage ;;
++esac

@@ -1,0 +1,179 @@
+From 349b9710e104d843612d94049328e259ad428e8a Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 06:05:39 +0000
+Subject: [PATCH 10/12] tools/mate-bots.sh: install the verdict dances, seed
+ their music volume
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+start (and the new "dances" command on its own) copies the verdict dance
+titles in DANCES (default: the server's JUDGE_DANCE_WIN, _LOSE and _DRAW
+or their defaults "MMD-Conqueror", "MMD-Lost One_s Weeping" and
+"MMD-皆大欢喜-卜逻desu") from DANCE_LIBRARY, searched with its
+subfolders and matched in any case like FindIndexByTitle, into the
+build's StreamingAssets/CustomDances/. A file already there with the
+same bytes is left alone, so a restart is cheap and a rebuild that drops
+them is repaired by the next start; a missing title is named, not fatal.
+
+speech_bridge.json gains danceMusicVolume from DANCE_VOLUME (default
+0.4): the winner's music. The pet/effects/menu volumes stay at 0; none of
+them is the dance player's.
+---
+ Assets/MATE ENGINE - Referee/README.md |  7 ++-
+ tools/mate-bots.sh                     | 72 +++++++++++++++++++++++---
+ 2 files changed, 71 insertions(+), 8 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index bee7d05..e01d291 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -279,7 +279,12 @@ mouth moves only while it types, and the bubble stays until `talk off` plus `lin
+   and the mouth moves only while the text types;
+ - each with its own `XDG_CONFIG_HOME` and `TMPDIR` under `~/.local/state/whack-mate/<persona>/`, so the instances
+   share no settings, Unity prefs or caches (Unity's prefs hold the window position and size, which the script seeds);
+-- PIDs in `<persona>/pid`, stopped with SIGTERM by PID; `status` shows whether each is alive and its last bridge lines.
++- PIDs in `<persona>/pid`, stopped with SIGTERM by PID; `status` shows whether each is alive and its last bridge lines;
++- with the verdict dances installed: `start` (or `dances` on its own) copies the titles in `DANCES` (default: the
++  server's `JUDGE_DANCE_WIN`, `JUDGE_DANCE_LOSE` and `JUDGE_DANCE_DRAW`, or their defaults "MMD-Conqueror",
++  "MMD-Lost One_s Weeping" and "MMD-皆大欢喜-卜逻desu") from `DANCE_LIBRARY` (searched with its subfolders) into
++  the build's `StreamingAssets/CustomDances/`, skips files already there and names any title it cannot find. A
++  rebuild may drop them; the next `start` puts them back. `DANCE_VOLUME` (default 0.4) is the winner's music volume.
+ 
+ Its header lists the settings (`SERVER`, `PAYLOAD`, window geometry, avatar, bubble size). On the i5-10310U laptop
+ this was built on, the two default 900x820 windows each showed about 29 frames per second at the 30 FPS cap (about
+diff --git a/tools/mate-bots.sh b/tools/mate-bots.sh
+index 322e623..4e1f9b5 100755
+--- a/tools/mate-bots.sh
++++ b/tools/mate-bots.sh
+@@ -4,15 +4,21 @@
+ # and shows that bot's lines in a speech bubble beside its head on the inner side, sized in screen pixels
+ # (the bridge and its options: "Assets/MATE ENGINE - Referee/README.md").
+ #   tools/mate-bots.sh start|stop|status|place [for|against]     (default: both)
++#   tools/mate-bots.sh dances                                    (install the verdict dances only; start does it too)
+ # Each instance has its own state in $STATE/<persona>/: xdg (its XDG_CONFIG_HOME), tmp (its TMPDIR, which keeps the
+ # Vulkan shader cache) and logs (player.log, stdout.log). So the two share no settings, prefs or caches with each other
+ # or with a normal Mate Engine. Before launching, start rewrites these in xdg/unity3d/Shinymoon/MateEngineX/:
+-#   settings.json       (other keys kept) tutorial done, FPS cap, Discord presence off, sounds at 0, random and
+-#                       Minecraft messages off, no auto-dance apps, always on top, the bot's avatar
++#   settings.json       (other keys kept) tutorial done, FPS cap, Discord presence off, sounds at 0 (pet, effects
++#                       and menu volumes: none of them is the dance player's music), random and Minecraft messages
++#                       off, no auto-dance apps, always on top, the bot's avatar
+ #   speech_bridge.json  bridge on, the bot's channel, bubble size and side, the mouth moving only while the text
+-#                       types (mouthWithText), no linger after the hold time unless LINGER is set
++#                       types (mouthWithText), no linger after the hold time unless LINGER is set, and the volume of a
++#                       dance sent with its music on (danceMusicVolume; a dance with music off is silent)
+ #   prefs               Unity's saved window position and size, which the player restores at launch (KWin puts the
+ #                       window about 14 px higher than asked; place moves it exactly)
++# start (and dances) also copies the verdict dances, the titles in DANCES, from DANCE_LIBRARY into the build's
++# StreamingAssets/CustomDances/, where the player finds a dance by its file name. The server's DebateResult has the
++# winner's bot dance one with its music on and the loser's bot another in silence (both, silent, on a draw).
+ # stop sends SIGTERM to the PIDs in $STATE/<persona>/pid (SIGKILL after 10 s); on a clean exit Unity saves its prefs.
+ # place moves running windows to the configured geometry without a restart (for a different screen or projector).
+ # Environment:
+@@ -29,6 +35,12 @@
+ #   LINGER                    seconds a bubble stays after the server's talk off, which comes hold_s after the line
+ #                             (default 0: each bubble is up for hold_s)
+ #   FPS                       frame-rate cap (default 30)
++#   DANCE_VOLUME              volume of a dance played with its music on, 0-1 (default 0.4; the player's own is 0.5)
++#   DANCES                    verdict dance titles (file names without extension, any case), separated by ';'
++#                             (default: the server's JUDGE_DANCE_WIN;JUDGE_DANCE_LOSE;JUDGE_DANCE_DRAW, or their
++#                             defaults "MMD-Conqueror;MMD-Lost One_s Weeping;MMD-皆大欢喜-卜逻desu")
++#   DANCE_LIBRARY             folder searched, with its subfolders, for DANCES' .unity3d or .me files
++#                             (default /home/dabest/claudesandbox/dances/CustomDances)
+ #   VERBOSE=1                 log every poll and every mouth change in player.log
+ set -euo pipefail
+ 
+@@ -45,9 +57,12 @@ BUBBLE_WIDTH=${BUBBLE_WIDTH:-320}
+ LINGER=${LINGER:-0}
+ FPS=${FPS:-30}
+ VERBOSE=${VERBOSE:-0}
++DANCE_VOLUME=${DANCE_VOLUME:-0.4}
++DANCES=${DANCES:-${JUDGE_DANCE_WIN:-MMD-Conqueror};${JUDGE_DANCE_LOSE:-MMD-Lost One_s Weeping};${JUDGE_DANCE_DRAW:-MMD-皆大欢喜-卜逻desu}}
++DANCE_LIBRARY=${DANCE_LIBRARY:-/home/dabest/claudesandbox/dances/CustomDances}
+ EXE=MateEngineX.x86_64
+ 
+-usage() { echo "usage: $0 start|stop|status|place [for|against]" >&2; exit 2; }
++usage() { echo "usage: $0 start|stop|status|place [for|against] | dances" >&2; exit 2; }
+ 
+ # persona -> geometry, avatar, bubble side (the inner side: towards the middle of the screen)
+ geom() { if [ "$1" = for ]; then echo "$FOR_GEOM"; else echo "$AGAINST_GEOM"; fi; }
+@@ -83,9 +98,9 @@ seed() {
+     dir=$(cfgdir "$p")
+     mkdir -p "$dir" "$STATE/$p/tmp" "$STATE/$p/logs"
+     python3 -I - "$dir" "$p" "$(avatar "$p")" "$FPS" "$SERVER" "$FONT_SIZE" "$BUBBLE_WIDTH" "$(side "$p")" \
+-        "$(geom "$p")" "$VERBOSE" "$LINGER" <<'PY'
++        "$(geom "$p")" "$VERBOSE" "$LINGER" "$DANCE_VOLUME" <<'PY'
+ import json, os, re, sys
+-d, persona, model, fps, server, font, width, side, geom, verbose, linger = sys.argv[1:]
++d, persona, model, fps, server, font, width, side, geom, verbose, linger, volume = sys.argv[1:]
+ 
+ def write(name, text):
+     tmp = os.path.join(d, name + ".tmp")
+@@ -109,7 +124,7 @@ write("settings.json", json.dumps(settings, indent=2))
+ write("speech_bridge.json", json.dumps({
+     "enabled": True, "server": server, "pollPath": "/face/mate/next/" + persona, "fontSize": int(font),
+     "bubbleWidth": int(width), "screenPixels": True, "bubbleSide": side, "lingerSeconds": float(linger),
+-    "mouthWithText": True, "verbose": verbose == "1"}, indent=2))
++    "mouthWithText": True, "danceMusicVolume": min(max(float(volume), 0.0), 1.0), "verbose": verbose == "1"}, indent=2))
+ 
+ # prefs: Unity's PlayerPrefs XML; the window position and size are restored from it at launch. Unity ignores them
+ # unless the "Default" entries match the build's player settings (1536x1024, native, windowed), so a new file gets
+@@ -139,6 +154,45 @@ write("prefs", prefs)
+ PY
+ }
+ 
++# Copies the DANCES titles from DANCE_LIBRARY (searched recursively; a title is a file name without its .unity3d or .me
++# extension, matched in any case, like the player's FindIndexByTitle) into the build. A file already there with the
++# same bytes is left alone. A missing title is reported, not fatal: the bridge then plays the first installed dance.
++install_dances() {
++    python3 -I - "$DANCE_LIBRARY" "$PAYLOAD/MateEngineX_Data/StreamingAssets/CustomDances" "$DANCES" <<'PY'
++import filecmp, os, shutil, sys
++lib, dest, titles = sys.argv[1], sys.argv[2], [t.strip() for t in sys.argv[3].split(";") if t.strip()]
++found = {}
++for root, dirs, files in os.walk(lib):
++    dirs.sort()
++    for f in sorted(files):
++        stem, ext = os.path.splitext(f)
++        if ext.lower() in (".unity3d", ".me"):
++            found.setdefault(stem.casefold(), os.path.join(root, f))
++if not found:
++    print(f"dances: no .unity3d or .me files in {lib}; the verdict dances are not installed", file=sys.stderr)
++    sys.exit(0)
++os.makedirs(dest, exist_ok=True)
++done, missing = [], []
++for title in titles:
++    src = found.get(title.casefold())
++    if src is None:
++        missing.append(title)
++        continue
++    dst = os.path.join(dest, os.path.basename(src))
++    if os.path.isfile(dst) and filecmp.cmp(src, dst, shallow=False):
++        done.append(f"'{title}' present")
++        continue
++    tmp = dst + ".tmp"
++    shutil.copyfile(src, tmp)
++    os.replace(tmp, dst)
++    done.append(f"'{title}' installed")
++if done:
++    print(f"dances: {', '.join(done)} in {dest}")
++if missing:
++    print(f"dances: not found in {lib}: {', '.join(repr(t) for t in missing)}", file=sys.stderr)
++PY
++}
++
+ # The 32-bit ARGB visual a transparent window needs, found the way the build's launch.sh does.
+ argb_visual() {
+     local v
+@@ -302,7 +356,11 @@ esac
+ case "$cmd" in
+     start)
+         [ -x "$PAYLOAD/$EXE" ] || { echo "no build at $PAYLOAD/$EXE (set PAYLOAD=<build>/Payload)" >&2; exit 2; }
++        install_dances
+         for p in "${personas[@]}"; do start_one "$p"; done ;;
++    dances)
++        [ -x "$PAYLOAD/$EXE" ] || { echo "no build at $PAYLOAD/$EXE (set PAYLOAD=<build>/Payload)" >&2; exit 2; }
++        install_dances ;;
+     stop) stop_all "${personas[@]}" ;;
+     status) for p in "${personas[@]}"; do status_one "$p"; done ;;
+     place) place "${personas[@]}" ;;

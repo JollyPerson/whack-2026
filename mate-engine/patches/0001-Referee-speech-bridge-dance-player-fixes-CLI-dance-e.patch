@@ -1,0 +1,1867 @@
+From 4946e574cc5c320e4450cf70b60af2cd5e18f5dc Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 00:39:45 +0000
+Subject: [PATCH 01/12] Referee: speech bridge, dance player fixes, CLI dance
+ export and build
+
+- Assets/MATE ENGINE - Referee: long-polls the debate server's
+  /face/mate/next (wire protocol v1) and shows the referee's line in a
+  speech bubble with the mouth moving while the voice plays. Off unless
+  -speech-bridge <url>, MEX_SPEECH_BRIDGE or speech_bridge.json is set.
+  Booted by RuntimeInitializeOnLoadMethod, no scene edits.
+- AvatarDancePlayer: logs the dance scan, the chosen clip/audio and why
+  a dance didn't play; leaves the waiting pose on failure; never picks a
+  controller-less helper Animator (ADS_ProxyRoot) as the avatar, which
+  made every dance fail silently once the avatar had been hidden by the
+  first-run tutorial.
+- DanceModCli / RefereeBuild / build-referee.sh: export dance mods and
+  build the Linux player from the command line.
+- --dance-autoplay test hook, tools/mock_mate_server.py.
+---
+ Assets/Editor/ModExporterWindow.cs            |  79 ++-
+ Assets/MATE ENGINE - Referee.meta             |   8 +
+ Assets/MATE ENGINE - Referee/Editor.meta      |   8 +
+ .../Editor/DanceModCli.cs                     |  88 ++++
+ .../Editor/DanceModCli.cs.meta                |  11 +
+ .../Editor/RefereeBuild.cs                    | 104 ++++
+ .../Editor/RefereeBuild.cs.meta               |  11 +
+ Assets/MATE ENGINE - Referee/README.md        | 241 ++++++++++
+ Assets/MATE ENGINE - Referee/README.md.meta   |   7 +
+ Assets/MATE ENGINE - Referee/Runtime.meta     |   8 +
+ .../Runtime/DanceAutoplay.cs                  |  76 +++
+ .../Runtime/DanceAutoplay.cs.meta             |  11 +
+ .../Runtime/RefereeArgs.cs                    |  58 +++
+ .../Runtime/RefereeArgs.cs.meta               |  11 +
+ .../Runtime/SpeechBridge.cs                   | 451 ++++++++++++++++++
+ .../Runtime/SpeechBridge.cs.meta              |  11 +
+ .../Runtime/SpeechBridgeConfig.cs             |  87 ++++
+ .../Runtime/SpeechBridgeConfig.cs.meta        |  11 +
+ .../Runtime/SpeechBubble.cs                   |  84 ++++
+ .../Runtime/SpeechBubble.cs.meta              |  11 +
+ .../Runtime/SpeechWire.cs                     |  27 ++
+ .../Runtime/SpeechWire.cs.meta                |  11 +
+ .../AvatarHandlers/AvatarDancePlayer.cs       |  36 +-
+ build-referee.sh                              |  74 +++
+ tools/mock_mate_server.py                     |  56 +++
+ 25 files changed, 1555 insertions(+), 25 deletions(-)
+ create mode 100644 Assets/MATE ENGINE - Referee.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Editor.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/README.md
+ create mode 100644 Assets/MATE ENGINE - Referee/README.md.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs.meta
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs
+ create mode 100644 Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs.meta
+ create mode 100755 build-referee.sh
+ create mode 100755 tools/mock_mate_server.py
+
+diff --git a/Assets/Editor/ModExporterWindow.cs b/Assets/Editor/ModExporterWindow.cs
+index c4ba6bb..bac67e5 100755
+--- a/Assets/Editor/ModExporterWindow.cs
++++ b/Assets/Editor/ModExporterWindow.cs
+@@ -27,6 +27,34 @@ public class ModExporterWindow : EditorWindow
+     [MenuItem("MateEngine/ME Mod Exporter")]
+     public static void ShowWindow() => GetWindow<ModExporterWindow>("ME Mod Exporter");
+ 
++    // [Referee fork] When the selected target (StandaloneWindows64 by default) has no build support installed, use the
++    // editor's active standalone target: an editor with only Linux build support (like the one this port is built
++    // with) could not export at all. Done in OnEnable because Unity forbids these calls in a field initializer.
++    public static BuildTarget DefaultModBuildTarget()
++    {
++        var t = EditorUserBuildSettings.activeBuildTarget;
++        bool standalone = t == BuildTarget.StandaloneLinux64 || t == BuildTarget.StandaloneWindows64 ||
++                          t == BuildTarget.StandaloneWindows || t == BuildTarget.StandaloneOSX;
++        return standalone ? t : BuildTarget.StandaloneLinux64;
++    }
++
++    static bool IsTargetSupported(BuildTarget target) =>
++        BuildPipeline.IsBuildTargetSupported(BuildPipeline.GetBuildTargetGroup(target), target);
++
++    void OnEnable()
++    {
++        if (!IsTargetSupported(buildTarget)) buildTarget = DefaultModBuildTarget();
++        if (!IsTargetSupported(danceBuildTarget)) danceBuildTarget = DefaultModBuildTarget();
++    }
++
++    // [Referee fork] Fail with a clear message instead of producing a broken .me when the target's build support is missing.
++    static bool IsTargetInstalled(BuildTarget target)
++    {
++        if (IsTargetSupported(target)) return true;
++        Debug.LogError("[ModExporter] Build support for " + target + " is not installed in this editor; use " + DefaultModBuildTarget() + ".");
++        return false;
++    }
++
+     [MenuItem("MateEngine/Export Scene Registry")]
+     public static void ExportSceneRegistry()
+     {
+@@ -95,6 +123,7 @@ public class ModExporterWindow : EditorWindow
+ 
+     void ExportMod()
+     {
++        if (!IsTargetInstalled(buildTarget)) return; // [Referee fork]
+         string tempDir = Path.Combine("Assets/__ModExportTemp__");
+         if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+         Directory.CreateDirectory(tempDir);
+@@ -149,9 +178,15 @@ public class ModExporterWindow : EditorWindow
+ 
+     void ExportDanceMod()
+     {
+-        var meta = danceCreator.GetMetadata();
+-        var clip = danceCreator.GetDanceClip();
+-        var audio = danceCreator.GetAudioClip();
++        string mePath = ExportDance(danceCreator.GetDanceClip(), danceCreator.GetAudioClip(), danceCreator.GetMetadata(), danceModName, danceBuildTarget);
++        if (mePath != null) EditorUtility.RevealInFinder(mePath);
++    }
++
++    // [Referee fork] The former body of ExportDanceMod, made static so "MATE ENGINE - Referee/Editor/DanceModCli.cs"
++    // exports headlessly with exactly the same .me layout. Returns the .me path, or null when the bundle build failed.
++    public static string ExportDance(AnimationClip clip, AudioClip audio, MEDanceModCreator.DanceMeta meta, string danceModName, BuildTarget danceBuildTarget, string finalDir = "ExportedMods")
++    {
++        if (!IsTargetInstalled(danceBuildTarget)) return null;
+ 
+         string tempRoot = "Assets/__DanceExportTemp__";
+         if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+@@ -183,23 +218,27 @@ public class ModExporterWindow : EditorWindow
+             }
+         }
+ 
+-        BuildPipeline.BuildAssetBundles(buildDir, BuildAssetBundleOptions.None, danceBuildTarget);
++        var manifest = BuildPipeline.BuildAssetBundles(buildDir, BuildAssetBundleOptions.None, danceBuildTarget);
+ 
+-        var danceInfo = new DanceExportMeta
++        string mePath = null;
++        if (manifest != null)
+         {
+-            songName = meta.songName,
+-            songAuthor = meta.songAuthor,
+-            mmdAuthor = meta.mmdAuthor,
+-            songLength = meta.songLength,
+-            placeholderClipName = meta.placeholderClipName
+-        };
+-        File.WriteAllText(Path.Combine(buildDir, "dance_meta.json"), JsonUtility.ToJson(danceInfo, true));
+-
+-        string finalDir = Path.Combine("ExportedMods");
+-        Directory.CreateDirectory(finalDir);
+-        string mePath = Path.Combine(finalDir, danceModName + ".me");
+-        if (File.Exists(mePath)) File.Delete(mePath);
+-        ZipFile.CreateFromDirectory(buildDir, mePath);
++            var danceInfo = new DanceExportMeta
++            {
++                songName = meta.songName,
++                songAuthor = meta.songAuthor,
++                mmdAuthor = meta.mmdAuthor,
++                songLength = meta.songLength,
++                placeholderClipName = meta.placeholderClipName
++            };
++            File.WriteAllText(Path.Combine(buildDir, "dance_meta.json"), JsonUtility.ToJson(danceInfo, true));
++
++            Directory.CreateDirectory(finalDir);
++            mePath = Path.Combine(finalDir, danceModName + ".me");
++            if (File.Exists(mePath)) File.Delete(mePath);
++            ZipFile.CreateFromDirectory(buildDir, mePath);
++        }
++        else Debug.LogError("[ModExporter] Building the dance bundle for " + danceBuildTarget + " failed; nothing exported.");
+ 
+         if (!string.IsNullOrEmpty(clipAssetPath)) AssetDatabase.DeleteAsset(clipAssetPath);
+         if (!string.IsNullOrEmpty(audioAssetPath)) AssetDatabase.DeleteAsset(audioAssetPath);
+@@ -207,8 +246,8 @@ public class ModExporterWindow : EditorWindow
+         if (Directory.Exists(buildDir)) Directory.Delete(buildDir, true);
+ 
+         AssetDatabase.Refresh();
+-        EditorUtility.RevealInFinder(mePath);
+-        Debug.Log("[ModExporter] Dance export finished: " + mePath);
++        if (mePath != null) Debug.Log("[ModExporter] Dance export finished: " + mePath);
++        return mePath;
+     }
+ 
+     void ExtractSceneLinks(GameObject root, Dictionary<string, string> output)
+diff --git a/Assets/MATE ENGINE - Referee.meta b/Assets/MATE ENGINE - Referee.meta
+new file mode 100644
+index 0000000..72c271e
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee.meta	
+@@ -0,0 +1,8 @@
++fileFormatVersion: 2
++guid: ae32266060354a17be1572216883ab82
++folderAsset: yes
++DefaultImporter:
++  externalObjects: {}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Editor.meta b/Assets/MATE ENGINE - Referee/Editor.meta
+new file mode 100644
+index 0000000..bdfc223
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Editor.meta	
+@@ -0,0 +1,8 @@
++fileFormatVersion: 2
++guid: 247ad8890e714dfa9ef6db0c78f50409
++folderAsset: yes
++DefaultImporter:
++  externalObjects: {}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs b/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs
+new file mode 100644
+index 0000000..b8563e9
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs	
+@@ -0,0 +1,88 @@
++// Headless dance-mod (.me) export. Produces exactly what MateEngine > ME Mod Exporter > Dance Mod produces,
++// because it calls the same ModExporterWindow.ExportDance. Close any editor that has the project open, then:
++//   Unity -batchmode -quit -projectPath <fork> -logFile export.log -executeMethod DanceModCli.Export \
++//     --dance-clip "Assets/<...>.anim" [--dance-audio "Assets/<...>.wav"] --dance-name <name> [--dance-out <dir>] \
++//     [--dance-author <name>] [--dance-mmd-author <name>] [--dance-target StandaloneLinux64]
++// --dance-out defaults to ExportedMods (relative to the project). Without --dance-audio the dance is silent and
++// its length is the clip length. Exit code 1 on any failure.
++using System;
++using System.IO;
++using System.Linq;
++using UnityEditor;
++using UnityEngine;
++
++public static class DanceModCli
++{
++    public static void Export()
++    {
++        try
++        {
++            string clipPath = Arg("--dance-clip");
++            string audioPath = Arg("--dance-audio");
++            string name = Arg("--dance-name");
++            string outDir = Arg("--dance-out") ?? "ExportedMods";
++            string targetName = Arg("--dance-target");
++
++            BuildTarget target = ModExporterWindow.DefaultModBuildTarget();
++            if (targetName != null && !Enum.TryParse(targetName, true, out target)) { Fail("unknown --dance-target '" + targetName + "'"); return; }
++
++            AnimationClip clip = LoadClip(clipPath);
++            if (clip == null) { Fail("--dance-clip: no AnimationClip at '" + clipPath + "'"); return; }
++
++            AudioClip audio = null;
++            if (audioPath != null)
++            {
++                audio = AssetDatabase.LoadAssetAtPath<AudioClip>(audioPath);
++                if (audio == null) { Fail("--dance-audio: no AudioClip at '" + audioPath + "'"); return; }
++            }
++
++            if (string.IsNullOrEmpty(name)) name = clip.name;
++            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { Fail("--dance-name '" + name + "' is not a valid file name"); return; }
++
++            // Same fields MEDanceModCreator.GetMetadata() fills in for the GUI exporter.
++            var meta = new MEDanceModCreator.DanceMeta
++            {
++                songName = audio != null ? audio.name : name,
++                songAuthor = Arg("--dance-author") ?? "",
++                mmdAuthor = Arg("--dance-mmd-author") ?? "",
++                songLength = audio != null ? audio.length : 0f,
++                placeholderClipName = "CUSTOM_DANCE"
++            };
++
++            string mePath = ModExporterWindow.ExportDance(clip, audio, meta, name, target, outDir);
++            if (mePath == null) { Fail("export failed (see errors above)"); return; }
++            Debug.Log("[DanceModCli] exported " + Path.GetFullPath(mePath) + " target=" + target +
++                      " clip=" + clip.name + " (" + clip.length.ToString("0.00") + "s)" +
++                      " audio=" + (audio != null ? audio.name + " (" + audio.length.ToString("0.00") + "s)" : "none"));
++        }
++        catch (Exception e) { Fail(e.ToString()); }
++    }
++
++    // A .anim asset, or the first real clip inside a model file (FBX).
++    static AnimationClip LoadClip(string path)
++    {
++        if (string.IsNullOrEmpty(path)) return null;
++        var clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(path);
++        if (clip != null) return clip;
++        return AssetDatabase.LoadAllAssetsAtPath(path).OfType<AnimationClip>()
++            .FirstOrDefault(c => !c.name.StartsWith("__preview__", StringComparison.Ordinal));
++    }
++
++    static string Arg(string key)
++    {
++        var a = Environment.GetCommandLineArgs();
++        for (int i = 0; i < a.Length - 1; i++)
++            if (string.Equals(a[i], key, StringComparison.OrdinalIgnoreCase))
++            {
++                string v = a[i + 1].Trim('"');
++                return v.Length > 0 ? v : null;
++            }
++        return null;
++    }
++
++    static void Fail(string message)
++    {
++        Debug.LogError("[DanceModCli] " + message);
++        if (Application.isBatchMode) EditorApplication.Exit(1);
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs.meta b/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs.meta
+new file mode 100644
+index 0000000..8d50cb2
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Editor/DanceModCli.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: d313a7d7fb0344a69238b8dd71dffeb2
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs b/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs
+new file mode 100644
+index 0000000..27329fa
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs	
+@@ -0,0 +1,104 @@
++// Command-line Linux player build for the referee fork (used by build-referee.sh at the repository root):
++//   Unity -batchmode -quit -buildTarget Linux64 -projectPath <fork> -logFile <log> \
++//     -executeMethod RefereeBuild.Build --output <dir>/MateEngineX.x86_64 [--scripts-only] [--dev]
++// Unlike CliBuilder it builds the Addressables content (the localisation tables) explicitly first and fails on an
++// Addressables error (the player build would only log it and ship blank localised text), uses LZ4
++// instead of LZ4HC (faster builds), can do a scripts-only rebuild into an existing build folder, and prints
++// every error before exiting with code 1 on failure.
++using System;
++using System.IO;
++using System.Linq;
++using UnityEditor;
++using UnityEditor.AddressableAssets;
++using UnityEditor.AddressableAssets.Build;
++using UnityEditor.AddressableAssets.Settings;
++using UnityEditor.Build.Reporting;
++using UnityEngine;
++
++public static class RefereeBuild
++{
++    const string Scene = "Assets/MATE ENGINE - Scenes/Mate Engine Main.unity";
++
++    public static void Build()
++    {
++        try
++        {
++            string output = Arg("--output");
++            bool scriptsOnly = Has("--scripts-only");
++            bool dev = Has("--dev");
++            if (string.IsNullOrEmpty(output)) { Fail("--output <path/to/MateEngineX.x86_64> is required"); return; }
++            output = Path.GetFullPath(output);
++            Log("output=" + output + " scriptsOnly=" + scriptsOnly + " dev=" + dev);
++
++            AddressablesPlayerBuildResult aa = null;
++            if (!scriptsOnly)
++            {
++                var settings = AddressableAssetSettingsDefaultObject.Settings;
++                if (settings == null) { Fail("no Addressables settings found"); return; }
++                AddressableAssetSettings.BuildPlayerContent(out aa);
++                if (aa == null || !string.IsNullOrEmpty(aa.Error)) { Fail("Addressables build failed: " + (aa != null ? aa.Error : "no result")); return; }
++                Log("Addressables content built in " + aa.Duration.ToString("0.0") + " s");
++            }
++
++            var options = BuildOptions.CompressWithLz4;
++            if (scriptsOnly) options |= BuildOptions.BuildScriptsOnly;
++            if (dev) options |= BuildOptions.Development;
++
++            // The player build would otherwise build the Addressables content a second time (the project follows the
++            // editor preference, which defaults to "build with player"); hand it the result from above instead.
++            // With --scripts-only it still builds it once, as usual.
++            var previousOverride = AddressablesPlayerBuildProcessor.BuildAddressablesOverride;
++            if (aa != null) AddressablesPlayerBuildProcessor.BuildAddressablesOverride = _ => aa;
++            BuildReport report;
++            try
++            {
++                report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
++                {
++                    scenes = new[] { Scene },
++                    locationPathName = output,
++                    target = BuildTarget.StandaloneLinux64,
++                    targetGroup = BuildTargetGroup.Standalone,
++                    options = options
++                });
++            }
++            finally { AddressablesPlayerBuildProcessor.BuildAddressablesOverride = previousOverride; }
++
++            BuildSummary summary = report.summary;
++            if (summary.result != BuildResult.Succeeded)
++            {
++                var errors = report.steps.SelectMany(s => s.messages)
++                    .Where(m => m.type == LogType.Error || m.type == LogType.Exception)
++                    .Select(m => m.content).Distinct().ToList();
++                foreach (var e in errors) Console.WriteLine("RefereeBuild: error: " + e);
++                Fail("build " + summary.result + " with " + summary.totalErrors + " error(s)");
++                return;
++            }
++
++            string aaDir = Path.Combine(Path.GetDirectoryName(output), Path.GetFileNameWithoutExtension(output) + "_Data", "StreamingAssets", "aa");
++            if (!Directory.Exists(aaDir)) Console.WriteLine("RefereeBuild: WARNING: " + aaDir + " is missing; localised UI text will be blank");
++            Log("build succeeded: " + (summary.totalSize / 1048576f).ToString("0.0") + " MB in " +
++                summary.totalTime.TotalSeconds.ToString("0") + " s at " + output);
++        }
++        catch (Exception e) { Fail(e.ToString()); }
++    }
++
++    static string Arg(string key)
++    {
++        var a = Environment.GetCommandLineArgs();
++        for (int i = 0; i < a.Length - 1; i++)
++            if (string.Equals(a[i], key, StringComparison.OrdinalIgnoreCase)) return a[i + 1].Trim('"');
++        return null;
++    }
++
++    static bool Has(string key) =>
++        Environment.GetCommandLineArgs().Any(a => string.Equals(a, key, StringComparison.OrdinalIgnoreCase));
++
++    static void Log(string message) => Console.WriteLine("RefereeBuild: " + message);
++
++    static void Fail(string message)
++    {
++        Console.WriteLine("RefereeBuild: FAILED: " + message);
++        Debug.LogError("RefereeBuild: " + message);
++        EditorApplication.Exit(1);
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs.meta b/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs.meta
+new file mode 100644
+index 0000000..9f3858e
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 301fcf6f29104657ab121f9401217ea5
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+new file mode 100644
+index 0000000..039bb79
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -0,0 +1,241 @@
++# MATE ENGINE - Referee
++
++Additions to the MateEngineX Linux port that let another program drive the avatar over HTTP:
++
++- show a line in the avatar's speech bubble while its mouth moves (`say` / `talk` / `stop`);
++- play and stop the built-in custom dances (`dance` / `dance_stop`);
++- export dance mods and build the player from the command line.
++
++It was written for a live debate fact-checker whose "referee" interjects by voice. The bridge itself knows
++nothing about debates. **The avatar never plays audio and never sends anything back.** Another program (in our
++case a browser tab) plays the voice and reports whether it is audible. The avatar only mirrors that state.
++
++Everything is **off by default**. Without the flags below the program behaves exactly like upstream.
++
++## Enabling the speech bridge
++
++Any one of these turns it on:
++
++| How | Example |
++|---|---|
++| Command line (also sets the server) | `./launch.sh -speech-bridge http://127.0.0.1:8000` |
++| Environment variable | `MEX_SPEECH_BRIDGE=http://127.0.0.1:8000 ./launch.sh` (`1` keeps the configured server; `0` turns it off even if the file enables it) |
++| Config file | `{"enabled": true}` in `speech_bridge.json` (below) |
++
++Precedence: command line, then environment, then config file, then defaults. On start the log (`Player.log`, or
++stdout through `launch.sh`) shows `[SpeechBridge] enabled: <settings>`. It then logs only connection state
++changes and one line per command.
++
++### Config file
++
++The file is `Application.persistentDataPath/speech_bridge.json`, which on Linux is
++`~/.config/unity3d/Shinymoon/MateEngineX/speech_bridge.json`. It is optional, and any field you leave out keeps
++its default:
++
++```json
++{
++  "enabled": false,
++  "server": "http://127.0.0.1:8000",
++  "pollPath": "/face/mate/next",
++  "fontSize": 40,
++  "bubbleWidth": 720,
++  "lingerSeconds": 3,
++  "stopDanceOnSay": true,
++  "verbose": false
++}
++```
++
++| Field | Meaning |
++|---|---|
++| `enabled` | Start the bridge without the command-line flag |
++| `server` | Base URL of the server. Overridden by `-speech-bridge <url>` or `MEX_SPEECH_BRIDGE` |
++| `pollPath` | Path of the long-poll route |
++| `fontSize`, `bubbleWidth` | Bubble size in pixels. ME's own bubbles are 26 and 600; the defaults here are sized for a projector |
++| `lingerSeconds` | How long the bubble stays after the voice stops |
++| `stopDanceOnSay` | Stop a running dance when a new line arrives |
++| `verbose` | Log every poll and every `talk` |
++
++## Wire protocol v1
++
++This is the agreed text, copied verbatim. "Bus", `Interjection`, `TTSState`, `Control` and `SessionStart` are
++the server's own event names; the bridge only sees the commands.
++
++```
++SHARED WIRE PROTOCOL (server <-> Mate Engine; both tracks MUST implement exactly this; JsonUtility on the C# side cannot handle nulls/dicts, so every field is always present):
++GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default 10, max 25>
++ -> 200 {"v":1,"epoch":"<8 hex>","cursor":<int>,"cmds":[Cmd,...]}
++ Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"","title":"","on":false,"clear":false}
++ - say: id=Interjection.id, text=Interjection.text (exact, shown in the bubble), audio = relative URL of the WAV for that line ("/face/tts?text=<urlencoded>") or "" when no TTS provider is configured.
++ - talk: id=TTSState.interjection_id or "", on=TTSState.speaking (the browser ?audio=1 tab is the ONLY audio player and the only TTSState producer; ME just follows it to move the mouth).
++ - stop: clear=true for Control mute=true, Control director=false, SessionStart (remove bubble + close mouth); clear=false for Control tts=false (close mouth, keep bubble).
++ - dance: title = dance title to play ("" = first available); dance_stop: stop dancing. These come only from POST /face/mate/dance {"title":""} and POST /face/mate/dance/stop (operator routes, face-only, not bus contracts).
++ Rules: if after<0, or epoch != server epoch, or after > bus.last_seq (server restarted) -> respond immediately {cursor: bus.last_seq, cmds: []} (never replay). Interjections older than 4 s at delivery are dropped. Long-poll: subscribe and scan bus.history in the same synchronous tick so nothing is missed; return as soon as >=1 cmd exists or wait expires. Each poll marks ME alive.
++ ME publishes nothing to the server (pure consumer).
++```
++
++### What the avatar does with each command
++
++**Polling**
++- The first poll uses cursor `-1`. After a resync it takes the cursor and epoch from the response.
++- When the epoch changes (the server restarted), the bridge resyncs and replays nothing.
++- On errors it backs off from 0.5 s to 5 s. Each request times out after 30 s.
++- After an empty answer that came back in under 0.5 s (a resync, or a server that does not wait) it pauses 0.5 s.
++
++**`say`**
++- Ignores an id it has already shown (it remembers the last 50 ids).
++- Replaces the current bubble and, if `stopDanceOnSay` is set, stops a running dance.
++- Builds the bubble exactly like ME's random-message bubble (same container, sprite, font, colours, padding and
++  material) at the configured size, with no typing sound. The text is shown verbatim; rich text is off.
++- If something else destroys the bubble, the line is dropped.
++- The text appears at about 18 characters per second while the voice plays.
++- If no `talk on` arrives within 3 s, it shows the whole line at once and removes it after
++  max(4, words / 2.5 + 3) s.
++
++**`talk`**
++- `on` sets the animator's `isTalking` bool, which drives ME's own talking animation. It is re-applied every
++  frame, because ME's scripts may reset it.
++- `off` closes the mouth, completes the text and removes the bubble after `lingerSeconds`.
++- The mouth is forced shut after 12 s without `off`.
++
++**`stop`**
++- Closes the mouth.
++- With `clear` it also removes the bubble.
++- Without `clear` the bubble stays for the bubble-only time.
++
++**`dance`**
++- Plays the installed dance whose title (its file name without extension) matches. With an empty or unknown
++  title it plays the first dance.
++- On first use it turns off the dance player's multi-instance sync for the session, which removes the 1.5 s
++  lead-in of menu plays and auto-next (the bridge's own plays are not delayed).
++
++**`dance_stop`** stops the dance.
++
++**Scene objects**
++- The avatar, animator, bubble style and dance player are looked up again for every command, because loading a
++  VRM replaces them.
++- A failure is logged once and never stops the polling.
++
++## Dances
++
++**Player fixes** in `MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs` (marked `[Referee fork]`):
++- A dance whose bundle fails to load now logs the reason and leaves the "Wait For Dance" pose instead of
++  freezing in it.
++- Every play logs the chosen clip and audio.
++- Every rescan logs how many dances were found, and their names.
++- It never picks a controller-less helper Animator (`MateEngineAPI/CustomDances/ADS_ProxyRoot`) as the avatar, and it
++  keeps looking until the avatar is visible. Before, a dance started while the avatar was hidden (first-run tutorial)
++  failed silently and every later one did too. When no avatar is found it now logs a warning.
++
++**Where dances come from:** `.me` dance mods in `~/.config/unity3d/Shinymoon/MateEngineX/Mods/` or
++`<build>/MateEngineX_Data/StreamingAssets/CustomDances/`.
++Community `.unity3d` dances built for Windows with Unity 2021 or 2022 play as they are on this Linux build (tested
++with "Zombie Dance" and "Motion-DoodleDance"), so they need no re-export.
++
++**Exporting a dance mod**
++- **Editor:** MateEngine > ME Mod Exporter > Dance Mod. When the selected target (upstream default
++  `StandaloneWindows64`) has no build support installed, it switches to the editor's active standalone target,
++  which is `StandaloneLinux64` on this port. Exporting for a target without build support reports an error
++  instead of writing a broken `.me`.
++- **Headless:** the same exporter code. Close any editor that has the project open, then run:
++
++  ```bash
++  ~/Unity/Hub/Editor/6000.2.6f2/Editor/Unity -batchmode -quit -projectPath "$PWD" -logFile export.log \
++    -executeMethod DanceModCli.Export --dance-clip "Assets/<path>/<clip>.anim" \
++    [--dance-audio "Assets/<path>/<song>.wav"] --dance-name MyDance [--dance-out ExportedMods] \
++    [--dance-author <name>] [--dance-mmd-author <name>] [--dance-target StandaloneLinux64]
++  ```
++
++  The output is `<dance-out>/<dance-name>.me`: a zip of `dance.bundle`, the bundle manifests and
++  `dance_meta.json`. Without `--dance-audio` the dance is silent and lasts as long as the clip. The command exits
++  with code 1 on failure.
++
++**Autoplay test hook**
++- Usage: `--dance-autoplay <title>` (or `MEX_DANCE_AUTOPLAY=<title>`). `'*'` (quoted, so the shell does not expand it) means the first dance.
++- Shortly after start it plays the dance and logs `[DanceAutoplay] PlayIndex -> True`.
++- It then logs `[DanceAutoplay] IsPlaying=True clip=<name>/<len>s audio=<name> playing=<bool> t=<time>` once a
++  second for 8 s.
++- Finally it stops the dance and logs `[DanceAutoplay] after StopPlay IsPlaying=False`.
++- In a fresh config (for example a separate `XDG_CONFIG_HOME` for a test run) the first-run tutorial hides the avatar,
++  so nothing dances. Set `"tutorialDone": true` in `<config>/unity3d/Shinymoon/MateEngineX/settings.json` first, or
++  finish the tutorial once.
++
++Dance music plays through the speakers. If a microphone is listening, mute or avoid dances while it is.
++
++## Building
++
++```bash
++./build-referee.sh <output-dir> [--scripts-only] [--dev]
++```
++
++- It runs Unity in batch mode with `-executeMethod RefereeBuild.Build`. That method builds the Addressables
++  content (the localisation tables), then the Linux player with LZ4. `--scripts-only` recompiles the scripts into
++  an existing build, and `--dev` makes a development build.
++- The result is `<output-dir>/Payload/MateEngineX.x86_64` plus `launch.sh`, and `<output-dir>/install.sh`.
++- The log goes to `<output-dir>/build.log`. `RefereeBuild` writes every build error to that log and exits with
++  code 1 on failure; the script exits with Unity's exit code and prints the last 20 `RefereeBuild:` and compiler
++  error lines.
++- Environment variables:
++
++  | Variable | Use |
++  |---|---|
++  | `UNITY` | Path to the editor binary |
++  | `LIBXML2_SHIM_DIR` | A folder with `libxml2.so.2`, used only if the system has none |
++  | `PREBUILT_PAYLOAD` | A released `Payload/` folder to copy the gitignored `libStandaloneFileBrowser.so` from |
++  | `NICE` | Niceness of the editor process |
++
++- Unlike `build.sh` it does not pass `-nographics`. The upstream README still recommends GUI builds for releases,
++  because CLI builds "may see some abnormal behaviours"; test a CLI build before relying on it.
++
++## Trying it without any other software
++
++```bash
++python3 tools/mock_mate_server.py 8765          # Python 3 standard library only
++./launch.sh -speech-bridge http://127.0.0.1:8765
++```
++
++Every 25 s the mock says a line, opens and closes the mouth, plays the first installed dance and stops it.
++
++For the cleanest demo, turn off ME's random messages, Minecraft messages and Discord presence. Set its pet, effect
++and menu volumes to 0, and keep `allowedApps` empty, so that playing audio does not trigger auto-dancing.
++
++## Files
++
++| File | Purpose |
++|---|---|
++| `Runtime/SpeechBridge.cs` | Start-up hook, long-poll, command handling, bubble timing, mouth |
++| `Runtime/SpeechBridgeConfig.cs` | `speech_bridge.json`, environment variable and command-line settings |
++| `Runtime/SpeechWire.cs` | Protocol v1 data types |
++| `Runtime/SpeechBubble.cs` | The projector-sized bubble, built like ME's own (it mirrors LLMUnity's `Bubble`) |
++| `Runtime/RefereeArgs.cs` | Command-line and environment helpers |
++| `Runtime/DanceAutoplay.cs` | `--dance-autoplay` test hook |
++| `Editor/DanceModCli.cs` | Headless dance-mod export |
++| `Editor/RefereeBuild.cs` | Command-line player build |
++| `../Editor/ModExporterWindow.cs` | (modified) default target, missing-target error, shared dance export |
++| `../MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs` | (modified) the dance player fixes above |
++| `/build-referee.sh`, `/tools/mock_mate_server.py` | Build script and mock server at the repository root |
++
++This folder has no assembly definition on purpose: the code uses ME's classes, so it must compile into
++`Assembly-CSharp` (an assembly definition cannot reference it). The runtime scripts use only public types, so
++`Runtime/` also compiles as a separate DLL against a released build's `MateEngineX_Data/Managed/` (the
++no-rebuild fallback). No scene, prefab or project setting is changed: everything starts from
++`[RuntimeInitializeOnLoadMethod]`.
++
++## Licence and credits
++
++- **Mate Engine**
++  - This fork, including these additions, is a derivative of Mate Engine by Shiny and is distributed under the
++    **MateEngine Pro License v2.0** (see `LICENSE`).
++  - The source stays public, attribution must be kept, and commercial use is not allowed.
++  - The components required to build and run this version (this folder, the build script and the mock server)
++    are included.
++- **Mate Engine assets** (models, animations, sounds and the dances made from them) are © Shiny.
++  - They may be used non-commercially with attribution.
++  - They must not be redistributed separately, so do not publish exported `.me` files built from ME assets on
++    their own.
++- **`LLMUnitySamples.Bubble`** (`Assets/LLMUnity/Samples/ChatBot/Bubble.cs`) comes from LLMUnity by Undream AI,
++  MIT licence (`Assets/LLMUnity/LICENSE.md`). `Runtime/SpeechBubble.cs` mirrors its construction.
++- **The custom dance player** (`AvatarDancePlayer.cs`) is upstream Mate Engine code, credited by upstream to
++  maoxig.
++  - No code from maoxig's separate CustomDancePlayer repository is used: it has no licence.
++- **Third-party packages** are unchanged from upstream; see `Third Party Licenses/`.
++- **Programs that talk to the bridge** use only the HTTP protocol above. They contain no Mate Engine code.
+diff --git a/Assets/MATE ENGINE - Referee/README.md.meta b/Assets/MATE ENGINE - Referee/README.md.meta
+new file mode 100644
+index 0000000..20c2a2e
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/README.md.meta	
+@@ -0,0 +1,7 @@
++fileFormatVersion: 2
++guid: 7f0cfecd2670457f84427c319e2785ef
++TextScriptImporter:
++  externalObjects: {}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime.meta b/Assets/MATE ENGINE - Referee/Runtime.meta
+new file mode 100644
+index 0000000..2f82fee
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime.meta	
+@@ -0,0 +1,8 @@
++fileFormatVersion: 2
++guid: 64df6d4dd85d43cfa81012ab09b1e428
++folderAsset: yes
++DefaultImporter:
++  externalObjects: {}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs b/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs
+new file mode 100644
+index 0000000..a4ec39a
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs	
+@@ -0,0 +1,76 @@
++// Test hook: "--dance-autoplay <title>" (or env MEX_DANCE_AUTOPLAY=<title>; "*" = the first dance) plays a dance
++// through ME's own CustomDancePlayer.AvatarDanceHandler shortly after startup, logs its state once a second for
++// about 8 s, then stops it, so a -batchmode run proves "load + play" from Player.log alone. Off by default.
++using System.Collections;
++using CustomDancePlayer;
++using UnityEngine;
++
++namespace MateReferee
++{
++    public sealed class DanceAutoplay : MonoBehaviour
++    {
++        const string CliFlag = "dance-autoplay";
++        const string EnvVar = "MEX_DANCE_AUTOPLAY";
++        const float FindTimeoutSeconds = 30f;
++        const int LogSeconds = 8;
++
++        string title;
++
++        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
++        static void Boot()
++        {
++            string t = RefereeArgs.Value(CliFlag) ?? RefereeArgs.Env(EnvVar);
++            if (t == null) return;
++            var go = new GameObject("DanceAutoplay");
++            DontDestroyOnLoad(go);
++            go.AddComponent<DanceAutoplay>().title = t;
++        }
++
++        int IndexOf(AvatarDanceHandler h) => title == "*" ? 0 : h.FindIndexByTitle(title);
++
++        IEnumerator Start()
++        {
++            // AvatarDanceHandler.Start and MEModHandler's boot RescanMods() scan the dances in the first frames.
++            AvatarDanceHandler h = null;
++            int index = -1;
++            float t0 = Time.realtimeSinceStartup;
++            while (Time.realtimeSinceStartup - t0 < FindTimeoutSeconds)
++            {
++                yield return new WaitForSecondsRealtime(1f);
++                h = FindFirstObjectByType<AvatarDanceHandler>();
++                if (h != null && (index = IndexOf(h)) >= 0) break;
++            }
++            Debug.Log("[DanceAutoplay] title='" + title + "' handler=" + (h != null) + " index=" + index);
++            if (h == null || index < 0)
++            {
++                Debug.LogError("[DanceAutoplay] dance not found after " + FindTimeoutSeconds + " s (see the '[AvatarDanceHandler] Found' line)");
++                yield break;
++            }
++
++            yield return new WaitForSecondsRealtime(1f); // let a late rescan settle
++            index = IndexOf(h);
++            Debug.Log("[DanceAutoplay] PlayIndex -> " + h.PlayIndex(index));
++            for (int i = 0; i < LogSeconds; i++)
++            {
++                yield return new WaitForSecondsRealtime(1f);
++                Debug.Log(Describe(h));
++            }
++
++            h.StopPlay();
++            yield return new WaitForSecondsRealtime(2.5f);
++            Debug.Log("[DanceAutoplay] after StopPlay IsPlaying=" + h.IsPlaying);
++            Destroy(gameObject);
++        }
++
++        static string Describe(AvatarDanceHandler h)
++        {
++            var clip = h.GetCurrentClip();
++            var src = h.audioSource;
++            return "[DanceAutoplay] IsPlaying=" + h.IsPlaying +
++                   " clip=" + (clip != null ? clip.name + "/" + clip.length.ToString("0.00") + "s" : "none") +
++                   " audio=" + (src != null && src.clip != null ? src.clip.name : "none") +
++                   " playing=" + (src != null && src.isPlaying) +
++                   " t=" + h.GetPlaybackTime().ToString("0.00") + "/" + h.GetPlaybackLength().ToString("0.00");
++        }
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs.meta
+new file mode 100644
+index 0000000..449b53e
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/DanceAutoplay.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 0ab70d6b953b4c67acc00d7677785dcb
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs b/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs
+new file mode 100644
+index 0000000..41492a3
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs	
+@@ -0,0 +1,58 @@
++// Command-line and environment helpers shared by the referee runtime scripts (see README.md in this folder).
++using System;
++
++namespace MateReferee
++{
++    static class RefereeArgs
++    {
++        static string[] args;
++
++        static string[] Args
++        {
++            get
++            {
++                if (args != null) return args;
++                try { args = Environment.GetCommandLineArgs(); }
++                catch { args = Array.Empty<string>(); }
++                return args;
++            }
++        }
++
++        // Accepts both "-name" and "--name".
++        static bool IsFlag(string arg, string name) =>
++            arg.StartsWith("-", StringComparison.Ordinal) &&
++            string.Equals(arg.TrimStart('-'), name, StringComparison.OrdinalIgnoreCase);
++
++        public static bool Has(string name)
++        {
++            foreach (var a in Args)
++                if (IsFlag(a, name)) return true;
++            return false;
++        }
++
++        // The argument after the flag, or null when the flag is absent or is followed by another flag or nothing.
++        public static string Value(string name)
++        {
++            var a = Args;
++            for (int i = 0; i < a.Length; i++)
++            {
++                if (!IsFlag(a[i], name)) continue;
++                if (i + 1 >= a.Length || a[i + 1].StartsWith("-", StringComparison.Ordinal)) return null;
++                string v = a[i + 1].Trim().Trim('"');
++                return v.Length > 0 ? v : null;
++            }
++            return null;
++        }
++
++        // Trimmed value of an environment variable, or null when unset or blank.
++        public static string Env(string name)
++        {
++            try
++            {
++                string v = Environment.GetEnvironmentVariable(name);
++                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
++            }
++            catch { return null; }
++        }
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs.meta
+new file mode 100644
+index 0000000..b680637
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/RefereeArgs.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 8255239c64ac49119291e3d66b6d4403
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs
+new file mode 100644
+index 0000000..7674b59
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
+@@ -0,0 +1,451 @@
++// Speech bridge: lets an external program make the avatar "say" a line (speech bubble + moving mouth) and dance,
++// over a small HTTP long-poll protocol (v1, full text in README.md). Off unless launched with
++// "-speech-bridge <url>", env MEX_SPEECH_BRIDGE=<url>, or {"enabled":true} in speech_bridge.json, so upstream
++// behaviour is unchanged by default. Pure consumer: it never sends anything to the server and never plays audio
++// (the server side owns the voice; "talk" only mirrors whether that voice is audible right now).
++using System;
++using System.Collections;
++using System.Collections.Generic;
++using CustomDancePlayer;
++using UnityEngine;
++using UnityEngine.Networking;
++
++namespace MateReferee
++{
++    public sealed class SpeechBridge : MonoBehaviour
++    {
++        const int PollWaitSeconds = 10;         // protocol default (server caps it at 25)
++        const int RequestTimeoutSeconds = 30;   // longer than the wait, so only a dead server times out
++        const float BackoffMin = 0.5f, BackoffMax = 5f;
++        const float MinEmptyPollSeconds = 0.5f; // pause after an empty answer that came back faster than this
++        const float NoTalkTimeout = 3f;         // show the whole line if no "talk on" arrives within this
++        const float RevealCharsPerSecond = 18f; // about speaking speed
++        const float MaxTalkSeconds = 12f;       // close the mouth if "talk off" never arrives
++        const int RememberIds = 50;             // "say" ids remembered for de-duplication
++        static readonly int IsTalkingHash = Animator.StringToHash("isTalking");
++
++        SpeechBridgeConfig cfg;
++
++        // Poll state.
++        int cursor = -1;
++        string epoch = "";
++        float backoff;
++        string linkState = "";
++
++        // Scene objects, re-resolved on every command because loading a VRM replaces the avatar.
++        Animator animator;
++        AvatarRandomMessages bubbleStyle;
++        AvatarDanceHandler dance;
++        Animator paramsCheckedOn;
++        RuntimeAnimatorController paramsCheckedController;
++        bool hasTalkParam;
++        float nextLazyResolve;
++
++        // Current line: pending (no bubble yet), revealing (bubble grows while talking) or shown.
++        string lineId = "", lineText = "";
++        float lineSaidAt;
++        SpeechBubble bubble;
++        bool revealing;
++        float revealProgress;
++        int revealedChars;
++        float removeAt = -1f;
++
++        // Mouth, mirroring TTSState.speaking.
++        bool talking;
++        string talkingId = "";
++        float talkOnAt;
++
++        readonly Queue<string> seenOrder = new Queue<string>();
++        readonly HashSet<string> seen = new HashSet<string>();
++        readonly HashSet<string> loggedOnce = new HashSet<string>();
++
++        static float Now => Time.unscaledTime;
++
++        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
++        static void Boot()
++        {
++            try
++            {
++                var config = SpeechBridgeConfig.Load();
++                if (!config.enabled) return;
++                var go = new GameObject("SpeechBridge");
++                DontDestroyOnLoad(go);
++                go.AddComponent<SpeechBridge>().cfg = config;
++                Debug.Log("[SpeechBridge] enabled: " + config);
++            }
++            catch (Exception e) { Debug.LogWarning("[SpeechBridge] not started: " + e); }
++        }
++
++        void Start() => StartCoroutine(PollLoop());
++
++        void OnDestroy()
++        {
++            try { ClearLine(); CloseMouth(); }
++            catch (Exception e) { Debug.LogWarning("[SpeechBridge] cleanup failed: " + e.Message); }
++        }
++
++        // ---------------------------------------------------------------- polling
++
++        IEnumerator PollLoop()
++        {
++            while (true)
++            {
++                UnityWebRequest req = NewRequest();
++                UnityWebRequestAsyncOperation op = null;
++                if (req != null)
++                {
++                    // An exception here would end the coroutine, and with it the bridge, for the rest of the session.
++                    try { op = req.SendWebRequest(); }
++                    catch (Exception e) { req.Dispose(); SetLink("cannot poll: " + e.Message + " (retrying)", false); }
++                }
++                if (op == null) { yield return new WaitForSecondsRealtime(NextBackoff()); continue; }
++                float sentAt = Now;
++                yield return op;
++                int n = HandleResponse(req);
++                if (n < 0) yield return new WaitForSecondsRealtime(NextBackoff());
++                // A resync answers at once; a server that never waits would otherwise be polled every frame.
++                else if (n == 0 && Now - sentAt < MinEmptyPollSeconds) yield return new WaitForSecondsRealtime(MinEmptyPollSeconds);
++            }
++        }
++
++        UnityWebRequest NewRequest()
++        {
++            string url = cfg.server + cfg.pollPath + "?after=" + cursor + "&epoch=" + Uri.EscapeDataString(epoch) + "&wait=" + PollWaitSeconds;
++            try
++            {
++                var req = UnityWebRequest.Get(url);
++                req.timeout = RequestTimeoutSeconds;
++                if (cfg.verbose) Debug.Log("[SpeechBridge] GET " + url);
++                return req;
++            }
++            catch (Exception e)
++            {
++                SetLink("cannot poll '" + url + "': " + e.Message, false);
++                return null;
++            }
++        }
++
++        // Returns the number of commands, or -1 when the poll failed and the loop should back off.
++        int HandleResponse(UnityWebRequest req)
++        {
++            try
++            {
++                if (req.result != UnityWebRequest.Result.Success)
++                {
++                    SetLink("poll failed: " + (req.responseCode > 0 ? "HTTP " + req.responseCode : req.error) + " (retrying)", false);
++                    return -1;
++                }
++                var batch = JsonUtility.FromJson<SpeechBatch>(req.downloadHandler.text);
++                if (batch == null) throw new FormatException("empty body");
++                if (batch.v != 1) LogOnce("v" + batch.v, "[SpeechBridge] server sent protocol v" + batch.v + ", this build speaks v1");
++                string newEpoch = batch.epoch ?? "";
++                if (newEpoch != epoch && epoch.Length > 0) Debug.Log("[SpeechBridge] server epoch changed " + epoch + " -> " + newEpoch + "; resynced, nothing replayed");
++                epoch = newEpoch;
++                cursor = batch.cursor;
++                backoff = 0f;
++                SetLink("connected to " + cfg.server + " (epoch " + epoch + ")", true);
++                int n = batch.cmds != null ? batch.cmds.Length : 0;
++                if (cfg.verbose) Debug.Log("[SpeechBridge] cursor=" + cursor + " cmds=" + n);
++                for (int i = 0; i < n; i++)
++                    if (batch.cmds[i] != null) Execute(batch.cmds[i]);
++                return n;
++            }
++            catch (Exception e)
++            {
++                SetLink("bad response: " + e.Message + " (retrying)", false);
++                return -1;
++            }
++            finally { req.Dispose(); }
++        }
++
++        float NextBackoff()
++        {
++            backoff = backoff <= 0f ? BackoffMin : Mathf.Min(backoff * 2f, BackoffMax);
++            return backoff;
++        }
++
++        void SetLink(string state, bool ok)
++        {
++            if (state == linkState) return;
++            linkState = state;
++            if (ok) Debug.Log("[SpeechBridge] " + state);
++            else Debug.LogWarning("[SpeechBridge] " + state);
++        }
++
++        // ---------------------------------------------------------------- commands
++
++        void Execute(SpeechCmd c)
++        {
++            string op = c.op ?? "";
++            try
++            {
++                Resolve();
++                switch (op)
++                {
++                    case "say": Say(c.id ?? "", c.text ?? ""); break;
++                    case "talk": Talk(c.id ?? "", c.on); break;
++                    case "stop": Stop(c.clear); break;
++                    case "dance": Dance(c.title ?? ""); break;
++                    case "dance_stop": DanceStop(); break;
++                    default: LogOnce("op:" + op, "[SpeechBridge] ignoring unknown op '" + op + "'"); break;
++                }
++            }
++            catch (Exception e) { LogOnce("exec:" + op + ":" + e.GetType().Name, "[SpeechBridge] '" + op + "' failed: " + e); }
++        }
++
++        void Say(string id, string text)
++        {
++            if (id.Length > 0)
++            {
++                if (seen.Contains(id)) { if (cfg.verbose) Debug.Log("[SpeechBridge] say " + id + " already shown; ignored"); return; }
++                Remember(id);
++            }
++            if (cfg.stopDanceOnSay && dance != null && dance.IsPlaying)
++            {
++                dance.StopPlay();
++                Debug.Log("[SpeechBridge] stopped the dance to speak");
++            }
++            ClearLine(); // replaces the previous bubble; the mouth keeps following "talk"
++            if (text.Length == 0) return;
++            lineId = id;
++            lineText = text;
++            lineSaidAt = Now;
++            Debug.Log("[SpeechBridge] say " + (id.Length > 0 ? id : "(no id)") + " (" + text.Length + " chars)");
++        }
++
++        void Talk(string id, bool on)
++        {
++            if (on)
++            {
++                talking = true;
++                talkingId = id;
++                talkOnAt = Now;
++                SetMouth(true);
++                if (lineText.Length > 0 && IsCurrentLine(id))
++                {
++                    removeAt = -1f; // stays until "talk off" + linger
++                    if (bubble == null && ShowBubble())
++                    {
++                        revealing = true;
++                        revealProgress = 0f;
++                        revealedChars = 0;
++                    }
++                }
++            }
++            else
++            {
++                if (talking && id.Length > 0 && talkingId.Length > 0 && id != talkingId)
++                {
++                    if (cfg.verbose) Debug.Log("[SpeechBridge] talk off for " + id + " ignored (speaking " + talkingId + ")");
++                    return;
++                }
++                CloseMouth();
++                if (lineText.Length > 0 && IsCurrentLine(id)) FinishLine(cfg.lingerSeconds);
++            }
++            if (cfg.verbose) Debug.Log("[SpeechBridge] talk " + (on ? "on " : "off ") + id);
++        }
++
++        void Stop(bool clear)
++        {
++            CloseMouth();
++            if (clear) ClearLine();
++            else if (lineText.Length > 0) FinishLine(BubbleOnlySeconds(lineText));
++            Debug.Log("[SpeechBridge] stop" + (clear ? " (clear)" : ""));
++        }
++
++        void Dance(string title)
++        {
++            if (dance == null) { Debug.LogWarning("[SpeechBridge] dance: no AvatarDanceHandler in the scene"); return; }
++            if (dance.enableSync)
++            {
++                // The multi-instance sync starts menu plays and auto-next 1.5 s late; PlayIndex itself is not delayed.
++                dance.enableSync = false;
++                Debug.Log("[SpeechBridge] dance sync disabled for this session (no 1.5 s lead-in)");
++            }
++            int index = title.Length > 0 ? dance.FindIndexByTitle(title) : 0;
++            if (index < 0)
++            {
++                Debug.LogWarning("[SpeechBridge] dance '" + title + "' not found; playing the first dance instead");
++                index = 0;
++            }
++            bool ok = dance.PlayIndex(index);
++            Debug.Log("[SpeechBridge] dance '" + title + "' index " + index + " -> " +
++                      (ok ? "starting" : "not started (no dances installed, or the avatar has no animator)"));
++        }
++
++        void DanceStop()
++        {
++            if (dance == null) return;
++            dance.StopPlay();
++            Debug.Log("[SpeechBridge] dance stopped");
++        }
++
++        bool IsCurrentLine(string id) => id.Length == 0 || lineId.Length == 0 || id == lineId;
++
++        void Remember(string id)
++        {
++            seen.Add(id);
++            seenOrder.Enqueue(id);
++            while (seenOrder.Count > RememberIds) seen.Remove(seenOrder.Dequeue());
++        }
++
++        static float BubbleOnlySeconds(string text)
++        {
++            int words = text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries).Length;
++            return Mathf.Max(4f, words / 2.5f + 3f);
++        }
++
++        // ---------------------------------------------------------------- bubble
++
++        bool ShowBubble()
++        {
++            if (bubbleStyle == null || bubbleStyle.chatContainer == null) Resolve();
++            if (bubbleStyle == null)
++            {
++                LogOnce("nostyle", "[SpeechBridge] cannot show a bubble: no AvatarRandomMessages with a chatContainer in the scene");
++                return false;
++            }
++            try { bubble = SpeechBubble.Create(bubbleStyle, cfg.fontSize, cfg.bubbleWidth); }
++            catch (Exception e)
++            {
++                LogOnce("create:" + e.GetType().Name, "[SpeechBridge] cannot create the bubble: " + e);
++                return false;
++            }
++            Debug.Log("[SpeechBridge] bubble shown on '" + bubbleStyle.chatContainer.name + "' (fontSize " + cfg.fontSize + ", width " + cfg.bubbleWidth + ")");
++            return true;
++        }
++
++        // Shows the whole line now and removes it after `seconds`.
++        void FinishLine(float seconds)
++        {
++            if (bubble == null && !ShowBubble()) { ClearLine(); return; }
++            bubble.SetText(lineText);
++            revealing = false;
++            removeAt = Now + seconds;
++        }
++
++        void ClearLine()
++        {
++            if (bubble != null) { bubble.Destroy(); bubble = null; }
++            lineId = "";
++            lineText = "";
++            revealing = false;
++            removeAt = -1f;
++        }
++
++        // ---------------------------------------------------------------- mouth
++
++        void CloseMouth()
++        {
++            if (!talking) return; // never touch isTalking unless we opened it
++            talking = false;
++            talkingId = "";
++            SetMouth(false);
++        }
++
++        void SetMouth(bool open)
++        {
++            var a = animator;
++            if (a == null || !a.isActiveAndEnabled || a.runtimeAnimatorController == null) return;
++            if (a != paramsCheckedOn || a.runtimeAnimatorController != paramsCheckedController)
++            {
++                var ps = a.parameters;
++                if (ps.Length == 0) return; // animator not initialised yet; check again next frame
++                paramsCheckedOn = a;
++                paramsCheckedController = a.runtimeAnimatorController;
++                hasTalkParam = false;
++                foreach (var p in ps)
++                    if (p.nameHash == IsTalkingHash && p.type == AnimatorControllerParameterType.Bool) { hasTalkParam = true; break; }
++                if (!hasTalkParam) LogOnce("noparam", "[SpeechBridge] the avatar's animator has no 'isTalking' bool; the mouth will not move");
++            }
++            if (hasTalkParam && a.GetBool(IsTalkingHash) != open) a.SetBool(IsTalkingHash, open);
++        }
++
++        // ---------------------------------------------------------------- scene lookup
++
++        void Resolve()
++        {
++            GameObject model = null, main = null;
++            var loader = FindFirstObjectByType<VRMLoader>();
++            if (loader != null)
++            {
++                main = loader.mainModel;
++                var current = loader.GetCurrentModel();
++                model = current != null && current.activeInHierarchy ? current : main;
++            }
++            animator = model != null ? model.GetComponentInChildren<Animator>() : null;
++
++            // The bubble style/container: the active avatar's AvatarRandomMessages, else the built-in avatar's
++            // (a custom VRM may get one without a chatContainer), else any in the scene.
++            bubbleStyle = StyleOn(model);
++            if (bubbleStyle == null) bubbleStyle = StyleOn(main);
++            if (bubbleStyle == null)
++                foreach (var a in FindObjectsByType<AvatarRandomMessages>(FindObjectsInactive.Include, FindObjectsSortMode.None))
++                    if (a != null && a.chatContainer != null) { bubbleStyle = a; break; }
++            if (animator == null && bubbleStyle != null) animator = bubbleStyle.GetComponent<Animator>();
++
++            dance = FindFirstObjectByType<AvatarDanceHandler>();
++        }
++
++        static AvatarRandomMessages StyleOn(GameObject go)
++        {
++            if (go == null) return null;
++            foreach (var a in go.GetComponentsInChildren<AvatarRandomMessages>(true))
++                if (a != null && a.chatContainer != null) return a;
++            return null;
++        }
++
++        // ---------------------------------------------------------------- per frame
++
++        void Update()
++        {
++            try
++            {
++                float now = Now;
++                if (bubble != null && !bubble.Alive)
++                {
++                    Debug.LogWarning("[SpeechBridge] the bubble was destroyed by something else; line dropped");
++                    ClearLine();
++                }
++                if (lineText.Length > 0 && bubble == null && now - lineSaidAt >= NoTalkTimeout)
++                    FinishLine(BubbleOnlySeconds(lineText)); // no voice: bubble only
++
++                if (revealing)
++                {
++                    revealProgress += RevealCharsPerSecond * Time.unscaledDeltaTime;
++                    int n = Mathf.Min(lineText.Length, Mathf.FloorToInt(revealProgress));
++                    if (n != revealedChars) { revealedChars = n; bubble.SetText(lineText.Substring(0, n)); }
++                    if (n >= lineText.Length) revealing = false;
++                }
++
++                if (talking && now - talkOnAt > MaxTalkSeconds)
++                {
++                    Debug.LogWarning("[SpeechBridge] no 'talk off' after " + MaxTalkSeconds + " s; closing the mouth");
++                    CloseMouth();
++                    if (lineText.Length > 0) FinishLine(cfg.lingerSeconds);
++                }
++
++                if (removeAt >= 0f && now >= removeAt) ClearLine();
++            }
++            catch (Exception e) { LogOnce("update:" + e.GetType().Name, "[SpeechBridge] Update failed: " + e); }
++        }
++
++        // ME's own scripts may reset isTalking (e.g. when a random-message bubble finishes), so re-apply it while talking.
++        void LateUpdate()
++        {
++            if (!talking) return;
++            try
++            {
++                // Also after an avatar swap mid-line: the old model is deactivated (built-in) or destroyed (custom VRM).
++                if ((animator == null || !animator.isActiveAndEnabled) && Now >= nextLazyResolve) { nextLazyResolve = Now + 1f; Resolve(); }
++                SetMouth(true);
++            }
++            catch (Exception e) { LogOnce("late:" + e.GetType().Name, "[SpeechBridge] LateUpdate failed: " + e); }
++        }
++
++        void LogOnce(string key, string message)
++        {
++            if (loggedOnce.Add(key)) Debug.LogWarning(message);
++        }
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs.meta
+new file mode 100644
+index 0000000..9bdfbeb
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 08645d6047734886a62ba94ef081afa0
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs
+new file mode 100644
+index 0000000..96784a5
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
+@@ -0,0 +1,87 @@
++// Settings for SpeechBridge. File: Application.persistentDataPath/speech_bridge.json
++// (Linux: ~/.config/unity3d/Shinymoon/MateEngineX/speech_bridge.json). Missing fields keep their defaults.
++// Precedence: "-speech-bridge [url]" on the command line > env MEX_SPEECH_BRIDGE=<url> > file > defaults.
++using System;
++using System.IO;
++using UnityEngine;
++
++namespace MateReferee
++{
++    [Serializable]
++    public sealed class SpeechBridgeConfig
++    {
++        public const string FileName = "speech_bridge.json";
++        public const string CliFlag = "speech-bridge";
++        public const string EnvVar = "MEX_SPEECH_BRIDGE";
++        const string DefaultServer = "http://127.0.0.1:8000";
++        const string DefaultPollPath = "/face/mate/next";
++
++        public bool enabled = false;
++        public string server = DefaultServer;
++        public string pollPath = DefaultPollPath;
++        public int fontSize = 40;
++        public int bubbleWidth = 720;
++        public float lingerSeconds = 3f;
++        public bool stopDanceOnSay = true;
++        public bool verbose = false;
++
++        [NonSerialized] public string source = "defaults";
++
++        public static SpeechBridgeConfig Load()
++        {
++            var cfg = new SpeechBridgeConfig();
++
++            string path = null;
++            try { path = Path.Combine(Application.persistentDataPath, FileName); } catch { }
++            if (path != null && File.Exists(path))
++            {
++                try { JsonUtility.FromJsonOverwrite(File.ReadAllText(path), cfg); cfg.source = path; }
++                catch (Exception e) { Debug.LogWarning("[SpeechBridge] ignoring unreadable " + path + ": " + e.Message); }
++            }
++
++            // MEX_SPEECH_BRIDGE=0|false|off|no turns it off even if the file enables it; 1|true|on|yes turns it on with
++            // the configured server; anything else is the server URL.
++            string env = RefereeArgs.Env(EnvVar);
++            if (env != null)
++            {
++                cfg.enabled = !IsOff(env);
++                if (cfg.enabled && !IsOn(env)) cfg.server = env;
++                cfg.source = "env " + EnvVar;
++            }
++
++            if (RefereeArgs.Has(CliFlag))
++            {
++                cfg.enabled = true;
++                string url = RefereeArgs.Value(CliFlag);
++                if (url != null) cfg.server = url;
++                cfg.source = "-" + CliFlag;
++            }
++
++            cfg.Sanitize();
++            return cfg;
++        }
++
++        static bool IsOff(string v) =>
++            v == "0" || v.Equals("false", StringComparison.OrdinalIgnoreCase) ||
++            v.Equals("off", StringComparison.OrdinalIgnoreCase) || v.Equals("no", StringComparison.OrdinalIgnoreCase);
++
++        static bool IsOn(string v) =>
++            v == "1" || v.Equals("true", StringComparison.OrdinalIgnoreCase) ||
++            v.Equals("on", StringComparison.OrdinalIgnoreCase) || v.Equals("yes", StringComparison.OrdinalIgnoreCase);
++
++        void Sanitize()
++        {
++            server = string.IsNullOrWhiteSpace(server) ? DefaultServer : server.Trim().TrimEnd('/');
++            if (server.IndexOf("://", StringComparison.Ordinal) < 0) server = "http://" + server; // "127.0.0.1:8000"
++            pollPath = string.IsNullOrWhiteSpace(pollPath) ? DefaultPollPath : pollPath.Trim();
++            if (!pollPath.StartsWith("/", StringComparison.Ordinal)) pollPath = "/" + pollPath;
++            fontSize = Mathf.Clamp(fontSize, 8, 200);
++            bubbleWidth = Mathf.Clamp(bubbleWidth, 120, 4000);
++            lingerSeconds = Mathf.Clamp(lingerSeconds, 0f, 60f);
++        }
++
++        public override string ToString() =>
++            server + pollPath + " fontSize=" + fontSize + " bubbleWidth=" + bubbleWidth + " lingerSeconds=" + lingerSeconds +
++            " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs.meta
+new file mode 100644
+index 0000000..415bb8f
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 93c267d5d75f46d38286c37fd9ae6fb6
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs
+new file mode 100644
+index 0000000..e6c2558
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs	
+@@ -0,0 +1,84 @@
++// A speech bubble built the way AvatarRandomMessages.ShowSpecificMessage builds ME's own (through LLMUnity's
++// LLMUnitySamples.Bubble, MIT licence): same container, sprite, font, colours, padding, spacing, sorting and
++// material, but sized for a projector, with no typing sound and with rich text off so the line is shown verbatim.
++// It creates the UI objects itself, mirroring Bubble's construction step for step, because Bubble is internal to
++// Assembly-CSharp: using only public types, this Runtime folder also compiles as a separate DLL against a released
++// build's Managed/Assembly-CSharp.dll (the no-rebuild fallback).
++using UnityEngine;
++using UnityEngine.UI;
++
++namespace MateReferee
++{
++    sealed class SpeechBubble
++    {
++        readonly GameObject root;
++        readonly Text label;
++
++        SpeechBubble(GameObject root, Text label)
++        {
++            this.root = root;
++            this.label = label;
++        }
++
++        // False once the bubble's GameObject is gone (removed by us, or destroyed by someone else).
++        public bool Alive => root != null;
++
++        public static SpeechBubble Create(AvatarRandomMessages style, int fontSize, int width)
++        {
++            float pad = style.textPadding, offset = style.bubbleSpacing;
++
++            // Bubble.CreateTextObject: fixed width (bubbleWidth != -1), height follows the text (bubbleHeight == -1).
++            var textGo = new GameObject("SpeechBridgeBubble", typeof(RectTransform), typeof(Text), typeof(Canvas));
++            textGo.transform.SetParent(style.chatContainer);
++            var text = textGo.GetComponent<Text>();
++            textGo.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
++            text.text = "";
++            if (style.font != null) text.font = style.font;
++            text.fontSize = fontSize;
++            text.color = style.fontColor;
++            text.supportRichText = false;
++
++            // Bubble.CreateImageObject, plus ShowSpecificMessage's material.
++            var imageGo = new GameObject("Image", typeof(RectTransform), typeof(Image), typeof(Canvas));
++            imageGo.transform.SetParent(textGo.transform);
++            var image = imageGo.GetComponent<Image>();
++            image.type = Image.Type.Sliced;
++            image.sprite = style.bubbleSprite;
++            image.color = style.bubbleColor;
++            if (style.bubbleMaterial != null) image.material = style.bubbleMaterial;
++
++            // Bubble.SetBubblePosition with leftPosition = 1, bottomPosition = 0: anchored bottom-right.
++            var rt = textGo.GetComponent<RectTransform>();
++            rt.pivot = rt.anchorMin = rt.anchorMax = new Vector2(1f, 0f);
++            rt.localScale = Vector3.one;
++            rt.anchoredPosition = new Vector2(-(offset + pad), offset + pad);
++            rt.sizeDelta = new Vector2(width - 2f * pad, rt.sizeDelta.y - 2f * pad);
++            var irt = imageGo.GetComponent<RectTransform>();
++            irt.anchorMin = Vector2.zero;
++            irt.anchorMax = Vector2.one;
++            irt.pivot = new Vector2(0.5f, 0.5f);
++            irt.offsetMin = new Vector2(-pad, -pad);
++            irt.offsetMax = new Vector2(pad, pad);
++
++            // Bubble.SetSortingOrder: text in front of its image.
++            var textCanvas = textGo.GetComponent<Canvas>();
++            textCanvas.overrideSorting = true;
++            textCanvas.sortingOrder = 2;
++            var imageCanvas = imageGo.GetComponent<Canvas>();
++            imageCanvas.overrideSorting = true;
++            imageCanvas.sortingOrder = 1;
++
++            return new SpeechBubble(textGo, text);
++        }
++
++        public void SetText(string text)
++        {
++            if (label != null) label.text = text;
++        }
++
++        public void Destroy()
++        {
++            if (root != null) UnityEngine.Object.Destroy(root);
++        }
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs.meta
+new file mode 100644
+index 0000000..3147770
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBubble.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: e1fbcc933f784a8ca643f60e283400e8
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs
+new file mode 100644
+index 0000000..7c75787
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs	
+@@ -0,0 +1,27 @@
++// Speech bridge wire protocol v1 (full text in README.md). JsonUtility cannot represent null or dictionaries,
++// so the server always sends every field; the defaults here only matter for a malformed response.
++using System;
++
++namespace MateReferee
++{
++    [Serializable]
++    public sealed class SpeechCmd
++    {
++        public string op = "";    // "say" | "talk" | "stop" | "dance" | "dance_stop"
++        public string id = "";    // say: Interjection.id; talk: TTSState.interjection_id or ""
++        public string text = "";  // say: exact bubble text
++        public string audio = ""; // say: relative WAV URL or "" (ME never plays audio; the browser tab does)
++        public string title = ""; // dance: title to play, "" = first available
++        public bool on;           // talk: TTSState.speaking
++        public bool clear;        // stop: also remove the bubble
++    }
++
++    [Serializable]
++    public sealed class SpeechBatch
++    {
++        public int v;
++        public string epoch = "";
++        public int cursor;
++        public SpeechCmd[] cmds = Array.Empty<SpeechCmd>();
++    }
++}
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs.meta b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs.meta
+new file mode 100644
+index 0000000..1f4083d
+--- /dev/null
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs.meta	
+@@ -0,0 +1,11 @@
++fileFormatVersion: 2
++guid: 8e4349dffc4b4e558b5d652c6b011ab0
++MonoImporter:
++  externalObjects: {}
++  serializedVersion: 2
++  defaultReferences: []
++  executionOrder: 0
++  icon: {instanceID: 0}
++  userData: 
++  assetBundleName: 
++  assetBundleVariant: 
+diff --git a/Assets/MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs b/Assets/MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs
+index 859fabf..f945aeb 100755
+--- a/Assets/MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs	
++++ b/Assets/MATE ENGINE - Scripts/AvatarHandlers/AvatarDancePlayer.cs	
+@@ -409,7 +409,9 @@ namespace CustomDancePlayer
+             if (found == null)
+             {
+                 var all = GameObject.FindObjectsByType<Animator>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+-                found = all.FirstOrDefault(a => a && a.isActiveAndEnabled);
++                // [Referee fork] Skip controller-less helpers (MateEngineAPI/CustomDances/ADS_ProxyRoot): while the
++                // avatar is hidden (first-run tutorial) they were picked and the dance player never recovered.
++                found = all.FirstOrDefault(a => a && a.isActiveAndEnabled && a.runtimeAnimatorController != null);
+             }
+             if (found != animator)
+             {
+@@ -424,7 +426,8 @@ namespace CustomDancePlayer
+ 
+         void RefreshAnimatorIfChanged()
+         {
+-            if (animator == null || lastAnimator == null || animator != lastAnimator || animator.runtimeAnimatorController != defaultController)
++            if (animator == null || lastAnimator == null || animator != lastAnimator || animator.runtimeAnimatorController != defaultController ||
++                animator.runtimeAnimatorController == null)   // [Referee fork] keep looking until the avatar is back
+             {
+                 FindAvatarSmart();
+             }
+@@ -461,6 +464,9 @@ namespace CustomDancePlayer
+             }
+ 
+             entries.Sort((a, b) => string.Compare(a.id, b.id, StringComparison.OrdinalIgnoreCase));
++            // [Referee fork] Log the scan result; a dance that is not listed here cannot be played.
++            Debug.Log("[AvatarDanceHandler] Found " + entries.Count + " dance(s) in '" + streamDir + "' and '" + modsDir + "'" +
++                      (entries.Count > 0 ? ": " + string.Join(", ", entries.Select(x => x.id)) : ""));
+         }
+ 
+         void TryAddUnity3D(string path)
+@@ -745,15 +751,35 @@ namespace CustomDancePlayer
+             {
+                 string bp = string.IsNullOrEmpty(e.bundlePath) ? e.path : e.bundlePath;
+                 e.bundle = AssetBundle.LoadFromFile(bp);
+-                if (e.bundle == null) { UnfreezeAnimator(); holdDuringTransition = false; yield break; }
++                if (e.bundle == null)
++                {
++                    // [Referee fork] Say why, and leave the "Wait For Dance" pose instead of freezing in it.
++                    Debug.LogWarning("[AvatarDanceHandler] Could not load dance '" + e.id + "' from '" + bp + "': " +
++                        (File.Exists(bp) ? "AssetBundle.LoadFromFile returned null (see the AssetBundle error above: incompatible Unity version or build target, corrupt file, or the same bundle is already loaded)" : "file not found"));
++                    SetWaiting(false);
++                    UnfreezeAnimator(); holdDuringTransition = false; yield break;
++                }
+             }
+             if (e.clip == null) e.clip = e.bundle.LoadAllAssets<AnimationClip>().FirstOrDefault();
+             if (e.audio == null) e.audio = e.bundle.LoadAllAssets<AudioClip>().FirstOrDefault();
++            // [Referee fork] Log what the player picked (first AnimationClip and first AudioClip in the bundle).
++            Debug.Log("[AvatarDanceHandler] Playing '" + e.id + "': clip=" + (e.clip != null ? e.clip.name + " (" + e.clip.length.ToString("0.00") + "s)" : "none") +
++                      " audio=" + (e.audio != null ? e.audio.name + " (" + e.audio.length.ToString("0.00") + "s)" : "none"));
+ 
+-            if (!EnsureAnimatorReady()) { UnfreezeAnimator(); holdDuringTransition = false; yield break; }
++            if (!EnsureAnimatorReady())
++            {
++                Debug.LogWarning("[AvatarDanceHandler] No avatar Animator found; '" + e.id + "' not played"); // [Referee fork]
++                SetWaiting(false); UnfreezeAnimator(); holdDuringTransition = false; yield break;
++            }
+ 
+             if (placeholderClipCached == null) placeholderClipCached = FindPlaceholderClip(defaultController, placeholderClipName);
+-            if (overrideController == null || placeholderClipCached == null) { UnfreezeAnimator(); holdDuringTransition = false; yield break; }
++            if (overrideController == null || placeholderClipCached == null)
++            {
++                // [Referee fork] Say why instead of failing silently.
++                Debug.LogWarning("[AvatarDanceHandler] Animator '" + (animator != null ? animator.name : "none") + "' has no '" +
++                                 placeholderClipName + "' clip; '" + e.id + "' not played (is the avatar hidden, e.g. by the first-run tutorial?)");
++                SetWaiting(false); UnfreezeAnimator(); holdDuringTransition = false; yield break;
++            }
+ 
+             overrideController[placeholderClipName] = e.clip != null ? e.clip : placeholderClipCached;
+ 
+diff --git a/build-referee.sh b/build-referee.sh
+new file mode 100755
+index 0000000..fb54d3e
+--- /dev/null
++++ b/build-referee.sh
+@@ -0,0 +1,74 @@
++#!/usr/bin/env bash
++# Command-line Linux build of this fork (Assets/MATE ENGINE - Referee/Editor/RefereeBuild.cs).
++#   ./build-referee.sh <output-dir> [--scripts-only] [--dev]
++# Produces <output-dir>/Payload/MateEngineX.x86_64 (+ launch.sh) and <output-dir>/install.sh, like the release
++# layout; the Unity log goes to <output-dir>/build.log. --scripts-only recompiles scripts into an existing build.
++# Environment:
++#   UNITY             Unity 6000.2.6f2 editor binary (default: ~/Unity/Hub/Editor/6000.2.6f2/Editor/Unity)
++#   LIBXML2_SHIM_DIR  directory holding a libxml2.so.2, used only when the system has none (Arch now ships .so.16)
++#   PREBUILT_PAYLOAD  a released MateEngineX Payload/ folder to copy libStandaloneFileBrowser.so from when the
++#                     project lacks it (it is gitignored; without it the build works but file dialogs fail)
++#   NICE              niceness for the editor process (default 5)
++set -euo pipefail
++
++if [ $# -lt 1 ] || [[ "$1" == -* ]]; then
++    echo "usage: $0 <output-dir> [--scripts-only] [--dev]" >&2
++    exit 2
++fi
++P="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
++OUT="$(realpath -m "$1")"
++shift
++UNITY="${UNITY:-$HOME/Unity/Hub/Editor/6000.2.6f2/Editor/Unity}"
++LIBXML2_SHIM_DIR="${LIBXML2_SHIM_DIR:-}"
++
++[ -x "$UNITY" ] || { echo "Unity editor not found at '$UNITY' (set UNITY=...)" >&2; exit 2; }
++for pid in $(pgrep -x Unity || true); do
++    if tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF -- "$P"; then
++        echo "a Unity editor (pid $pid) has '$P' open; wait for it or close it first" >&2
++        exit 2
++    fi
++done
++
++# Unity 6000.2 links against libxml2.so.2, which newer distributions no longer ship
++# (the ldconfig cache can still list a deleted copy, hence the -e test).
++has_libxml2() {
++    local f
++    for f in $(ldconfig -p 2>/dev/null | awk '/libxml2\.so\.2 /{print $NF}') /usr/lib/libxml2.so.2 \
++             /usr/lib64/libxml2.so.2 /usr/lib/x86_64-linux-gnu/libxml2.so.2; do
++        [ -e "$f" ] && return 0
++    done
++    return 1
++}
++if ! has_libxml2; then
++    if [ -e "$LIBXML2_SHIM_DIR/libxml2.so.2" ]; then
++        export LD_LIBRARY_PATH="$LIBXML2_SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
++        echo "using libxml2.so.2 from $LIBXML2_SHIM_DIR"
++    else
++        echo "warning: no libxml2.so.2 found; set LIBXML2_SHIM_DIR if Unity fails to start" >&2
++    fi
++fi
++
++SFB="$P/Assets/MATE ENGINE - Packages/StandaloneFileBrowser/Plugins/Linux/x86_64/libStandaloneFileBrowser.so"
++if [ ! -e "$SFB" ]; then
++    SRC="${PREBUILT_PAYLOAD:-}/MateEngineX_Data/Plugins/libStandaloneFileBrowser.so"
++    if [ -n "${PREBUILT_PAYLOAD:-}" ] && [ -e "$SRC" ]; then
++        mkdir -p "$(dirname "$SFB")"
++        cp "$SRC" "$SFB"
++        echo "copied libStandaloneFileBrowser.so from $PREBUILT_PAYLOAD"
++    else
++        echo "warning: libStandaloneFileBrowser.so missing (set PREBUILT_PAYLOAD=<release>/Payload); file dialogs will not work" >&2
++    fi
++fi
++
++mkdir -p "$OUT/Payload"
++echo "building into $OUT (log: $OUT/build.log)"
++start=$(date +%s)
++set +e
++nice -n "${NICE:-5}" "$UNITY" -batchmode -quit -buildTarget Linux64 -projectPath "$P" \
++    -executeMethod RefereeBuild.Build --output "$OUT/Payload/MateEngineX.x86_64" "$@" \
++    -logFile "$OUT/build.log"
++rc=$?
++set -e
++echo "build exit=$rc after $(( $(date +%s) - start ))s"
++grep -E "RefereeBuild:|error CS[0-9]+" "$OUT/build.log" | tail -n 20 || true
++exit $rc
+diff --git a/tools/mock_mate_server.py b/tools/mock_mate_server.py
+new file mode 100755
+index 0000000..8f1945b
+--- /dev/null
++++ b/tools/mock_mate_server.py
+@@ -0,0 +1,56 @@
++#!/usr/bin/env python3
++"""Stand-alone mock of the speech-bridge server (protocol v1, see "Assets/MATE ENGINE - Referee/README.md"),
++so the fork can be run and tested without any other software. Python 3 standard library only.
++  python3 tools/mock_mate_server.py [port]        (default 8765)
++  ./launch.sh -speech-bridge http://127.0.0.1:8765
++Every 25 s it plays: say -> talk on -> talk off -> dance (first installed) -> dance_stop."""
++import json, secrets, sys, threading, time
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from urllib.parse import parse_qs, urlparse
++
++EPOCH, PERIOD = secrets.token_hex(4), 25.0
++SCRIPT = [(1, "say", {"text": "Referee here: that figure is out of date. The latest report says 12 percent."}),
++          (2, "talk", {"on": True}), (7, "talk", {"on": False}), (12, "dance", {}), (20, "dance_stop", {})]
++events, cond = [], threading.Condition()  # events[i] has seq i + 1
++
++def cmd(op, **kw):
++    return {"op": op, "id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False, **kw}
++
++def script():
++    for n in range(1, 1_000_000):
++        start = time.time()
++        for at, op, kw in SCRIPT:
++            time.sleep(max(0.0, start + at - time.time()))
++            with cond:
++                events.append(cmd(op, id=f"demo-{n}" if op in ("say", "talk") else "", **kw))
++                cond.notify_all()
++        time.sleep(max(0.0, start + PERIOD - time.time()))
++
++class Handler(BaseHTTPRequestHandler):
++    def do_GET(self):
++        url = urlparse(self.path)
++        if url.path != "/face/mate/next":
++            return self.send_error(404)
++        q = {k: v[0] for k, v in parse_qs(url.query).items()}
++        try:
++            after, wait = int(q.get("after", "-1")), max(0, min(int(q.get("wait", "10")), 25))
++        except ValueError:
++            return self.send_error(400)
++        with cond:
++            if after >= 0 and q.get("epoch") == EPOCH and after <= len(events):
++                cond.wait_for(lambda: len(events) > after, timeout=wait)
++                cmds = events[after:]
++            else:
++                cmds = []  # first poll, other epoch or cursor from the future: resync, never replay
++            body = json.dumps({"v": 1, "epoch": EPOCH, "cursor": len(events), "cmds": cmds}).encode()
++        self.send_response(200)
++        self.send_header("Content-Type", "application/json")
++        self.send_header("Content-Length", str(len(body)))
++        self.end_headers()
++        self.wfile.write(body)
++
++if __name__ == "__main__":
++    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
++    threading.Thread(target=script, daemon=True).start()
++    print(f"mock speech-bridge server on http://127.0.0.1:{port}/face/mate/next (epoch {EPOCH})")
++    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

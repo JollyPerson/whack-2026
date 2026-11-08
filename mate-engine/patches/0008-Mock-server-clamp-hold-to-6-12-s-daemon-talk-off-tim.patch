@@ -1,0 +1,40 @@
+From 6e5cfc6e5bbe6c79a075980dedb13f1a3886ad8e Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 05:18:20 +0000
+Subject: [PATCH 08/12] Mock server: clamp hold to 6-12 s, daemon talk-off
+ timer
+
+A pending talk off no longer holds up Ctrl-C, and a negative or huge
+hold is clamped to BotLine.hold_s's range.
+---
+ tools/mock_mate_server.py | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/tools/mock_mate_server.py b/tools/mock_mate_server.py
+index e2ea0fe..349ae59 100755
+--- a/tools/mock_mate_server.py
++++ b/tools/mock_mate_server.py
+@@ -8,7 +8,7 @@ Channels, like the debate server: /face/mate/next/referee (= /face/mate/next, th
+ /face/mate/next/against (the side bots: text only, so a line is say + talk on, then talk off after its hold time).
+ A poll gets only its own channel's commands. Pick an instance's channel with "pollPath" in its speech_bridge.json.
+   --bots                                   every 12 s, one side-bot line, alternating for / against
+-  POST /say?channel=for&text=...[&hold=8]  say + talk on now, talk off after hold s (default: words / 2.5 + 3, 6-12)
++  POST /say?channel=for&text=...[&hold=8]  say + talk on now, talk off after hold s (default words / 2.5 + 3; 6-12)
+   POST /stop?channel=for[&clear=1]         stop; channel=all reaches every channel"""
+ import json, secrets, sys, threading, time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+@@ -42,10 +42,12 @@ def script():
+ def bot_say(channel, text, hold=None):
+     """A side-bot line as the server sends it: BotLine -> say + talk on, BotTalk(on=false) after hold_s -> talk off."""
+     line_id = f"b-{next(ids):04d}"
+-    hold = hold if hold is not None else min(max(len(text.split()) / 2.5 + 3, 6.0), 12.0)
++    hold = min(max(hold if hold is not None else len(text.split()) / 2.5 + 3, 6.0), 12.0)  # BotLine.hold_s range
+     emit(channel, "say", id=line_id, text=text)
+     emit(channel, "talk", id=line_id, on=True)
+-    threading.Timer(hold, emit, (channel, "talk"), {"id": line_id, "on": False}).start()
++    t = threading.Timer(hold, emit, (channel, "talk"), {"id": line_id, "on": False})
++    t.daemon = True  # Ctrl-C must not wait for a pending talk off
++    t.start()
+     print(f"{time.strftime('%H:%M:%S')} {channel}: say {line_id} hold {hold:.1f}s {text!r}", flush=True)
+     return line_id
+ 

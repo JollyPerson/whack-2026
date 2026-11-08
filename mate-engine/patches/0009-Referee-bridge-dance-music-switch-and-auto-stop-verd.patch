@@ -1,0 +1,394 @@
+From c88e489893291472eed0cc9dd7e9f5417f4a38dc Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 06:05:29 +0000
+Subject: [PATCH 09/12] Referee bridge: dance music switch and auto-stop
+ (verdict dances)
+
+The debate server's DebateResult has each side bot dance after the
+verdict: the winner's with its music, the loser's in silence, both for
+dance_s. So "dance" now also reads "on" (play the dance's music) and
+"seconds" (stop after this long; 0 = to the end), both in SpeechCmd.
+
+on=true sets the dance player's AudioSource to danceMusicVolume, a new
+speech_bridge.json key (default 0.4; ME's own dance volume is 0.5 and no
+pet/effects/menu volume setting reaches it); on=false sets it to 0. With
+seconds > 0 a timer stops the dance, and the title loops until then
+instead of going on to the next installed dance. A later dance, a
+dance_stop, or a say that stops the dance cancels the timer. Once the
+dance is over, however it ended, the player's own volume and loop
+setting come back. The volume is set before PlayIndex, which starts the
+music within the call when the avatar is already idle.
+
+Older servers send neither key, and JsonUtility cannot tell a missing
+field from false/0. A server that knows the extension sends "seconds"
+with every command, so a batch without a "seconds": key is an older
+server, and its dance plays as before: player volume, to the end.
+
+Logs: the dance line says music on/volume or silent and the stop time,
+"dancing: ... playing=True volume=0.40 loop=True" once it plays, then
+"dance stopped after N s" and "dance over; dance volume back to 0.50".
+---
+ Assets/MATE ENGINE - Referee/README.md        |  48 ++++++-
+ .../Runtime/SpeechBridge.cs                   | 121 ++++++++++++++++--
+ .../Runtime/SpeechBridgeConfig.cs             |   5 +-
+ .../Runtime/SpeechWire.cs                     |   3 +-
+ 4 files changed, 161 insertions(+), 16 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 61d0782..bee7d05 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -3,12 +3,13 @@
+ Additions to the MateEngineX Linux port that let another program drive the avatar over HTTP:
+ 
+ - show a line in the avatar's speech bubble while its mouth moves (`say` / `talk` / `stop`);
+-- play and stop the built-in custom dances (`dance` / `dance_stop`);
++- play and stop the built-in custom dances (`dance` / `dance_stop`), with or without their music, for a set time;
+ - export dance mods and build the player from the command line.
+ 
+ It was written for a live debate fact-checker whose "referee" interjects by voice. The bridge itself knows
+-nothing about debates. **The avatar never plays audio and never sends anything back.** Another program (in our
+-case a browser tab) plays the voice and reports whether it is audible. The avatar only mirrors that state.
++nothing about debates. **The avatar never plays the voice and never sends anything back.** Another program (in our
++case a browser tab) plays the voice and reports whether it is audible. The avatar only mirrors that state. The only
++sound it makes is a dance's own music, through ME's dance player.
+ 
+ Everything is **off by default**. Without the flags below the program behaves exactly like upstream.
+ 
+@@ -46,6 +47,7 @@ its default:
+   "lingerSeconds": 3,
+   "mouthWithText": false,
+   "stopDanceOnSay": true,
++  "danceMusicVolume": 0.4,
+   "verbose": false
+ }
+ ```
+@@ -62,6 +64,7 @@ its default:
+ | `lingerSeconds` | How long the bubble stays after the voice stops |
+ | `mouthWithText` | For text-only lines: the mouth stops when the text has finished typing, and `talk off` only starts the linger. Off: the mouth moves until `talk off`, like a voice |
+ | `stopDanceOnSay` | Stop a running dance when a new line arrives |
++| `danceMusicVolume` | Volume (0 to 1) of a dance whose command has `on: true`. ME's own dance volume is 0.5; none of ME's pet, effect or menu volume settings touches it |
+ | `verbose` | Log every poll and every `talk`, and every time the bridge opens or closes the mouth |
+ 
+ **Size and placement.** ME parents its bubbles to the `TalkPanel` of the avatar's `AvatarRandomMessages`. That panel sits
+@@ -98,6 +101,29 @@ GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default
+  ME publishes nothing to the server (pure consumer).
+ ```
+ 
++### Extension: `on` and `seconds` on `dance` (verdict dances)
++
++Added for the debate's verdict, in the server's `docs/INTEGRATION.md`:
++
++```
++Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"","title":"","on":false,"clear":false,"seconds":0}
++- dance also carries on (play the dance's music; false = silent) and seconds (stop after this long; 0 = play
++  to the end). Older builds ignore both and play with their configured volume to the end.
++- Verdict dances. On the for and against channels, DebateResult becomes dance with title=dances[channel],
++  on=music[channel], seconds=dance_s, and SessionStart also sends dance_stop.
++```
++
++So after a debate the winner's side bot dances with its music and the loser's dances in silence, both for `dance_s`.
++The titles carry the joke ("MMD-Conqueror", "MMD-Lost One_s Weeping"; on a draw "MMD-皆大欢喜-卜逻desu"); the motions
++are ordinary upbeat dances. A later upgrade could use Mixamo "Victory" and "Defeated" clips instead, exported as
++dance mods with `DanceModCli` (below) and named in the server's `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE`.
++
++**Older servers.** `JsonUtility` reads a missing field as `false` or `0`, so on its own a `dance` from a server that
++predates this extension would look like "silent, to the end". The bridge therefore looks at the whole response: a
++server that sends `seconds` sends it with every command, so a batch without any `"seconds":` key comes from an older
++server, and its `dance` plays exactly as before (at the dance player's own volume, to the end; `on` is ignored). A
++server that knows the extension must send `on: true` for any dance it wants heard, the operator's included.
++
+ ### What the avatar does with each command
+ 
+ **Polling**
+@@ -133,8 +159,20 @@ GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default
+   title it plays the first dance.
+ - On first use it turns off the dance player's multi-instance sync for the session, which removes the 1.5 s
+   lead-in of menu plays and auto-next (the bridge's own plays are not delayed).
+-
+-**`dance_stop`** stops the dance.
++- From a server that sends `seconds` (above):
++  - `on: true` plays the dance's music at `danceMusicVolume`; `on: false` plays the dance in silence (volume 0).
++  - `seconds` > 0 stops the dance that long after the command arrived. Until then the title repeats if it is
++    shorter, instead of going on to the next installed dance. A later `dance`, a `dance_stop`, or a `say` that stops
++    the dance (`stopDanceOnSay`) cancels the timer. `seconds: 0` plays to the end, after which ME's player goes on to
++    the next dance as it always does.
++  - Once that dance is over, however it ended, the dance player's own volume and loop setting come back.
++  - The log shows `dance '<title>' index <n> -> starting; music on, volume 0.40, stops after 30 s` (or `silent
++    (volume 0)`), then `dancing: clip=<clip> audio=<clip> playing=True volume=<v> loop=<bool>` once it plays, then
++    `dance stopped after 30 s` and `dance over; dance volume back to 0.50`.
++- From an older server: as before, and the log line ends `player volume 0.50 (no 'seconds': an older server), to the
++  end`.
++
++**`dance_stop`** stops the dance and cancels a pending `seconds` stop.
+ 
+ **Scene objects**
+ - The avatar, animator, bubble style and dance player are looked up again for every command, because loading a
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs
+index fa3e468..f106c9d 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
+@@ -1,11 +1,13 @@
+ // Speech bridge: lets an external program make the avatar "say" a line (speech bubble + moving mouth) and dance,
+ // over a small HTTP long-poll protocol (v1, full text in README.md). Off unless launched with
+ // "-speech-bridge <url>", env MEX_SPEECH_BRIDGE=<url>, or {"enabled":true} in speech_bridge.json, so upstream
+-// behaviour is unchanged by default. Pure consumer: it never sends anything to the server and never plays audio
+-// (the server side owns the voice; "talk" only mirrors whether that voice is audible right now).
++// behaviour is unchanged by default. Pure consumer: it never sends anything to the server and never plays the voice
++// (the server side owns it; "talk" only mirrors whether that voice is audible right now). Dance music is the dance
++// player's own; "dance" only sets its volume.
+ using System;
+ using System.Collections;
+ using System.Collections.Generic;
++using System.Text.RegularExpressions;
+ using CustomDancePlayer;
+ using UnityEngine;
+ using UnityEngine.Networking;
+@@ -22,7 +24,11 @@ namespace MateReferee
+         const float RevealCharsPerSecond = 18f; // about speaking speed
+         const float MaxTalkSeconds = 12f;       // close the mouth if "talk off" never arrives
+         const int RememberIds = 50;             // "say" ids remembered for de-duplication
++        const float DanceStartTimeout = 10f;    // a held dance not playing by then never started
+         static readonly int IsTalkingHash = Animator.StringToHash("isTalking");
++        // A "seconds" key: JsonUtility cannot tell a missing field from 0, so this marks a server that sends "on" and
++        // "seconds" with every command (a string value is never followed by ':', so bubble text cannot match).
++        static readonly Regex SecondsKey = new Regex("\"seconds\"\\s*:", RegexOptions.CultureInvariant);
+ 
+         SpeechBridgeConfig cfg;
+ 
+@@ -55,6 +61,13 @@ namespace MateReferee
+         string talkingId = "";
+         float talkOnAt;
+ 
++        // A dance from a server that sends "seconds" is held: its music volume comes from "on", and a timed one loops its
++        // title until the timer stops it. The player's own volume and loop setting come back once it is over.
++        Coroutine danceTimer;
++        AvatarDanceHandler heldOn;
++        bool danceHeld, danceSeenPlaying, danceLogged, playerLoop;
++        float danceHeldAt, playerVolume = -1f;
++
+         readonly Queue<string> seenOrder = new Queue<string>();
+         readonly HashSet<string> seen = new HashSet<string>();
+         readonly HashSet<string> loggedOnce = new HashSet<string>();
+@@ -80,7 +93,7 @@ namespace MateReferee
+ 
+         void OnDestroy()
+         {
+-            try { ClearLine(); CloseMouth(); }
++            try { ClearLine(); CloseMouth(); ReleaseDance(); }
+             catch (Exception e) { Debug.LogWarning("[SpeechBridge] cleanup failed: " + e.Message); }
+         }
+ 
+@@ -135,7 +148,8 @@ namespace MateReferee
+                     SetLink("poll failed: " + (req.responseCode > 0 ? "HTTP " + req.responseCode : req.error) + " (retrying)", false);
+                     return -1;
+                 }
+-                var batch = JsonUtility.FromJson<SpeechBatch>(req.downloadHandler.text);
++                string body = req.downloadHandler.text;
++                var batch = JsonUtility.FromJson<SpeechBatch>(body);
+                 if (batch == null) throw new FormatException("empty body");
+                 if (batch.v != 1) LogOnce("v" + batch.v, "[SpeechBridge] server sent protocol v" + batch.v + ", this build speaks v1");
+                 string newEpoch = batch.epoch ?? "";
+@@ -146,8 +160,9 @@ namespace MateReferee
+                 SetLink("connected to " + cfg.server + " (epoch " + epoch + ")", true);
+                 int n = batch.cmds != null ? batch.cmds.Length : 0;
+                 if (cfg.verbose) Debug.Log("[SpeechBridge] cursor=" + cursor + " cmds=" + n);
++                bool legacy = n > 0 && !SecondsKey.IsMatch(body);
+                 for (int i = 0; i < n; i++)
+-                    if (batch.cmds[i] != null) Execute(batch.cmds[i]);
++                    if (batch.cmds[i] != null) Execute(batch.cmds[i], legacy);
+                 return n;
+             }
+             catch (Exception e)
+@@ -174,7 +189,8 @@ namespace MateReferee
+ 
+         // ---------------------------------------------------------------- commands
+ 
+-        void Execute(SpeechCmd c)
++        // legacy: the batch has no "seconds" key, so it comes from a server older than "dance" with "on" and "seconds".
++        void Execute(SpeechCmd c, bool legacy)
+         {
+             string op = c.op ?? "";
+             try
+@@ -185,7 +201,7 @@ namespace MateReferee
+                     case "say": Say(c.id ?? "", c.text ?? ""); break;
+                     case "talk": Talk(c.id ?? "", c.on); break;
+                     case "stop": Stop(c.clear); break;
+-                    case "dance": Dance(c.title ?? ""); break;
++                    case "dance": Dance(c.title ?? "", c.on, c.seconds, legacy); break;
+                     case "dance_stop": DanceStop(); break;
+                     default: LogOnce("op:" + op, "[SpeechBridge] ignoring unknown op '" + op + "'"); break;
+                 }
+@@ -202,6 +218,7 @@ namespace MateReferee
+             }
+             if (cfg.stopDanceOnSay && dance != null && dance.IsPlaying)
+             {
++                CancelDanceTimer();
+                 dance.StopPlay();
+                 Debug.Log("[SpeechBridge] stopped the dance to speak");
+             }
+@@ -253,7 +270,9 @@ namespace MateReferee
+             Debug.Log("[SpeechBridge] stop" + (clear ? " (clear)" : ""));
+         }
+ 
+-        void Dance(string title)
++        // Old servers (legacy) send neither "on" nor "seconds": the dance plays as it always did, at the player's own
++        // volume, to the end. Otherwise "on" picks danceMusicVolume or silence, and seconds > 0 stops it after that long.
++        void Dance(string title, bool music, float seconds, bool legacy)
+         {
+             if (dance == null) { Debug.LogWarning("[SpeechBridge] dance: no AvatarDanceHandler in the scene"); return; }
+             if (dance.enableSync)
+@@ -268,18 +287,101 @@ namespace MateReferee
+                 Debug.LogWarning("[SpeechBridge] dance '" + title + "' not found; playing the first dance instead");
+                 index = 0;
+             }
++            CancelDanceTimer();
++            bool timed = !legacy && seconds > 0f;
++            // Before PlayIndex: when the avatar is already idle, it loads the title and starts its music within the call.
++            if (legacy) ReleaseDance();
++            else HoldDance(music ? cfg.danceMusicVolume : 0f, timed);
+             bool ok = dance.PlayIndex(index);
++            if (!ok) ReleaseDance(); // nothing plays: no dances installed, or no avatar animator
++            var src = dance.audioSource;
++            string how = legacy ? "player volume " + (src != null ? src.volume.ToString("0.00") : "?") + " (no 'seconds': an older server), to the end"
++                : (music ? "music on, volume " + cfg.danceMusicVolume.ToString("0.00") : "silent (volume 0)") +
++                  (timed ? ", stops after " + seconds.ToString("0.#") + " s" : ", to the end");
+             Debug.Log("[SpeechBridge] dance '" + title + "' index " + index + " -> " +
+-                      (ok ? "starting" : "not started (no dances installed, or the avatar has no animator)"));
++                      (ok ? "starting; " + how : "not started (no dances installed, or the avatar has no animator)"));
++            if (ok && timed) danceTimer = StartCoroutine(StopDanceAfter(seconds));
+         }
+ 
+         void DanceStop()
+         {
++            CancelDanceTimer();
+             if (dance == null) return;
+             dance.StopPlay();
+             Debug.Log("[SpeechBridge] dance stopped");
+         }
+ 
++        IEnumerator StopDanceAfter(float seconds)
++        {
++            yield return new WaitForSecondsRealtime(seconds);
++            danceTimer = null;
++            if (dance != null && dance.IsPlaying)
++            {
++                dance.StopPlay();
++                Debug.Log("[SpeechBridge] dance stopped after " + seconds.ToString("0.#") + " s");
++            }
++            else Debug.Log("[SpeechBridge] dance already over at its " + seconds.ToString("0.#") + " s stop");
++        }
++
++        void CancelDanceTimer()
++        {
++            if (danceTimer == null) return;
++            StopCoroutine(danceTimer);
++            danceTimer = null;
++        }
++
++        // Sets the dance player's volume (and loop) for a held dance, saving the player's own first.
++        void HoldDance(float volume, bool loop)
++        {
++            if (danceHeld && heldOn != dance) ReleaseDance();
++            var src = dance.audioSource;
++            if (!danceHeld)
++            {
++                heldOn = dance;
++                playerVolume = src != null ? src.volume : -1f;
++                playerLoop = dance.loopOn;
++                danceHeld = true;
++            }
++            danceHeldAt = Now;
++            danceSeenPlaying = false;
++            danceLogged = false;
++            if (src != null) src.volume = volume;
++            else LogOnce("noaudiosource", "[SpeechBridge] the dance player has no AudioSource; cannot set the music volume");
++            // A timed dance repeats its own title rather than going on to the next installed one.
++            dance.loopOn = loop || playerLoop;
++        }
++
++        void ReleaseDance()
++        {
++            if (!danceHeld) return;
++            danceHeld = false;
++            if (heldOn == null) return;
++            if (heldOn.audioSource != null && playerVolume >= 0f) heldOn.audioSource.volume = playerVolume;
++            heldOn.loopOn = playerLoop;
++            Debug.Log("[SpeechBridge] dance over; dance volume back to " + playerVolume.ToString("0.00"));
++        }
++
++        // Per frame while a dance is held: log once what actually plays, and release it once it is over, however it
++        // ended (timer, dance_stop, a line with stopDanceOnSay, the menu, or a title that never started).
++        void WatchDance(float now)
++        {
++            if (heldOn == null) { danceHeld = false; return; }
++            if (!heldOn.IsPlaying)
++            {
++                if (danceSeenPlaying || now - danceHeldAt > DanceStartTimeout) ReleaseDance();
++                return;
++            }
++            danceSeenPlaying = true;
++            var src = heldOn.audioSource;
++            if (danceLogged || (src != null && src.clip != null && !src.isPlaying)) return; // still in the transition
++            danceLogged = true;
++            var clip = heldOn.GetCurrentClip();
++            Debug.Log("[SpeechBridge] dancing: clip=" + (clip != null ? clip.name : "none") +
++                      " audio=" + (src != null && src.clip != null ? src.clip.name : "none") +
++                      " playing=" + (src != null && src.isPlaying) +
++                      " volume=" + (src != null ? src.volume.ToString("0.00") : "?") + " loop=" + heldOn.loopOn);
++        }
++
+         bool IsCurrentLine(string id) => id.Length == 0 || lineId.Length == 0 || id == lineId;
+ 
+         void Remember(string id)
+@@ -439,6 +541,7 @@ namespace MateReferee
+                 }
+ 
+                 if (removeAt >= 0f && now >= removeAt) ClearLine();
++                if (danceHeld) WatchDance(now);
+             }
+             catch (Exception e) { LogOnce("update:" + e.GetType().Name, "[SpeechBridge] Update failed: " + e); }
+         }
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs
+index 8de3c70..a79b253 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
+@@ -28,6 +28,7 @@ namespace MateReferee
+         public float lingerSeconds = 3f;
+         public bool mouthWithText = false;  // text-only lines: the mouth stops when the text has typed, not at "talk off"
+         public bool stopDanceOnSay = true;
++        public float danceMusicVolume = 0.4f; // a "dance" with on=true plays its music at this volume (0-1; on=false: 0)
+         public bool verbose = false;
+ 
+         [NonSerialized] public string source = "defaults";
+@@ -91,12 +92,14 @@ namespace MateReferee
+             bubbleGap = Mathf.Clamp(bubbleGap, -2f, 2f);
+             bubbleTop = Mathf.Clamp(bubbleTop, -2f, 2f);
+             lingerSeconds = Mathf.Clamp(lingerSeconds, 0f, 60f);
++            danceMusicVolume = Mathf.Clamp01(danceMusicVolume);
+         }
+ 
+         public override string ToString() =>
+             server + pollPath + " fontSize=" + fontSize + " bubbleWidth=" + bubbleWidth + (screenPixels ? " screenPixels" : "") +
+             (bubbleSide.Length > 0 ? " bubbleSide=" + bubbleSide + " bubbleGap=" + bubbleGap + " bubbleTop=" + bubbleTop : "") +
+             " lingerSeconds=" + lingerSeconds + (mouthWithText ? " mouthWithText" : "") +
+-            " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
++            " stopDanceOnSay=" + stopDanceOnSay + " danceMusicVolume=" + danceMusicVolume + " verbose=" + verbose +
++            " (from " + source + ")";
+     }
+ }
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs
+index 7c75787..ce00601 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechWire.cs	
+@@ -12,8 +12,9 @@ namespace MateReferee
+         public string text = "";  // say: exact bubble text
+         public string audio = ""; // say: relative WAV URL or "" (ME never plays audio; the browser tab does)
+         public string title = ""; // dance: title to play, "" = first available
+-        public bool on;           // talk: TTSState.speaking
++        public bool on;           // talk: TTSState.speaking; dance: play the dance's music (false = silent)
+         public bool clear;        // stop: also remove the bubble
++        public float seconds;     // dance: stop after this long, 0 = to the end (older servers omit it and "on")
+     }
+ 
+     [Serializable]

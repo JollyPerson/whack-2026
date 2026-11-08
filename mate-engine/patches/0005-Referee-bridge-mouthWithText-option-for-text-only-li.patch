@@ -1,0 +1,100 @@
+From abd07680691a64820e5aca9438483a68a1a88d29 Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 05:17:56 +0000
+Subject: [PATCH 05/12] Referee bridge: mouthWithText option for text-only
+ lines
+
+With "mouthWithText": true in speech_bridge.json the mouth closes as soon
+as the text has finished typing, and "talk off" only starts the linger.
+Side-bot lines have no voice, and their talk off comes hold_s (6-12 s)
+after the line, so without this option the mouth kept moving for seconds
+after the text had stopped. Off by default: the referee's mouth still
+follows talk on / talk off, and its log lines are unchanged.
+---
+ Assets/MATE ENGINE - Referee/README.md                |  7 +++++--
+ Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs  | 11 ++++++++++-
+ .../Runtime/SpeechBridgeConfig.cs                     |  4 +++-
+ 3 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 1933d1c..6aa9483 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -44,6 +44,7 @@ its default:
+   "bubbleGap": 0.15,
+   "bubbleTop": 0.25,
+   "lingerSeconds": 3,
++  "mouthWithText": false,
+   "stopDanceOnSay": true,
+   "verbose": false
+ }
+@@ -59,6 +60,7 @@ its default:
+ | `bubbleSide` | `""` keeps ME's own spot, left of the avatar. `"left"` or `"right"` puts the bubble beside the avatar's head on that side (below) |
+ | `bubbleGap`, `bubbleTop` | With `bubbleSide` only: the bubble's near edge is `bubbleGap` to the side of the head bone and its top edge `bubbleTop` above it, in metres at the avatar's scale |
+ | `lingerSeconds` | How long the bubble stays after the voice stops |
++| `mouthWithText` | For text-only lines: the mouth stops when the text has finished typing, and `talk off` only starts the linger. Off: the mouth moves until `talk off`, like a voice |
+ | `stopDanceOnSay` | Stop a running dance when a new line arrives |
+ | `verbose` | Log every poll and every `talk`, and every time the bridge opens or closes the mouth |
+ 
+@@ -118,6 +120,7 @@ GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default
+ - `on` sets the animator's `isTalking` bool, which drives ME's own talking animation. It is re-applied every
+   frame, because ME's scripts may reset it.
+ - `off` closes the mouth, completes the text and removes the bubble after `lingerSeconds`.
++- With `mouthWithText`, the mouth already closes when the text has finished typing.
+ - The mouth is forced shut after 12 s without `off`.
+ 
+ **`stop`**
+@@ -229,8 +232,8 @@ and menu volumes to 0, and keep `allowedApps` empty, so that playing audio does
+ The debate server can drive several avatars, one per channel: `GET /face/mate/next/{referee|for|against}` (the plain
+ route is `referee`). An instance picks its channel with `pollPath` in its own `speech_bridge.json`; a query string
+ cannot work, because the bridge appends `?after=` itself. Side-bot lines are text only: `say` + `talk on`, then
+-`talk off`, which the bridge handles like a voiced line (the mouth moves and the text types at about 18 characters a
+-second, then the bubble lingers for `lingerSeconds`).
++`talk off` after the line's hold time. The text types at about 18 characters a second; with `mouthWithText` the
++mouth moves only while it types, and the bubble stays until `talk off` plus `lingerSeconds`.
+ 
+ `tools/mate-bots.sh start|stop|status|place [for|against]` runs the two side bots from this build:
+ - "for" in the lower left with its bubble on the right, "against" in the lower right with its bubble on the left;
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs
+index f95dd08..fa3e468 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridge.cs	
+@@ -419,7 +419,16 @@ namespace MateReferee
+                     revealProgress += RevealCharsPerSecond * Time.unscaledDeltaTime;
+                     int n = Mathf.Min(lineText.Length, Mathf.FloorToInt(revealProgress));
+                     if (n != revealedChars) { revealedChars = n; bubble.SetText(lineText.Substring(0, n)); }
+-                    if (n >= lineText.Length) revealing = false;
++                    if (n >= lineText.Length)
++                    {
++                        revealing = false;
++                        // Text-only lines: the mouth moves while the text types; "talk off" then only starts the linger.
++                        if (cfg.mouthWithText && talking && IsCurrentLine(talkingId))
++                        {
++                            if (cfg.verbose) Debug.Log("[SpeechBridge] typed " + lineId + " in " + (now - talkOnAt).ToString("0.0") + " s (mouthWithText)");
++                            CloseMouth();
++                        }
++                    }
+                 }
+ 
+                 if (talking && now - talkOnAt > MaxTalkSeconds)
+diff --git a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs
+index c2e61ff..8de3c70 100644
+--- a/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
++++ b/Assets/MATE ENGINE - Referee/Runtime/SpeechBridgeConfig.cs	
+@@ -26,6 +26,7 @@ namespace MateReferee
+         public float bubbleGap = 0.15f;     // bubbleSide: head bone to the bubble's near edge, in metres at avatar scale
+         public float bubbleTop = 0.25f;     // bubbleSide: head bone up to the bubble's top edge, in metres at avatar scale
+         public float lingerSeconds = 3f;
++        public bool mouthWithText = false;  // text-only lines: the mouth stops when the text has typed, not at "talk off"
+         public bool stopDanceOnSay = true;
+         public bool verbose = false;
+ 
+@@ -95,6 +96,7 @@ namespace MateReferee
+         public override string ToString() =>
+             server + pollPath + " fontSize=" + fontSize + " bubbleWidth=" + bubbleWidth + (screenPixels ? " screenPixels" : "") +
+             (bubbleSide.Length > 0 ? " bubbleSide=" + bubbleSide + " bubbleGap=" + bubbleGap + " bubbleTop=" + bubbleTop : "") +
+-            " lingerSeconds=" + lingerSeconds + " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
++            " lingerSeconds=" + lingerSeconds + (mouthWithText ? " mouthWithText" : "") +
++            " stopDanceOnSay=" + stopDanceOnSay + " verbose=" + verbose + " (from " + source + ")";
+     }
+ }

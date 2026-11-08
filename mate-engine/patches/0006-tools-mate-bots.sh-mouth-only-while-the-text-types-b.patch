@@ -1,0 +1,81 @@
+From fc558b11763225c1284c75c9e89d3b148079391b Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 05:18:12 +0000
+Subject: [PATCH 06/12] tools/mate-bots.sh: mouth only while the text types,
+ bubble up for hold_s
+
+The bots' speech_bridge.json now sets mouthWithText, so each avatar's
+mouth moves while its line types and stops with the text, and
+lingerSeconds 0, so a bubble goes at the server's talk off: up for
+hold_s (6-12 s), not hold_s + 3 s. LINGER=<s> brings a linger back.
+---
+ Assets/MATE ENGINE - Referee/README.md |  2 ++
+ tools/mate-bots.sh                     | 13 +++++++++----
+ 2 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index 6aa9483..61d0782 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -237,6 +237,8 @@ mouth moves only while it types, and the bubble stays until `talk off` plus `lin
+ 
+ `tools/mate-bots.sh start|stop|status|place [for|against]` runs the two side bots from this build:
+ - "for" in the lower left with its bubble on the right, "against" in the lower right with its bubble on the left;
++- with `mouthWithText` on and `lingerSeconds` 0 (`LINGER` changes it), so each bubble is up for the line's hold time
++  and the mouth moves only while the text types;
+ - each with its own `XDG_CONFIG_HOME` and `TMPDIR` under `~/.local/state/whack-mate/<persona>/`, so the instances
+   share no settings, Unity prefs or caches (Unity's prefs hold the window position and size, which the script seeds);
+ - PIDs in `<persona>/pid`, stopped with SIGTERM by PID; `status` shows whether each is alive and its last bridge lines.
+diff --git a/tools/mate-bots.sh b/tools/mate-bots.sh
+index 74b2b5a..ab2683a 100755
+--- a/tools/mate-bots.sh
++++ b/tools/mate-bots.sh
+@@ -9,7 +9,8 @@
+ # or with a normal Mate Engine. Before launching, start rewrites these in xdg/unity3d/Shinymoon/MateEngineX/:
+ #   settings.json       (other keys kept) tutorial done, FPS cap, Discord presence off, sounds at 0, random and
+ #                       Minecraft messages off, no auto-dance apps, always on top, the bot's avatar
+-#   speech_bridge.json  bridge on, the bot's channel, bubble size and side
++#   speech_bridge.json  bridge on, the bot's channel, bubble size and side, the mouth moving only while the text
++#                       types (mouthWithText), no linger after the hold time unless LINGER is set
+ #   prefs               Unity's saved window position and size, which the player restores at launch (KWin puts the
+ #                       window about 14 px higher than asked; place moves it exactly)
+ # stop sends SIGTERM to the PIDs in $STATE/<persona>/pid (SIGKILL after 10 s); on a clean exit Unity saves its prefs.
+@@ -24,6 +25,8 @@
+ #   FOR_AVATAR, AGAINST_AVATAR  built-in avatar ("" = ME's default, Ayrina, aldina, Lazuli_VRM_Clothes) or a .vrm
+ #                             path (default: "" and Ayrina)
+ #   FONT_SIZE, BUBBLE_WIDTH   bubble text size and width, in screen pixels (default 30 and 320)
++#   LINGER                    seconds a bubble stays after the server's talk off, which comes hold_s after the line
++#                             (default 0: each bubble is up for hold_s)
+ #   FPS                       frame-rate cap (default 30)
+ #   VERBOSE=1                 log every poll and every mouth change in player.log
+ set -euo pipefail
+@@ -37,6 +40,7 @@ FOR_AVATAR=${FOR_AVATAR-}
+ AGAINST_AVATAR=${AGAINST_AVATAR-Ayrina}
+ FONT_SIZE=${FONT_SIZE:-30}
+ BUBBLE_WIDTH=${BUBBLE_WIDTH:-320}
++LINGER=${LINGER:-0}
+ FPS=${FPS:-30}
+ VERBOSE=${VERBOSE:-0}
+ EXE=MateEngineX.x86_64
+@@ -71,9 +75,9 @@ seed() {
+     dir=$(cfgdir "$p")
+     mkdir -p "$dir" "$STATE/$p/tmp" "$STATE/$p/logs"
+     python3 -I - "$dir" "$p" "$(avatar "$p")" "$FPS" "$SERVER" "$FONT_SIZE" "$BUBBLE_WIDTH" "$(side "$p")" \
+-        "$(geom "$p")" "$VERBOSE" <<'PY'
++        "$(geom "$p")" "$VERBOSE" "$LINGER" <<'PY'
+ import json, os, re, sys
+-d, persona, model, fps, server, font, width, side, geom, verbose = sys.argv[1:]
++d, persona, model, fps, server, font, width, side, geom, verbose, linger = sys.argv[1:]
+ 
+ def write(name, text):
+     tmp = os.path.join(d, name + ".tmp")
+@@ -96,7 +100,8 @@ write("settings.json", json.dumps(settings, indent=2))
+ # speech_bridge.json: the bridge, owned by this script.
+ write("speech_bridge.json", json.dumps({
+     "enabled": True, "server": server, "pollPath": "/face/mate/next/" + persona, "fontSize": int(font),
+-    "bubbleWidth": int(width), "screenPixels": True, "bubbleSide": side, "verbose": verbose == "1"}, indent=2))
++    "bubbleWidth": int(width), "screenPixels": True, "bubbleSide": side, "lingerSeconds": float(linger),
++    "mouthWithText": True, "verbose": verbose == "1"}, indent=2))
+ 
+ # prefs: Unity's PlayerPrefs XML; the window position and size are restored from it at launch. Unity ignores them
+ # unless the "Default" entries match the build's player settings (1536x1024, native, windowed), so a new file gets

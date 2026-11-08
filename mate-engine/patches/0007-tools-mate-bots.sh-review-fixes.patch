@@ -1,0 +1,83 @@
+From 1d246b405cc654f3ba50c8d3c4a45ffd65771afe Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 05:18:20 +0000
+Subject: [PATCH 07/12] tools/mate-bots.sh: review fixes
+
+- Unset MEX_SPEECH_BRIDGE for the bots: it overrides speech_bridge.json,
+  so a value exported for the referee would redirect or disable them.
+- Seed enableRandomAvatar=false, which VRMLoader checks before the
+  bot's selectedModelPath.
+- Make STATE absolute: the player starts in $PAYLOAD, so a relative
+  STATE broke its log redirect and the launch.
+- stop removes a pid file only once the process has exited (or is a
+  zombie): after SIGKILL it can take a few seconds more.
+- Header: a negative x moves an avatar towards the screen edge.
+---
+ tools/mate-bots.sh | 19 ++++++++++++++++---
+ 1 file changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/tools/mate-bots.sh b/tools/mate-bots.sh
+index ab2683a..322e623 100755
+--- a/tools/mate-bots.sh
++++ b/tools/mate-bots.sh
+@@ -21,7 +21,8 @@
+ #   STATE                     state root (default ~/.local/state/whack-mate)
+ #   FOR_GEOM, AGAINST_GEOM    window "x,y,w,h" in screen pixels (default: the lower corners of a 1920x1080 screen,
+ #                             above a bottom panel). The avatar stands in the middle of its window, so the width sets
+-#                             the room for the bubble. Frame rates drop with big windows or ones under the panel.
++#                             the room for the bubble; a negative x moves an avatar towards the screen edge and keeps
++#                             that room. Frame rates drop with big windows or ones under the panel.
+ #   FOR_AVATAR, AGAINST_AVATAR  built-in avatar ("" = ME's default, Ayrina, aldina, Lazuli_VRM_Clothes) or a .vrm
+ #                             path (default: "" and Ayrina)
+ #   FONT_SIZE, BUBBLE_WIDTH   bubble text size and width, in screen pixels (default 30 and 320)
+@@ -34,6 +35,7 @@ set -euo pipefail
+ SERVER=${SERVER:-http://127.0.0.1:8000}
+ PAYLOAD=${PAYLOAD:-/home/dabest/claudesandbox/mex-builds/bots/Payload}
+ STATE=${STATE:-$HOME/.local/state/whack-mate}
++STATE=$(realpath -m -- "$STATE") # the player starts in $PAYLOAD, so its log and config paths must be absolute
+ FOR_GEOM=${FOR_GEOM:-0,200,900,820}
+ AGAINST_GEOM=${AGAINST_GEOM:-1020,200,900,820}
+ FOR_AVATAR=${FOR_AVATAR-}
+@@ -65,6 +67,12 @@ live_pid() {
+     return 0
+ }
+ 
++# True once process $1 has exited (no /proc entry, or a zombie waiting to be reaped).
++gone() {
++    [ -e "/proc/$1" ] || return 0
++    [ "$(sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)" = Z ]
++}
++
+ check_geom() {
+     [[ "$2" =~ ^-?[0-9]+,-?[0-9]+,[0-9]+,[0-9]+$ ]] || { echo "$1: geometry '$2' is not x,y,w,h" >&2; exit 2; }
+ }
+@@ -94,7 +102,7 @@ except (OSError, ValueError):
+     settings = {}
+ settings.update(tutorialDone=True, fpsLimit=int(fps), enableDiscordRPC=False, petVolume=0.0, effectsVolume=0.0,
+                 menuVolume=0.0, enableRandomMessages=False, enableMinecraftMessages=False, allowedApps=[],
+-                isTopmost=True, selectedModelPath=model)
++                isTopmost=True, enableRandomAvatar=False, selectedModelPath=model)
+ write("settings.json", json.dumps(settings, indent=2))
+ 
+ # speech_bridge.json: the bridge, owned by this script.
+@@ -154,7 +162,8 @@ start_one() {
+                XDG_SESSION_TYPE=x11)
+     [ -n "$visual" ] && env+=(SDL_VIDEO_X11_VISUALID="$visual")
+     # setsid: own session, so closing this terminal or Ctrl-C here does not stop the avatar; exec keeps the PID.
+-    (cd "$PAYLOAD" && exec setsid env "${env[@]}" "./$EXE" -logFile "$logs/player.log" \
++    # MEX_SPEECH_BRIDGE would override speech_bridge.json (a referee setting in this shell must not reach the bots).
++    (cd "$PAYLOAD" && exec setsid env -u MEX_SPEECH_BRIDGE "${env[@]}" "./$EXE" -logFile "$logs/player.log" \
+         > "$logs/stdout.log" 2>&1 < /dev/null) &
+     echo $! > "$STATE/$p/pid"
+     for _ in $(seq 1 20); do # until the subshell has become the player
+@@ -191,6 +200,10 @@ stop_all() {
+             echo "$p: still running 10 s after SIGTERM; SIGKILL"
+             kill -KILL "$pid" 2>/dev/null || true
+         fi
++        # live_pid stops matching once the player has released its memory, but the process can take a few more seconds
++        # to exit (seen after SIGKILL), so the pid file goes only with the process.
++        for _ in $(seq 1 40); do gone "$pid" && break; sleep 0.25; done
++        if ! gone "$pid"; then echo "$p: pid $pid is still exiting; run stop again" >&2; continue; fi
+         rm -f "$STATE/$p/pid"
+         echo "$p: stopped (pid $pid)"
+     done

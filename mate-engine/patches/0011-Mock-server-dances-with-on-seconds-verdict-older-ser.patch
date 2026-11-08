@@ -1,0 +1,160 @@
+From 8aae74d78ef39e1b7b4b494aa1a24484089375d1 Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 06:05:39 +0000
+Subject: [PATCH 11/12] Mock server: dances with on/seconds, verdict,
+ older-server mode
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every command now carries "seconds" like the debate server, and the
+referee loop's dance has its music on. New routes: POST /dance
+(channel, title, on, seconds), POST /dance_stop (channel or all) and
+POST /verdict?winner=prop|opp|draw[&seconds][&music], which sends what
+the server sends for a DebateResult: the winner's bot dances
+"MMD-Conqueror" with music, the loser's "MMD-Lost One_s Weeping" in
+silence, a draw both "MMD-皆大欢喜-卜逻desu" (silent with music=winner).
+--legacy leaves "seconds" out, like an older server; --quiet turns off
+the 25 s referee loop. Replies are raw UTF-8 like the server's.
+---
+ Assets/MATE ENGINE - Referee/README.md |  9 +++-
+ tools/mock_mate_server.py              | 59 ++++++++++++++++++++++----
+ 2 files changed, 58 insertions(+), 10 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index e01d291..9dc834f 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -257,10 +257,17 @@ python3 tools/mock_mate_server.py 8765          # Python 3 standard library only
+ ./launch.sh -speech-bridge http://127.0.0.1:8765
+ ```
+ 
+-Every 25 s the mock says a line, opens and closes the mouth, plays the first installed dance and stops it.
++Every 25 s the mock says a line, opens and closes the mouth, plays the first installed dance (music on) and stops it
++(`--quiet` turns this loop off).
+ It also serves the side-bot channels `/face/mate/next/for` and `/face/mate/next/against` (below): with `--bots` it
+ sends one text-only line every 12 s to each in turn, and `POST /say?channel=for&text=...[&hold=8]` sends one now
+ (`say` + `talk on`, then `talk off` after `hold` seconds).
++Dances: `POST /dance?channel=for&title=...[&on=1][&seconds=20]`, `POST /dance_stop?channel=for` (`all`: every
++channel), and `POST /verdict?winner=prop|opp|draw[&seconds=30][&music=winner|none|both]`, which sends what the debate
++server sends for a `DebateResult`: the winner's bot (`prop` is `for`, `opp` is `against`) dances "MMD-Conqueror" with
++its music, the loser's "MMD-Lost One_s Weeping" in silence, and on a draw both dance "MMD-皆大欢喜-卜逻desu" (silent
++with `music=winner`; `win`, `lose`, `draw` override the titles). Like the server, every command carries `on` and
++`seconds`; `--legacy` leaves `seconds` out, to try an older server.
+ 
+ For the cleanest demo, turn off ME's random messages, Minecraft messages and Discord presence. Set its pet, effect
+ and menu volumes to 0, and keep `allowedApps` empty, so that playing audio does not trigger auto-dancing.
+diff --git a/tools/mock_mate_server.py b/tools/mock_mate_server.py
+index 349ae59..ed23613 100755
+--- a/tools/mock_mate_server.py
++++ b/tools/mock_mate_server.py
+@@ -1,30 +1,43 @@
+ #!/usr/bin/env python3
+ """Stand-alone mock of the speech-bridge server (protocol v1, see "Assets/MATE ENGINE - Referee/README.md"),
+ so the fork can be run and tested without any other software. Python 3 standard library only.
+-  python3 tools/mock_mate_server.py [port] [--bots]        (default 8765)
++  python3 tools/mock_mate_server.py [port] [--bots] [--quiet] [--legacy]        (default 8765)
+   ./launch.sh -speech-bridge http://127.0.0.1:8765
+-Every 25 s it plays: say -> talk on -> talk off -> dance (first installed) -> dance_stop.
++Every 25 s it plays: say -> talk on -> talk off -> dance (first installed, music on) -> dance_stop (--quiet: no loop).
++Every command carries "on" and "seconds", like the debate server since the verdict dances; --legacy leaves "seconds"
++out, like an older server (a dance then plays at the player's own volume, to the end).
+ Channels, like the debate server: /face/mate/next/referee (= /face/mate/next, the loop above), /face/mate/next/for and
+ /face/mate/next/against (the side bots: text only, so a line is say + talk on, then talk off after its hold time).
+ A poll gets only its own channel's commands. Pick an instance's channel with "pollPath" in its speech_bridge.json.
+   --bots                                   every 12 s, one side-bot line, alternating for / against
+   POST /say?channel=for&text=...[&hold=8]  say + talk on now, talk off after hold s (default words / 2.5 + 3; 6-12)
+-  POST /stop?channel=for[&clear=1]         stop; channel=all reaches every channel"""
++  POST /stop?channel=for[&clear=1]         stop; channel=all reaches every channel
++  POST /dance?channel=for&title=...[&on=1][&seconds=20]   dance (title "" = the first; on: its music; seconds: auto-stop)
++  POST /dance_stop?channel=for              dance_stop (channel=all: every channel)
++  POST /verdict?winner=prop|opp|draw[&seconds=30][&music=winner|none|both][&win=..&lose=..&draw=..]
++                                            the server's DebateResult: the winner's bot (prop -> for, opp -> against)
++                                            dances "MMD-Conqueror" with its music on, the loser's "MMD-Lost One_s
++                                            Weeping" silently; a draw: both "MMD-皆大欢喜-卜逻desu" (silent with music=winner)"""
+ import json, secrets, sys, threading, time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, urlparse
+ 
+ EPOCH, PERIOD = secrets.token_hex(4), 25.0
+ SCRIPT = [(1, "say", {"text": "Referee here: that figure is out of date. The latest report says 12 percent."}),
+-          (2, "talk", {"on": True}), (7, "talk", {"on": False}), (12, "dance", {}), (20, "dance_stop", {})]
++          (2, "talk", {"on": True}), (7, "talk", {"on": False}), (12, "dance", {"on": True}), (20, "dance_stop", {})]
+ BOT_LINES = [("for", "ONS says 4.2%, not 6%. Try again."), ("against", "Source for that 40%?"),
+              ("for", "You still haven't answered our point on rents."), ("against", "Bold claim. Evidence, please.")]
+ CHANNELS = ("referee", "for", "against")
++DANCES = {"win": "MMD-Conqueror", "lose": "MMD-Lost One_s Weeping", "draw": "MMD-皆大欢喜-卜逻desu"}  # JUDGE_DANCE_*
++LEGACY = "--legacy" in sys.argv[1:]
+ events, cond = [], threading.Condition()  # events[i] = (channel or "all", cmd) has seq i + 1
+ ids = iter(range(1, 1_000_000))
+ 
+ def cmd(op, **kw):
+-    return {"op": op, "id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False, **kw}
++    c = {"op": op, "id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False, "seconds": 0, **kw}
++    if LEGACY:
++        c.pop("seconds")
++    return c
+ 
+ def emit(channel, op, **kw):
+     with cond:
+@@ -51,6 +64,15 @@ def bot_say(channel, text, hold=None):
+     print(f"{time.strftime('%H:%M:%S')} {channel}: say {line_id} hold {hold:.1f}s {text!r}", flush=True)
+     return line_id
+ 
++def verdict(winner, seconds=30.0, music="winner", titles=DANCES):
++    """DebateResult on the side-bot channels: one dance per bot, music only where music[persona] is true."""
++    win_bot = {"prop": "for", "opp": "against"}.get(winner)
++    for persona in ("for", "against"):
++        title = titles["draw"] if win_bot is None else titles["win" if persona == win_bot else "lose"]
++        on = music == "both" or (music == "winner" and persona == win_bot)
++        emit(persona, "dance", title=title, on=on, seconds=seconds)
++        print(f"{time.strftime('%H:%M:%S')} {persona}: dance {title!r} music {'on' if on else 'off'} {seconds:g}s", flush=True)
++
+ def bots():
+     for n in range(1_000_000):
+         time.sleep(12.0)
+@@ -90,10 +112,27 @@ class Handler(BaseHTTPRequestHandler):
+         if url.path == "/stop" and (channel in CHANNELS or channel == "all"):
+             emit(channel, "stop", clear=q.get("clear", "0") not in ("", "0", "false"))
+             return self.reply({"ok": True})
++        try:
++            seconds = max(0.0, float(q.get("seconds", "30" if url.path == "/verdict" else "0")))
++        except ValueError:
++            return self.send_error(400)
++        if url.path == "/dance" and channel in CHANNELS:
++            on = q.get("on", "0") not in ("", "0", "false")
++            emit(channel, "dance", title=q.get("title", ""), on=on, seconds=seconds)
++            print(f"{time.strftime('%H:%M:%S')} {channel}: dance {q.get('title', '')!r} music {'on' if on else 'off'} "
++                  f"{seconds:g}s", flush=True)
++            return self.reply({"ok": True})
++        if url.path == "/dance_stop" and (channel in CHANNELS or channel == "all"):
++            emit(channel, "dance_stop")
++            return self.reply({"ok": True})
++        if url.path == "/verdict" and q.get("winner") in ("prop", "opp", "draw") and \
++                q.get("music", "winner") in ("winner", "none", "both"):
++            verdict(q["winner"], seconds, q.get("music", "winner"), {k: q.get(k, v) for k, v in DANCES.items()})
++            return self.reply({"ok": True})
+         self.send_error(404)
+ 
+     def reply(self, obj):
+-        body = json.dumps(obj).encode()
++        body = json.dumps(obj, ensure_ascii=False).encode()  # raw UTF-8, like the debate server (FastAPI)
+         self.send_response(200)
+         self.send_header("Content-Type", "application/json")
+         self.send_header("Content-Length", str(len(body)))
+@@ -101,10 +140,12 @@ class Handler(BaseHTTPRequestHandler):
+         self.wfile.write(body)
+ 
+ if __name__ == "__main__":
+-    args = [a for a in sys.argv[1:] if a != "--bots"]
++    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+     port = int(args[0]) if args else 8765
+-    threading.Thread(target=script, daemon=True).start()
++    if "--quiet" not in sys.argv[1:]:
++        threading.Thread(target=script, daemon=True).start()
+     if "--bots" in sys.argv[1:]:
+         threading.Thread(target=bots, daemon=True).start()
+-    print(f"mock speech-bridge server on http://127.0.0.1:{port}/face/mate/next[/referee|/for|/against] (epoch {EPOCH})")
++    print(f"mock speech-bridge server on http://127.0.0.1:{port}/face/mate/next[/referee|/for|/against] (epoch {EPOCH})"
++          + (" as an older server (no 'seconds')" if LEGACY else ""), flush=True)
+     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
