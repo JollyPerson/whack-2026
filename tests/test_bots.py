@@ -422,6 +422,17 @@ async def test_nudge_when_our_point_turns_unanswered_or_is_ignored():
     assert got == {("against", "A", "c5"), ("for", "B", "c6")}
 
 
+async def test_no_nudge_from_a_turn_that_is_still_open():
+    bots, out, clock = make()
+    nodes = [node("c1", "prop", "open", topic="graduate debt")]
+    open_turn = {"turn": 2, "side": "opp", "speaker": "B", "ignored": ["c1"], "final": False}
+    bots.handle(ArgMapSnapshot(version=1, nodes=nodes, nonresponsive=[open_turn]))
+    assert said(out) == []                                                      # B may still answer it
+    bots.handle(ArgMapSnapshot(version=2, nodes=nodes, nonresponsive=[{**open_turn, "final": True}]))
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.claim_id) == ("nudge", "for", "B", "c1")
+
+
 # ----------------------------------------------------------------------------- banter
 async def test_banter_replies_once_per_gap_never_chains_and_is_guarded():
     config.BOTS_BANTER = True

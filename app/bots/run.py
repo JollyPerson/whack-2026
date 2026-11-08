@@ -12,7 +12,7 @@ A claim with no side is ignored, and a bot never answers its own side. Per oppon
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
-non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
+finished non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
 Banter (BOTS_BANTER): after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S across both, the
 other bot may answer it with one dry line, if it is idle (banter never delays a real line). Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
@@ -231,7 +231,7 @@ class Bots:
         for n in snap.nodes:
             if n.status == "unanswered" and self.statuses.get(n.claim_id) != "unanswered" and n.side in lines.SECOND:
                 self._consider(due, lines.SECOND[n.side], n, self.opponent_of(n.side))
-        for nr in snap.nonresponsive or []:
+        for nr in final_nr(snap):
             persona = lines.answering(nr.get("side"))     # the side that ignored our points: answered by our bot
             for cid in nr.get("ignored") or []:
                 n = nodes.get(cid)
@@ -311,7 +311,7 @@ class Bots:
                     self.verdicts.setdefault(ev.claim_id, ev)
                 elif ev.event == "ArgMapSnapshot" and ev.version > self.map_version:
                     self.map_version, self.statuses = ev.version, {n.claim_id: n.status for n in ev.nodes}
-                    self.nudged.update(c for nr in ev.nonresponsive for c in nr.get("ignored") or [])
+                    self.nudged.update(c for nr in final_nr(ev) for c in nr.get("ignored") or [])
                 elif ev.event == "BotLine" and ev.src == "bots":
                     self.pacer.posted(ev, ev.ts)
                     self.said.append(ev.text)
@@ -322,6 +322,12 @@ class Bots:
                         self.banters.append(ev.text)
             except Exception:
                 log.exception("bots: restore skipped %s", ev.event)
+
+
+def final_nr(snap: ArgMapSnapshot) -> list[dict]:
+    """The snapshot's non-responsive turns that are final: a turn still open (final=False, flagged at a Pause) may
+    yet answer the point. An entry without the field counts as final."""
+    return [nr for nr in snap.nonresponsive or [] if nr.get("final", True)]
 
 
 async def run(bus) -> None:
