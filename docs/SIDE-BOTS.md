@@ -56,20 +56,24 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
    - Each avatar gets its own config, channel, window and model.
    - The launcher also copies the three verdict dances into the build.
    - `place` re-positions the windows for another screen size (`FOR_GEOM`, `AGAINST_GEOM`); `stop` ends both.
-4. **Backdrop.** Open `http://127.0.0.1:8000/arena` full screen (F11) behind the avatars: a lit platform for each
-   bot to stand on, with a name plate and a card under it showing the bot's latest citation (or its latest line), the
-   motion and speakers on top, and the latest fact checks and U-turns in the middle. At the Final screen it shows
-   "Judging…", then lights the winner's platform (both on a draw), shows the verdict and each bot's dance.
-   - The default platforms sit under the launcher's default windows on a 1920x1080 screen. If you move the windows
-     (`FOR_GEOM`, `AGAINST_GEOM`) or the feet don't land on the discs, move the platforms with
-     `?for=x,y,w&against=x,y,w`: centre x, feet line y and width. Plain numbers are pixels; with `%`, x and w are a
-     share of the screen width and y of its height. The default is `?for=23.44%,88%,25%&against=76.56%,88%,25%`
-     (450,950,480 and 1470,950,480 px).
-   - `?guides=1` outlines the avatar windows (the launcher's defaults, or `?forwin=x,y,w,h&againstwin=x,y,w,h`) to
-     line things up at rehearsal. `?theme=light` suits a washed-out projector.
-   - For more room under the platforms, raise both windows (e.g. `FOR_GEOM=0,120,900,820` and
-     `AGAINST_GEOM=1020,120,900,820`, then `tools/mate-bots.sh place`) and the platforms with them
-     (`?for=450,870,480&against=1470,870,480`).
+4. **Backdrop.** Open `http://127.0.0.1:8000/arena` full screen (F11) behind the avatars: a lit platform under each
+   bot's feet, each bot's name plate and card (its latest citation, or its latest line) on the outer side of its
+   avatar, the motion and speakers on top, and under them the latest fact checks and U-turns. At the Final screen it
+   shows "Judging…", then lights the winner's platform (both on a draw), shows the verdict and each bot's dance.
+   - Each avatar's bubble is beside its head on the **inner** side and grows downwards, so nothing is drawn there or
+     under the avatars: the centre column ends above the bubbles' tops (about 45% of the height with the launcher's
+     default windows).
+   - The defaults fit the launcher's default windows on a 1920x1080 screen, with the feet at the window bottom (as the
+     players' logs put them). If you move the windows (`FOR_GEOM`, `AGAINST_GEOM`) or the feet don't land on the
+     discs, move the platforms with `?for=x,y,w&against=x,y,w`: centre x, feet line y and width. Plain numbers are
+     pixels; with `%`, x and w are a share of the screen width and y of its height. The default is
+     `?for=23.44%,94%,25%&against=76.56%,94%,25%` (450,1015,480 and 1470,1015,480 px).
+   - `?centre=x,y,w,h` moves the centre column (centre x, top, width, height; default `50%,14%,46%,28.5%`, i.e.
+     960,151,883,308 px). If you raise the windows, raise the column's bottom by as much: for windows at y=120 instead
+     of 200, `?centre=50%,14%,46%,21%`.
+   - `?guides=1` outlines the avatar windows (the launcher's defaults, or `?forwin=x,y,w,h&againstwin=x,y,w,h`) and,
+     dotted, roughly where each bubble can go, to line things up at rehearsal with the avatars running and a long line
+     in each bubble. `?theme=light` suits a washed-out projector.
 5. **Dashboard.** Open `http://127.0.0.1:8000/?admin=1` on the operator's screen (or full screen behind the avatars
    instead of the arena). Start the debate from the motion picker, which declares A = Prop and B = Opp.
 6. **During the debate.**
