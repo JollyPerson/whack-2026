@@ -69,10 +69,13 @@ class Publisher:
     def _run(self) -> None:
         while (item := self.queue.get()) is not None:
             queued, event = item
-            if self.dry_run:
-                print(json.dumps(event), flush=True)
-                continue
-            self._post(json.dumps(event).encode(), queued)
+            try:
+                if self.dry_run:
+                    print(json.dumps(event), flush=True)
+                else:
+                    self._post(json.dumps(event).encode(), queued)
+            except Exception as e:      # never let one event end the thread: every later one would queue forever
+                print(f"bridge: dropped an event: {e!r}", file=sys.stderr)
 
     def _post(self, body: bytes, queued: float) -> None:
         for attempt in itertools.count(1):

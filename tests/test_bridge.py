@@ -228,3 +228,19 @@ def test_an_event_too_old_to_matter_is_given_up_and_the_next_one_still_goes(monk
     pub.close()
     assert len(tries) == 1
     assert "gave up" in capsys.readouterr().err
+
+
+def test_one_event_that_blows_up_does_not_stop_the_ones_after_it(monkeypatch, capsys):
+    import http.client
+
+    class Unreadable(urllib.error.HTTPError):
+        def read(self, *a):
+            raise http.client.IncompleteRead(b"")
+
+    tries = flaky(monkeypatch, lambda req: Unreadable(req.full_url, 401, "x", {}, io.BytesIO(b"")))
+    pub = publisher()
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
+    pub.close(timeout=2.0)
+    assert [t["speaker"] for t in tries] == ["A", "B"]
+    assert "unsent" not in capsys.readouterr().err
