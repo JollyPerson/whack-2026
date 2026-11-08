@@ -5,7 +5,9 @@ Against bot is Opp's second and answers Prop's. Every line, templated or written
 - at most MAX_WORDS words (a rebut, which names its source, REBUT_MAX_WORDS);
 - no judgement or insult words (voice.BANNED and its stems, INSULTS, PUT_DOWNS), no URLs, no emojis or hashtags;
 - figures only if the `allowed` text has them (the claim, the Verdict, the line a banter replies to), in digits
-  or in words ("two", "half", "forty"); a challenge may carry Claude's own figure because it ends with UNSOURCED;
+  or in words ("two", "half", "forty"); a challenge may carry Claude's own figure because it ends with UNSOURCED
+  (a "true, but" challenge only the claim's and its context phrase's); a concede is tagged too, with the claim's
+  figures only;
 - LLM-written lines (strict=True) also may not mention people (PERSONAL) or the debaters' names; banter, which is
   between the two bots, may not mention the debaters at all (DEBATERS) or cite sources.
 A line that fails is dropped (or the next template is tried), never trimmed into shape.
@@ -22,8 +24,9 @@ ANSWERS = {"opp": "for", "prop": "against"}     # claim side -> the bot that ans
 OWN_SIDE = {"for": "prop", "against": "opp"}    # the side each bot seconds
 SECOND = {"prop": "for", "opp": "against"}      # side -> its own second (only for nudges about that side's points)
 OTHER = {"for": "against", "against": "for"}
-PRIORITY = {"rebut": 5, "challenge": 4, "nudge": 3, "followup": 2, "banter": 1}
-FACT_KINDS = ("rebut", "challenge")             # at most one of these per claim
+PRIORITY = {"rebut": 6, "challenge": 5, "concede": 4, "nudge": 3, "followup": 2, "banter": 1}
+FACT_KINDS = ("rebut", "challenge", "concede")  # at most one of these per claim
+TAGGED = ("challenge", "concede")               # AI knowledge: the text ends with UNSOURCED
 MAX_WORDS = voice.MAX_WORDS
 REBUT_MAX_WORDS = 18
 UNSOURCED = "(unsourced)"
@@ -109,8 +112,8 @@ def new_figures(text: str, allowed: str) -> bool:
 def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = False,
           names: Iterable[str] = ()) -> Optional[str]:
     """`text` tidied if it is fit for a bubble, else None. `allowed` holds the figures the line may repeat (ignored
-    for a challenge, which must end with UNSOURCED). strict: written by the LLM. `names`: words that must not
-    appear (the debaters' names)."""
+    for a challenge; a challenge or concede must end with UNSOURCED). strict: written by the LLM. `names`: words
+    that must not appear (the debaters' names)."""
     s = tidy(text)
     if not s:
         return None
@@ -123,10 +126,9 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
         return None
     if any(ord(ch) >= 0x2000 and ch not in _OK_HIGH for ch in s):   # emojis and other pictographs
         return None
-    if kind == "challenge":
-        if not s.endswith(UNSOURCED) or s.count(UNSOURCED) != 1:
-            return None
-    elif new_figures(s, allowed):
+    if kind in TAGGED and (not s.endswith(UNSOURCED) or s.count(UNSOURCED) != 1):
+        return None
+    if kind != "challenge" and new_figures(s, allowed):
         return None
     if strict and toks & PERSONAL:
         return None
@@ -205,11 +207,28 @@ def rebut(claim: Any, verdict: Any, used: Iterable[str] = ()) -> Optional[str]:
     return None
 
 
-# ----------------------------------------------------------------------------- AI-knowledge challenge
+# ----------------------------------------------------------------------------- AI-knowledge lines
+def _body(text: Any) -> str:
+    """The LLM's line without any tag it wrote itself ("(Unsourced)."), so the tag is added exactly once."""
+    return re.sub(r"\s+([.,;:?!])", r"\1", _TAG.sub(" ", tidy(text))).strip(" ,;:-")
+
+
+def _tagged(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str] = ()):
+    used = {u.lower() for u in used}
+    for tpl in tpls:
+        try:
+            line = guard(_finish(tpl.format(**{k: v for k, v in f.items() if v})), kind, allowed, True, names)
+        except KeyError:
+            continue
+        if line and line.lower() not in used:
+            return line
+    return None
+
+
 def challenge(claim: Any, text: Any = "", correction: Any = "", names: Iterable[str] = ()) -> Optional[str]:
     """Claude's own-knowledge challenge, tagged: its line if fit, else one built from its correction (a phrase that
     completes "Last I checked, ...", e.g. "it was nearer 4%"). `names`: as for guard()."""
-    body = re.sub(r"\s+([.,;:?!])", r"\1", _TAG.sub(" ", tidy(text))).strip(" ,;:-")   # any tag it wrote itself
+    body = _body(text)
     if body:
         line = guard(f"{_finish(body)} {UNSOURCED}", "challenge", strict=True, names=names)
         if line:
@@ -217,15 +236,40 @@ def challenge(claim: Any, text: Any = "", correction: Any = "", names: Iterable[
     fix = voice.clean(correction)
     if not fix:
         return None
-    fig = figure(str(_get(claim, "text", "") or ""))
-    tpls = [f"Last I checked, {{fix}}. {UNSOURCED}"]
-    if fig:
-        tpls.insert(0, f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}")
-    for tpl in tpls:
-        line = guard(_finish(tpl.format(fig=fig, fix=fix)), "challenge", strict=True, names=names)
+    tpls = [f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}", f"Last I checked, {{fix}}. {UNSOURCED}"]
+    return _tagged("challenge", tpls, {"fig": figure(str(_get(claim, "text", "") or "")), "fix": fix}, "", names)
+
+
+_TRUE_BUT = re.compile(r"^(?:true|granted|sure|yes)?[,.;:]?\s*but\s+", re.I)
+
+
+def misleading(claim: Any, text: Any = "", context: Any = "", names: Iterable[str] = ()) -> Optional[str]:
+    """Claude's "true, but" challenge when the claim's figure stands but is misrepresented (wrong baseline, modelled
+    not measured...), tagged: its line if fit, else one built from its context (a phrase that completes "True,
+    but ...", e.g. "that's against a modelled baseline"). Figures only from the claim and that context phrase."""
+    ctx = _TRUE_BUT.sub("", voice.clean(context))
+    claim_text = str(_get(claim, "text", "") or "")
+    allowed = f"{claim_text} {ctx}"
+    body = _body(text)
+    if body and not new_figures(body, allowed):
+        line = guard(f"{_finish(body)} {UNSOURCED}", "challenge", strict=True, names=names)
         if line:
             return line
-    return None
+    if not ctx:
+        return None
+    return _tagged("challenge", [f"{{fig}}? True, but {{ctx}}. {UNSOURCED}", f"True, but {{ctx}}. {UNSOURCED}"],
+                   {"fig": figure(claim_text), "ctx": ctx}, "", names)
+
+
+CONCEDE = ["Annoyingly, that one checks out.", "Fine, that one is actually true.", "Grudgingly: yes, that checks out."]
+
+
+def concede(claim: Any, text: Any = "", names: Iterable[str] = (), used: Iterable[str] = ()) -> Optional[str]:
+    """Claude's grudging concession when a claim is true but widely believed false, tagged: its line if fit, else a
+    template. Figures only from the claim."""
+    body = _body(text)
+    tpls = ([_finish(body).replace("{", "{{").replace("}", "}}")] if body else []) + CONCEDE   # literal braces
+    return _tagged("concede", [f"{t} {UNSOURCED}" for t in tpls], {}, str(_get(claim, "text", "") or ""), names, used)
 
 
 # ----------------------------------------------------------------------------- follow-ups and nudges

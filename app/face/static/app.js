@@ -427,7 +427,8 @@ function drawFinal() {
   }).join('') || '<p class="empty">The referee stayed silent.</p>') + '</div>');
 }
 // Each side bot's latest line, under its side's colour. The strip stays hidden until a bot has spoken (bots off: no
-// change). Model text, so textContent only. "AI knowledge" = an unsourced challenge; a sourced rebut names its source.
+// change). Model text, so textContent only. "AI knowledge" = an unsourced challenge or concede; a sourced rebut names
+// its source.
 function drawBots() {
   $('bots').hidden = !Object.keys(S.bots).length || S.flags.screen === 'final';
   for (const [persona, label] of Object.entries(BOTS)) {
@@ -441,7 +442,7 @@ function drawBots() {
     if (!b) part('span', 'text empty', 'Nothing yet');
     else {
       const e = b.e, ev = e.sourced && e.kind === 'rebut' && (e.evidence || [])[0];
-      if (!e.sourced && e.kind === 'challenge') part('span', 'tag', 'AI knowledge');
+      if (!e.sourced && (e.kind === 'challenge' || e.kind === 'concede')) part('span', 'tag', 'AI knowledge');
       part('span', 'text', e.text);
       if (ev && (ev.title || host(ev.url))) part('span', 'src', `Source: ${ev.title || host(ev.url)}`);
     }

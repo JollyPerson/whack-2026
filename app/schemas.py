@@ -491,7 +491,8 @@ class BotLine(Event):
     id: str = Field(default_factory=lambda: f"b-{next(_uid):04d}")
     persona: str                   # for (Prop's second) | against (Opp's second)
     text: str                      # exactly what the bubble shows
-    kind: str = "followup"         # rebut (sourced) | challenge (AI knowledge, unsourced) | nudge | followup | banter
+    kind: str = "followup"         # rebut (sourced) | challenge | concede (both AI knowledge, unsourced) | nudge |
+                                   # followup | banter
     target: Optional[str] = None   # speaker id addressed (the opponent); None for banter
     claim_id: Optional[str] = None
     sourced: bool = False          # True only when backed by an evidence Verdict that quotes its source

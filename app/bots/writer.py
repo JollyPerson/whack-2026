@@ -52,15 +52,24 @@ without anyone verifying it, so be conservative.
 assessment:
 - "likely_false": you are confident the claim is materially inaccurate: a figure far from the established \
 value, an event that did not happen, a quote or decision attributed to the wrong person or body.
+- "misleading": the figure or fact itself is true or about right, but the claim misrepresents it: a \
+cherry-picked period, the wrong baseline or comparison, a modelled figure presented as measured, a relative \
+change presented as absolute, a correlation stated as a cause. Only when you know what the figure really measures.
+- "surprising_true": the claim is true AND it is a well-known misconception that it is false: most listeners \
+would bet against it. Rare: an ordinary true claim, however striking, is "likely_true".
 - "likely_true": it matches what you know.
 - "unsure": anything else: recent or fast-changing figures, local or obscure facts, predictions, opinions, vague \
 claims, rounding or definitional quibbles.
 confidence: the probability, from 0 to 1, that your assessment is right.
 correction: if likely_false, a phrase of at most 10 words that completes "Last I checked, ...", with the figure if \
 there is one (e.g. "it was nearer 4%"); otherwise "".
-challenge: if likely_false, one heckle of at most 12 words addressed directly to the speaker ("you"), questioning \
-the claim with what you believe is right, dry and a little humble ("6%? Last I checked it was nearer 4%."); \
-otherwise "".
+context: if misleading, a phrase of at most 10 words that completes "True, but ...", naming the catch (e.g. \
+"that's against a modelled baseline"); otherwise "".
+line: if likely_false, misleading or surprising_true, one line of at most 12 words addressed directly to the \
+speaker ("you"), dry and a little humble; otherwise "".
+- likely_false: question the claim with what you believe is right ("6%? Last I checked it was nearer 4%.").
+- misleading: grant the figure, then name the catch ("True, but that's against a modelled baseline.").
+- surprising_true: concede it, grudgingly, with no figures of your own ("Annoyingly, that one checks out.").
 {_RULES}
 Return JSON only."""
 
@@ -81,24 +90,31 @@ Return JSON: {{"line": "..."}}"""
 
 FOLLOWUP_SCHEMA = {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}
 BANTER_SCHEMA = {"type": "object", "properties": {"line": {"type": "string"}}, "required": ["line"]}
+ASSESSMENTS = ("likely_false", "misleading", "surprising_true", "likely_true", "unsure")
 CHECK_SCHEMA = {
     "type": "object",
     "properties": {
-        "assessment": {"type": "string", "enum": ["likely_false", "likely_true", "unsure"]},
+        "assessment": {"type": "string", "enum": list(ASSESSMENTS)},
         "confidence": {"type": "number"},
         "correction": {"type": "string"},
-        "challenge": {"type": "string"},
+        "context": {"type": "string"},
+        "line": {"type": "string"},
     },
-    "required": ["assessment", "confidence", "correction", "challenge"],
+    "required": ["assessment", "confidence", "correction", "context", "line"],
 }
 
 
 @dataclass
 class Check:
-    likely_false: bool
+    assessment: str            # one of ASSESSMENTS ("unsure" for anything else)
     confidence: float
-    challenge: str = ""
-    correction: str = ""
+    line: str = ""             # its line to the speaker (challenge or concession), raw: the caller guards it
+    correction: str = ""       # likely_false: completes "Last I checked, ..."
+    context: str = ""          # misleading: completes "True, but ..."
+
+    @property
+    def likely_false(self) -> bool:
+        return self.assessment == "likely_false"
 
 
 def _get(o: Any, k: str, default: Any = "") -> Any:
@@ -179,11 +195,13 @@ class Writer:
         side = SIDE_NAME.get(str(_get(claim, "side") or ""), "a")
         user = (f"Today is {time.strftime('%d %B %Y')}. Motion: {motion or '(not given)'}\n"
                 f"Claim ({_get(claim, 'type') or 'other'}) by the {side} speaker: {_claim_text(claim)}")
-        out = await self._call(self.checker, CHECK_SYSTEM, user, CHECK_SCHEMA, CHECK_TIMEOUT_S, max_tokens=300)
+        out = await self._call(self.checker, CHECK_SYSTEM, user, CHECK_SCHEMA, CHECK_TIMEOUT_S, max_tokens=400)
         if not out:
             return None
-        return Check(likely_false=_get(out, "assessment") == "likely_false", confidence=_conf(_get(out, "confidence")),
-                     challenge=str(_get(out, "challenge") or ""), correction=str(_get(out, "correction") or ""))
+        a = str(_get(out, "assessment") or "").strip().lower()
+        return Check(assessment=a if a in ASSESSMENTS else "unsure", confidence=_conf(_get(out, "confidence")),
+                     line=str(_get(out, "line") or ""), correction=str(_get(out, "correction") or ""),
+                     context=str(_get(out, "context") or ""))
 
 
 def make_writer() -> Writer:

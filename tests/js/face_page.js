@@ -187,6 +187,10 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   p.live(BOT('against', 'b-2', 'It was 3%, not 30%. (unsourced)', {kind: 'challenge'})); p.draw();
   check('bots: an unsourced challenge is tagged AI knowledge', same(botBox(p, 'against').parts,
     [['who', 'Against'], ['tag', 'AI knowledge'], ['text', 'It was 3%, not 30%. (unsourced)']]), botBox(p, 'against'));
+  p.live(BOT('against', 'b-2c', 'Annoyingly, that one checks out. (unsourced)', {kind: 'concede'})); p.draw();
+  check('bots: an unsourced concede is tagged AI knowledge', same(botBox(p, 'against').parts,
+    [['who', 'Against'], ['tag', 'AI knowledge'], ['text', 'Annoyingly, that one checks out. (unsourced)']]),
+    botBox(p, 'against').parts);
   const kept = botBox(p, 'for').node;
   p.live({event: 'BotTalk', persona: 'for', line_id: 'b-1', on: false}); p.draw();
   check('bots: an unchanged line is not rebuilt', botBox(p, 'for').node === kept);
@@ -198,6 +202,12 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     && ![...p.els.values(), ...p.made].some(n => n.innerHTML.includes('<img')), botBox(p, 'for'));
   check('bots: no tag on a sourced challenge, no source on an unsourced rebut',
     same(botBox(p, 'against').parts, [['who', 'Against'], ['text', 'And the cost?']]), botBox(p, 'against'));
+  p.live(BOT('for', 'b-5', 'Fine, that checks out.', {kind: 'concede', sourced: true}));
+  p.live(BOT('against', 'b-6', 'Still waiting on the cost point.', {kind: 'nudge'})); p.draw();
+  check('bots: no tag on a sourced concede or an unsourced nudge',
+    same(botBox(p, 'for').parts, [['who', 'For'], ['text', 'Fine, that checks out.']])
+    && same(botBox(p, 'against').parts, [['who', 'Against'], ['text', 'Still waiting on the cost point.']]),
+    [botBox(p, 'for').parts, botBox(p, 'against').parts]);
   p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
   check('bots: not on the final screen', p.el('bots').hidden);
 }

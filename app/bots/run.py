@@ -7,14 +7,21 @@ The For bot is Prop's second and answers Opp's claims; the Against bot mirrors i
 A claim with no side is ignored, and a bot never answers its own side. Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
-  Supported -> no fact line. Otherwise a check that says likely false with confidence >= BOTS_CHECK_MIN_CONF ->
-  "challenge", tagged "(unsourced)". At most one fact line per claim.
+  Supported -> no fact line. Otherwise, with confidence >= BOTS_CHECK_MIN_CONF, the check's assessment decides,
+  every line tagged "(unsourced)": likely_false -> "challenge" with Claude's correction; misleading (true figure,
+  misrepresented) -> a "True, but ..." "challenge"; surprising_true (a well-known misconception) -> a grudging
+  "concede". A check that disagrees with the claim's Verdict label is dropped. At most one fact line per claim.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
 finished non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
-Banter (BOTS_BANTER): after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S across both, the
-other bot may answer it with one dry line, if it is idle (banter never delays a real line). Banter is never answered.
+Banter (BOTS_BANTER), lowest priority: after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S
+across both, the other bot may answer it with one dry line. It starts only when nothing important is running or
+waiting: no claim being answered for either bot (its knowledge check, its Verdict wait or its line being written),
+no non-banter line queued for either bot, and the replying bot idle; all of it is checked again when the line is
+written, before it is queued. If that only comes true later, it may still start within BANTER_FRESH_S of the line.
+A queued banter is dropped when a real line for its bot is ready first or a claim for its bot comes in, and then
+gives the gap back. Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
@@ -33,9 +40,14 @@ from app.brain.director import truthy
 from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, Event, ModuleStatus, SessionStart, Verdict)
 
 log = logging.getLogger("bots")
+CHECK_KIND = {"likely_false": "challenge", "misleading": "challenge", "surprising_true": "concede"}
+DISAGREES = {"likely_false": {"supported"},                     # check assessment -> the Verdict labels it would
+             "misleading": {"supported", "contradicted"},         # contradict ("true, but" grants the figure)
+             "surprising_true": {"contradicted", "missing_context"}}
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
+BANTER_FRESH_S = 8.0      # banter answers a line at most this old (it waits for the bots to be quiet)
 
 
 class Bots:
@@ -77,8 +89,10 @@ class Bots:
         self.nudged: set[str] = set()
         self.said: list[str] = []                     # texts posted this session, newest last (LLM "don't repeat")
         self.banters: list[str] = []                  # the banter among them
-        self.last_banter = -1e18
+        self.last_banter = self.banter_posted = -1e18   # the gap starts when a banter starts; given back if none posts
         self.banter_busy = False
+        self.pending: set[str] = set()                # claims being answered (check, Verdict wait, line writing)
+        self.cue: Optional[tuple[BotLine, float]] = None   # the latest real line banter may answer, and when
 
     def cancel(self) -> None:
         for t in list(self.tasks):
@@ -119,6 +133,8 @@ class Bots:
         if self.paused and not self.pacer.paused:
             self.cancel()
             self.banter_busy = False                  # a banter task cancelled before it started never resets it
+            self.pending.clear()                      # nor does an answer task
+            self.cue = None
             for talk in self.pacer.clear():           # close any open mouth now
                 self.publish(talk)
         self.pacer.paused = self.paused
@@ -141,6 +157,7 @@ class Bots:
                                       for o in self.claims.values())
         if dup:                                       # the same side said it again: answered the first time
             return
+        self.pending.add(c.id)
         self.spawn(self.answer(c, persona, self.session))
 
     # ------------------------------------------------------------------------------------------- claims
@@ -163,6 +180,10 @@ class Bots:
             raise
         except Exception:
             log.exception("bots: answering %s failed", c.id)
+        finally:
+            if session == self.session:
+                self.pending.discard(c.id)
+                self.maybe_banter()                   # it may have been waiting for this claim
 
     async def _answer(self, c: Claim, persona: str, session: int) -> None:
         checkable = c.checkable and c.type not in lines.NO_CHECK
@@ -173,23 +194,25 @@ class Bots:
         if checkable and important and self.writer.checker is not None:
             check = self.spawn(self.writer.check(c, self.motion))
         verdict = await self.wait_verdict(c.id, config.BOTS_VERDICT_WAIT_S) if checkable else None
-        granted = lines.supported(verdict)
-        if verdict is not None and lines.sourced(verdict):
-            text = lines.rebut(c, verdict, self.said)
-            if text:
-                if check:
-                    check.cancel()
-                self.queue(session, persona=persona, text=text, kind="rebut", target=c.speaker, claim_id=c.id,
-                           sourced=True, evidence=list(verdict.evidence))
+        to = dict(persona=persona, target=c.speaker, claim_id=c.id)
+        if self.rebutted(c, verdict, check, session, to):
+            return
+        if check is not None and not lines.supported(verdict):
+            res = await check
+            verdict = self.verdicts.get(c.id)             # the check can outlast the wait: a later Verdict still wins
+            if self.rebutted(c, verdict, check, session, to):
                 return
-        if check is not None:
-            res = None if granted else await check
-            check.cancel()
-            if res and res.likely_false and res.confidence >= config.BOTS_CHECK_MIN_CONF:
-                text = lines.challenge(c, res.challenge, res.correction, names=self.names)
-                if text and self.queue(session, persona=persona, text=text, kind="challenge", target=c.speaker,
-                                       claim_id=c.id):
+            if not lines.supported(verdict):
+                kind, text, why = self.knowledge(c, res, verdict)
+                fired = bool(text) and self.queue(session, text=text, kind=kind, **to)
+                log_check(c.id, res, f"fired {kind}" if fired else
+                          f"not fired: {why or 'not queued (already said, or paused)'}")
+                if fired:
                     return
+        if check is not None and lines.supported(verdict):
+            check.cancel()
+            log_check(c.id, finished(check), "not fired: supported verdict")
+        granted = lines.supported(verdict)
         if not important:
             return
         raw = await self.writer.followup(c, self.motion, persona, granted, tuple(self.said))
@@ -199,7 +222,38 @@ class Bots:
         if not text or self.pacer.has_said(text):
             text = lines.followup(c, self.said, granted)
         if text:
-            self.queue(session, persona=persona, text=text, kind="followup", target=c.speaker, claim_id=c.id)
+            self.queue(session, text=text, kind="followup", **to)
+
+    def rebutted(self, c: Claim, verdict: Optional[Verdict], check: Optional[asyncio.Task], session: int,
+                 to: dict) -> bool:
+        """Queue the rebut a sourced Verdict allows; it beats Claude's check (cancelled, logged). True if it did."""
+        text = lines.rebut(c, verdict, self.said) if verdict is not None else None
+        if not text:
+            return False
+        if check is not None:
+            check.cancel()
+            log_check(c.id, finished(check), "not fired: sourced verdict")
+        self.queue(session, text=text, kind="rebut", sourced=True, evidence=list(verdict.evidence), **to)
+        return True
+
+    def knowledge(self, c: Claim, res: Any, verdict: Optional[Verdict]) -> tuple[str, Optional[str], str]:
+        """The fact line Claude's own-knowledge check `res` allows for `c`: (kind, text or None, why not)."""
+        if res is None:
+            return "", None, "no answer (timeout or error)"
+        kind = CHECK_KIND.get(res.assessment)
+        if kind is None:
+            return "", None, res.assessment
+        if res.confidence < config.BOTS_CHECK_MIN_CONF:
+            return kind, None, f"below {config.BOTS_CHECK_MIN_CONF:.2f}"
+        if verdict is not None and verdict.label in DISAGREES[res.assessment]:
+            return kind, None, f"the Verdict says {verdict.label}"
+        if res.assessment == "likely_false":
+            text = lines.challenge(c, res.line, res.correction, names=self.names)
+        elif res.assessment == "misleading":
+            text = lines.misleading(c, res.line, res.context, names=self.names)
+        else:
+            text = lines.concede(c, res.line, names=self.names, used=self.said)
+        return kind, text, "" if text else "dropped by the guards"
 
     def queue(self, session: int, **kw) -> bool:
         """Hand a line to the pacer (and post it now if its bot is free). False if dropped."""
@@ -258,26 +312,47 @@ class Bots:
         """Free to post within `within` seconds, with nothing of its own waiting (banter never displaces a line)."""
         return self.pacer.free(persona, self.clock() + within) and not self.pacer.queued(persona)
 
+    def quiet(self) -> bool:
+        """Nothing important running or waiting for either bot: no claim being answered, no real line queued."""
+        return not self.pending and all(ln.kind == "banter" for p in lines.PERSONAS for ln in self.pacer.queued(p))
+
+    def answering_now(self) -> set[str]:
+        """The bots with a claim being answered."""
+        return {lines.answering(self.claims[cid].side) for cid in self.pending if cid in self.claims}
+
     def on_botline(self, line: BotLine) -> None:
         if line.src != "bots" or line.kind == "banter" or line.reply_to:
             return                                    # never chained; replayed or foreign lines don't count
-        if not config.BOTS_BANTER or self.paused or self.writer.fast is None or self.banter_busy:
+        self.cue = (line, self.clock())
+        self.maybe_banter()
+
+    def maybe_banter(self) -> None:
+        """Start the other bot's banter reply to the cued line if everything allows it now (see the module doc)."""
+        if self.cue is None:
+            return
+        line, at = self.cue
+        if self.clock() - at > BANTER_FRESH_S:
+            self.cue = None
+            return
+        if not config.BOTS_BANTER or self.paused or self.writer.fast is None or self.banter_busy or not self.quiet():
             return
         other = lines.OTHER.get(line.persona)
         if not other or not self.idle(other, BANTER_SOON_S) or \
                 self.clock() - self.last_banter < config.BOTS_BANTER_GAP_S:
             return
-        prev, self.last_banter, self.banter_busy = self.last_banter, self.clock(), True   # reserves the gap
-        self.spawn(self.banter(line, other, prev, self.session))
+        self.cue = None
+        self.last_banter, self.banter_busy = self.clock(), True     # reserves the gap
+        self.spawn(self.banter(line, at, other, self.session))
 
-    async def banter(self, line: BotLine, persona: str, prev: float, session: int) -> None:
-        ok = False
+    async def banter(self, line: BotLine, at: float, persona: str, session: int) -> None:
+        ok = late = False
         try:
             raw = await self.writer.banter(line.text, persona, line.persona, tuple(self.banters))
             text = lines.guard(raw, "banter", line.text, strict=True, names=self.names) if raw else None
             if raw and not text:
                 log.info("bots: banter dropped by the guards: %r", raw)
-            ok = bool(text) and self.idle(persona, BANTER_SOON_S) and \
+            late = bool(text) and not (self.quiet() and self.idle(persona, BANTER_SOON_S))   # something came up
+            ok = bool(text) and not late and \
                 self.queue(session, persona=persona, text=text, kind="banter", reply_to=line.id)
         except asyncio.CancelledError:
             raise
@@ -287,17 +362,24 @@ class Bots:
             if session == self.session:
                 self.banter_busy = False
                 if not ok:
-                    self.last_banter = prev           # nothing queued: the gap doesn't start yet
+                    self.last_banter = self.banter_posted   # nothing queued: the gap doesn't start yet
+                if late and self.cue is None:
+                    self.cue = (line, at)             # try again once quiet, while the line is still fresh
 
     # ------------------------------------------------------------------------------------------- output
     def tick(self) -> None:
+        for persona in self.answering_now():
+            self.pacer.drop_banter(persona)           # a real line may be on its way: banter never pushes it back
         for ev in self.pacer.tick(self.clock()):
             if isinstance(ev, BotLine):
                 self.said.append(ev.text)
                 if ev.kind == "banter":
-                    self.last_banter = self.clock()
+                    self.last_banter = self.banter_posted = self.clock()
                     self.banters.append(ev.text)
             self.publish(ev)
+        if not self.banter_busy and not any(ln.kind == "banter" for p in lines.PERSONAS for ln in self.pacer.queued(p)):
+            self.last_banter = self.banter_posted     # a queued banter dropped or expired: it gives the gap back
+        self.maybe_banter()
 
     def restore(self, history: list[Event]) -> None:
         """After a crash-restart: the session, claims, verdicts, map statuses and lines already posted, silently.
@@ -322,7 +404,7 @@ class Bots:
                     if ev.kind == "nudge" and ev.claim_id:
                         self.nudged.add(ev.claim_id)
                     if ev.kind == "banter":
-                        self.last_banter = ev.ts
+                        self.last_banter = self.banter_posted = ev.ts
                         self.banters.append(ev.text)
                 elif ev.event == "BotTalk" and ev.src == "bots" and not ev.on:
                     open_lines.pop(ev.line_id, None)
@@ -330,6 +412,20 @@ class Bots:
                 log.exception("bots: restore skipped %s", ev.event)
         for line in open_lines.values():
             self.pacer.close_at(line, line.ts + line.hold_s)
+
+
+def log_check(cid: str, res: Any, outcome: str) -> None:
+    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF at rehearsal: claim, assessment,
+    confidence, and whether a line fired (or why not)."""
+    if res is None:
+        log.info("bots: check %s: no result -> %s", cid, outcome)
+    else:
+        log.info("bots: check %s: %s %.2f -> %s", cid, res.assessment, res.confidence, outcome)
+
+
+def finished(task: asyncio.Task) -> Any:
+    """The task's result if it already finished cleanly, else None."""
+    return task.result() if task.done() and not task.cancelled() and task.exception() is None else None
 
 
 def final_nr(snap: ArgMapSnapshot) -> list[dict]:
