@@ -6,6 +6,7 @@ waits (the verdict wait, LLM calls) stay real but tiny. The LLM is a FakeLLM wit
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -350,6 +351,43 @@ def test_priority_order():
     assert sorted(lines.PRIORITY, key=lines.PRIORITY.get, reverse=True) == [
         "rebut", "challenge", "concede", "nudge", "followup", "banter"]
     assert lines.FACT_KINDS == ("rebut", "challenge", "concede")
+
+
+@pytest.mark.parametrize("check,verdict,want", [
+    (false_check(0.95), None, "bots: check c1: likely_false 0.95 -> fired challenge"),
+    (misleading_check(0.79), None, "bots: check c1: misleading 0.79 -> not fired: below 0.80"),
+    (surprising_check(0.9), None, "bots: check c1: surprising_true 0.90 -> fired concede"),
+    (check_answer("likely_true", 0.99), None, "bots: check c1: likely_true 0.99 -> not fired: likely_true"),
+    (false_check(0.9, challenge="", correction="that is wrong"), None,
+     "bots: check c1: likely_false 0.90 -> not fired: dropped by the guards"),
+    (surprising_check(0.9), "contradicted", "bots: check c1: surprising_true 0.90 -> not fired: the Verdict says "
+                                            "contradicted"),
+    (false_check(0.9), "supported", "bots: check c1: no result -> not fired: supported verdict"),
+    (None, None, "bots: check c1: no result -> not fired: no answer (timeout or error)"),
+])
+async def test_each_knowledge_check_logs_one_info_line(caplog, check, verdict, want):
+    caplog.set_level(logging.INFO, logger="bots")
+    checker = FakeLLM(check=check, fail=None if check else RuntimeError("boom"))
+    bots, out, clock = make(check=checker)
+    if verdict:
+        bots.handle(V("c1", label=verdict, guard_notes=["capped"]))
+    bots.handle(C("c1"))
+    await settle(bots)
+    got = [r.getMessage() for r in caplog.records if r.name == "bots" and "check" in r.getMessage()]
+    assert got == [want] and all(r.levelno == logging.INFO for r in caplog.records if r.name == "bots")
+
+
+async def test_the_check_log_line_shows_a_finished_check_that_a_sourced_verdict_beat(caplog):
+    caplog.set_level(logging.INFO, logger="bots")
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    bots, out, clock = make(check=FakeLLM(check=misleading_check(0.8)))
+    bots.handle(C("c1"))
+    await asyncio.sleep(0.02)                                                   # the check is back; no verdict yet
+    bots.handle(V("c1"))
+    await settle(bots, 1.0)
+    assert [b.kind for b in said(out)] == ["rebut"]
+    assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [
+        "bots: check c1: misleading 0.80 -> not fired: sourced verdict"]
 
 
 # ----------------------------------------------------------------------------- follow-ups

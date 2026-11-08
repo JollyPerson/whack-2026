@@ -185,14 +185,21 @@ class Bots:
             if text:
                 if check:
                     check.cancel()
+                    log_check(c.id, finished(check), "not fired: sourced verdict")
                 self.queue(session, text=text, kind="rebut", sourced=True, evidence=list(verdict.evidence), **to)
                 return
         if check is not None:
-            res = None if granted else await check
-            check.cancel()
-            kind, text, why = self.knowledge(c, res, verdict)
-            if text and self.queue(session, text=text, kind=kind, **to):
-                return
+            if granted:
+                check.cancel()
+                log_check(c.id, finished(check), "not fired: supported verdict")
+            else:
+                res = await check
+                kind, text, why = self.knowledge(c, res, verdict)
+                fired = bool(text) and self.queue(session, text=text, kind=kind, **to)
+                log_check(c.id, res, f"fired {kind}" if fired else
+                          f"not fired: {why or 'not queued (already said, or paused)'}")
+                if fired:
+                    return
         if not important:
             return
         raw = await self.writer.followup(c, self.motion, persona, granted, tuple(self.said))
@@ -207,7 +214,7 @@ class Bots:
     def knowledge(self, c: Claim, res: Any, verdict: Optional[Verdict]) -> tuple[str, Optional[str], str]:
         """The fact line Claude's own-knowledge check `res` allows for `c`: (kind, text or None, why not)."""
         if res is None:
-            return "", None, "no answer"
+            return "", None, "no answer (timeout or error)"
         kind = CHECK_KIND.get(res.assessment)
         if kind is None:
             return "", None, res.assessment
@@ -352,6 +359,20 @@ class Bots:
                 log.exception("bots: restore skipped %s", ev.event)
         for line in open_lines.values():
             self.pacer.close_at(line, line.ts + line.hold_s)
+
+
+def log_check(cid: str, res: Any, outcome: str) -> None:
+    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF at rehearsal: claim, assessment,
+    confidence, and whether a line fired (or why not)."""
+    if res is None:
+        log.info("bots: check %s: no result -> %s", cid, outcome)
+    else:
+        log.info("bots: check %s: %s %.2f -> %s", cid, res.assessment, res.confidence, outcome)
+
+
+def finished(task: asyncio.Task) -> Any:
+    """The task's result if it already finished cleanly, else None."""
+    return task.result() if task.done() and not task.cancelled() and task.exception() is None else None
 
 
 def final_nr(snap: ArgMapSnapshot) -> list[dict]:
