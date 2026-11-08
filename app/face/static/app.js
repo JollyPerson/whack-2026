@@ -43,6 +43,7 @@ const voiceOn = id => !!(S.tts && S.tts.speaking && Date.now() / 1000 - S.tts.ts
 function apply(e, live) {
   switch (e.event) {
     case 'SessionStart':
+      if (live && AUDIO) cutSpeech();          // a new debate: the old one's line and queue go (as on Mate Engine)
       reset(); S.session = e;
       for (const [id, sp] of Object.entries(e.speakers || {})) {
         if (sp.side) S.sides[id] = sp.side;

@@ -127,5 +127,14 @@ const LINE = {event: 'Interjection', id: 'i-1', text: 'Point of fact.'};
   q.advance(13000); q.draw();
   check('banner: held while speaking, not forever', held && q.el('banner').hidden, {held});
 }
+{ // 4. a new debate (New debate, Replay recorded debate) cuts the old debate's line and drops its queue
+  const p = page('?audio=1'); p.connect(); p.click('enable');
+  p.live(LINE); p.live({...LINE, id: 'i-2', text: 'Second point.'}); p.audios[0].start(5);
+  p.live({event: 'SessionStart', motion: 'Next motion'}); await flush();
+  check('SessionStart cuts the voice', p.audios[0].paused && JSON.stringify(p.tts()) === JSON.stringify(
+    [['face:audio', true, 'i-1'], ['face:audio', false, 'i-1']]), p.tts());
+  p.advance(10000); await flush();              // (the old watchdog would have started i-2 by now)
+  check('SessionStart drops the queue', p.audios.length === 1, p.audios.map(a => a.url));
+}
 console.log(failures ? `${failures} FAILED` : 'all passed');
 Deno.exit(failures ? 1 : 0);
