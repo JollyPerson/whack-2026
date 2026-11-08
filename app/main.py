@@ -511,9 +511,10 @@ def main():
     if warning := exposure_warning(a.host):
         log.warning("%s", warning)
     if os.environ.get("PHONE_MICS", "").strip():
-        log.warning("phone mics: open %s://%s:%d/mic?ch=A on the phone (over USB: adb reverse tcp:%d tcp:%d, then "
-                    "http://localhost:%d/mic?ch=A)", "https" if ssl else "http",
-                    "<this laptop's IP>" if a.host not in LOOPBACK else "localhost", a.port, a.port, a.port, a.port)
+        scheme = "https" if ssl else "http"
+        log.warning("phone mics: over USB run adb reverse tcp:%d tcp:%d, then open %s://localhost:%d/mic?ch=A (or B) "
+                    "on the phone%s", a.port, a.port, scheme, a.port,
+                    "" if a.host in LOOPBACK else f"; on Wi-Fi: {scheme}://<this laptop's IP>:{a.port}/mic?ch=A")
     applied = apply_profile_env(a.profile)
     if PROFILE_ENV.get(a.profile):
         log.warning("profile %s: %s", a.profile, ", ".join(f"{k}={os.environ[k]}" for k in PROFILE_ENV[a.profile])
