@@ -102,6 +102,39 @@ def test_the_other_speaker_starting_ends_the_first_ones_turn_at_once():
     b.finish()
 
 
+
+def test_the_other_mic_hearing_the_same_sentence_does_not_end_the_turn(clock):
+    # Both mics in one room: mic2 also transcribes A. The brain drops that copy as bleed, but a Pause for A sent
+    # on it would still open the floor mid-turn and let the Moderator talk over A.
+    pub = FakePublisher()
+    b = bridge.Bridge(pub, {"mic1": "A", "mic2": "B"}, 6.0)
+    b.sentence(said("mic1", 0.0, 3.0, "The economy grew by three percent last year."))
+    clock[0] += 1.5
+    b.sentence(said("mic2", 0.2, 3.1, "the economy grew by 3 percent last year"))
+    assert pub.kinds() == [("Utterance", "A"), ("Utterance", "B")]       # still forwarded: the brain decides
+    b.check(1000.0 + 6.0)
+    assert pub.kinds() == [("Utterance", "A"), ("Utterance", "B"), ("Pause", "A")]
+    b.check(1000.0 + 60.0)
+    assert len(pub.events) == 3                                         # no turn for B to end
+    b.sentence(said("mic2", 4.0, 6.0, "That figure is simply wrong, I'm afraid."))
+    b.sentence(said("mic1", 6.5, 8.0, "It is right."))
+    assert pub.kinds()[3:] == [("Utterance", "B"), ("Pause", "B"), ("Utterance", "A")]
+    b.finish()
+
+def test_a_rebuttal_echoing_the_other_speaker_later_is_a_turn_not_bleed(clock):
+    # Bleed is a copy heard at the same time, as the brain's BleedGuard has it: B repeating A's words 6 s later is
+    # B's turn. Taken for bleed, it never ended A's turn and B, never due, got no Pause of its own.
+    pub = FakePublisher()
+    b = bridge.Bridge(pub, {"mic1": "A", "mic2": "B"}, 6.0)
+    b.sentence(said("mic1", 0.0, 3.0, "Nuclear power is the safest energy source."))
+    clock[0] += 6.0
+    b.sentence(said("mic2", 7.0, 9.0, "Nuclear power is not the safest energy source."))
+    assert pub.kinds() == [("Utterance", "A"), ("Pause", "A"), ("Utterance", "B")]
+    b.check(1006.0 + 6.0)
+    assert pub.kinds()[3:] == [("Pause", "B")]
+    b.finish()
+
+
 def test_more_speech_pushes_the_pause_back(clock):
     pub = FakePublisher()
     b = bridge.Bridge(pub, {"mic1": "A"}, 6.0)
@@ -245,3 +278,35 @@ def test_one_event_that_blows_up_does_not_stop_the_ones_after_it(monkeypatch, ca
     pub.close(timeout=2.0)
     assert [t["speaker"] for t in tries] == ["A", "B"]
     assert "unsent" not in capsys.readouterr().err
+
+
+def test_an_event_already_too_old_when_its_turn_comes_is_not_sent(monkeypatch, capsys):
+    # A hanging connection (remote server, Wi-Fi gone) holds each try for its timeout while sentences keep coming:
+    # once the network is back, the backlog must not reach the server as a burst of minute-old Utterances.
+    tries = []
+
+    def urlopen(req, timeout):
+        tries.append(json.loads(req.data)["speaker"])
+        if len(tries) == 1:
+            time.sleep(0.3)
+            raise urllib.error.URLError("timed out")
+        return OK()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
+    pub = publisher(max_age=0.2)
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})          # queued behind A's 0.3 s try
+    assert wait_for(lambda: "gave up" in capsys.readouterr().err or len(tries) > 1)
+    pub.send({"event": "Pause", "speaker": "C", "t": 3.0})
+    pub.close()
+    assert tries == ["A", "C"]
+
+
+def test_the_server_coming_back_is_announced(monkeypatch, capsys):
+    flaky(monkeypatch, urllib.error.URLError("Connection refused"), urllib.error.URLError("Connection refused"))
+    pub = publisher()
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
+    pub.close()
+    err = capsys.readouterr().err
+    assert err.count("reachable again") == 1
