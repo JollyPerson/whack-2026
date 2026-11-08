@@ -152,3 +152,79 @@ def test_close_says_how_many_events_never_went_out(monkeypatch, capsys):
     release.set()
     pub.thread.join(5)
     assert "3 event(s) unsent" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------------- Publisher
+class OK:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return b"[]"
+
+
+def flaky(monkeypatch, *failures):
+    """urlopen that raises `failures` in turn, then succeeds. Returns the list of bodies it was tried with."""
+    tries, todo = [], list(failures)
+
+    def urlopen(req, timeout):
+        tries.append(json.loads(req.data))
+        if todo:
+            e = todo.pop(0)
+            raise e(req) if callable(e) else e
+        return OK()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
+    return tries
+
+
+def http(code):
+    return lambda req: urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(b"busy"))
+
+
+def publisher(**kw):
+    pub = bridge.Publisher("http://x", "u", "pw")
+    pub.backoff, pub.max_age = (0.01, 0.02), kw.get("max_age", 5.0)
+    return pub
+
+
+@pytest.mark.parametrize("failures", [
+    [http(502)],                                                                   # Caddy while the app restarts
+    [http(503), http(504)],
+    [urllib.error.URLError("Temporary failure in name resolution")] * 2,          # venue Wi-Fi blip
+    [TimeoutError("timed out"), ConnectionResetError()],
+])
+def test_a_server_restart_or_network_blip_is_retried_until_it_goes_through(monkeypatch, failures):
+    tries = flaky(monkeypatch, *failures)
+    pub = publisher()
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.close()
+    assert len(tries) == len(failures) + 1
+    assert all(t == {"event": "Pause", "speaker": "A", "t": 1.0} for t in tries)
+
+
+@pytest.mark.parametrize("code", [401, 422])
+def test_a_client_error_is_not_retried(monkeypatch, code, capsys):
+    tries = flaky(monkeypatch, http(code))
+    pub = publisher()
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
+    pub.close()
+    assert [t["speaker"] for t in tries] == ["A", "B"]
+    assert f"{code} from http://x/publish" in capsys.readouterr().err
+
+
+def test_an_event_too_old_to_matter_is_given_up_and_the_next_one_still_goes(monkeypatch, capsys):
+    tries = flaky(monkeypatch, *[urllib.error.URLError("down")] * 1000)
+    pub = publisher(max_age=0.2)
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    time.sleep(0.4)
+    tries.clear()
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", lambda req, timeout: tries.append(req) or OK())
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
+    pub.close()
+    assert len(tries) == 1
+    assert "gave up" in capsys.readouterr().err

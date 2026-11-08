@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import itertools
 import json
 import os
 import queue
@@ -37,7 +38,12 @@ def parse_map(text: str) -> dict[str, str]:
 
 
 class Publisher:
-    """Posts events from a queue on its own thread, so a slow network never holds up reading the mics."""
+    """Posts events from a queue on its own thread, so a slow network never holds up reading the mics.
+    A 5xx (Caddy while the app restarts) or a network blip is retried with backoff until the event is max_age
+    old; by then a late Utterance or Pause would mislead more than it helps."""
+
+    backoff = (0.25, 0.5, 1.0, 2.0)     # seconds before each retry, the last one repeating
+    max_age = 15.0
 
     def __init__(self, url: str, user: str, password: str, dry_run: bool = False):
         self.url = url.rstrip("/") + "/publish"
@@ -51,7 +57,7 @@ class Publisher:
         self.thread.start()
 
     def send(self, event: dict) -> None:
-        self.queue.put(event)
+        self.queue.put((time.monotonic(), event))
 
     def close(self, timeout: float = 10.0) -> None:
         self.queue.put(None)
@@ -61,22 +67,31 @@ class Publisher:
             print(f"bridge: exiting with {self.queue.qsize()} event(s) unsent", file=sys.stderr)
 
     def _run(self) -> None:
-        while (event := self.queue.get()) is not None:
+        while (item := self.queue.get()) is not None:
+            queued, event = item
             if self.dry_run:
                 print(json.dumps(event), flush=True)
                 continue
-            body = json.dumps(event).encode()
-            for attempt in (1, 2):
-                try:
-                    req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
-                    with urllib.request.urlopen(req, timeout=5) as r:
-                        r.read()
-                    break
-                except urllib.error.HTTPError as e:
-                    print(f"bridge: {e.code} from {self.url}: {e.read()[:200]!r}", file=sys.stderr)
-                    break               # a 401 or 422 won't fix itself on retry
-                except Exception as e:
-                    print(f"bridge: send failed (try {attempt}): {e!r}", file=sys.stderr)
+            self._post(json.dumps(event).encode(), queued)
+
+    def _post(self, body: bytes, queued: float) -> None:
+        for attempt in itertools.count(1):
+            try:
+                req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    r.read()
+                return
+            except urllib.error.HTTPError as e:
+                print(f"bridge: {e.code} from {self.url}: {e.read()[:200]!r}", file=sys.stderr)
+                if e.code < 500:
+                    return              # a 401 or 422 won't fix itself on retry
+            except Exception as e:
+                print(f"bridge: send failed (try {attempt}): {e!r}", file=sys.stderr)
+            delay = self.backoff[min(attempt, len(self.backoff)) - 1]
+            if time.monotonic() + delay - queued > self.max_age:
+                print(f"bridge: gave up on an event after {attempt} tries", file=sys.stderr)
+                return
+            time.sleep(delay)
 
 
 class Bridge:
