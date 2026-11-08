@@ -448,6 +448,30 @@ def test_anthropic_model_env_is_ignored_and_ids_validated(no_creds):
     assert L.make_llm().model == "claude-haiku-4-5-20251001"
 
 
+def test_anthropic_client_built_directly_validates_its_model(no_creds):
+    """C's verdict model builds AnthropicLLM itself (EVIDENCE_ANTHROPIC_API_KEY): with LLM_MODEL=gpt-6-luna (how
+    ChatGPT is picked for claims) or EVIDENCE_MODEL=opus every verdict request went out with that id and 400'd."""
+    no_creds.setattr(config, "LLM_MODEL", "gpt-6-luna")
+    llm = L.AnthropicLLM(client=object())
+    assert llm.model == L.ANTHROPIC_DEFAULT_MODEL and llm.name == f"anthropic:{L.ANTHROPIC_DEFAULT_MODEL}"
+    assert llm.request("S", "U", {})["model"] == L.ANTHROPIC_DEFAULT_MODEL and llm.thinking == {"type": "disabled"}
+    for bad in ("claude-opus-5-5[1m]", "opus", " "):
+        assert L.AnthropicLLM(client=object(), model=bad).model == L.ANTHROPIC_DEFAULT_MODEL, bad
+        no_creds.setattr(config, "LLM_MODEL", bad)
+        assert L.AnthropicLLM(client=object()).model == L.ANTHROPIC_DEFAULT_MODEL, bad
+    assert L.AnthropicLLM(client=object(), model="claude-sonnet-5-5").model == "claude-sonnet-5-5"
+    no_creds.setattr(config, "LLM_MODEL", "claude-opus-5-5")
+    llm = L.AnthropicLLM(client=object())
+    assert llm.model == "claude-opus-5-5" and llm.fallbacks
+    from app.evidence.llm import make_verdict_llm
+    no_creds.setattr(config, "LLM_MODEL", "gpt-6-luna")
+    no_creds.delenv("EVIDENCE_MODEL", raising=False)
+    no_creds.setenv("EVIDENCE_ANTHROPIC_API_KEY", "sk-ant-test")
+    assert make_verdict_llm().model == L.ANTHROPIC_DEFAULT_MODEL
+    no_creds.setenv("EVIDENCE_MODEL", "claude-sonnet-5-5")
+    assert make_verdict_llm().model == "claude-sonnet-5-5"
+
+
 @pytest.mark.parametrize("base", ["https://api.openai.com/v1", "https://api.openai.com/v1/"])
 def test_explicit_official_base_url_gets_gpt_default(no_creds, base):
     no_creds.setenv("OPENAI_API_KEY", "sk-test")
