@@ -7,6 +7,7 @@ const BANNER_MS = 9000;         // how long a line stays on screen once it has b
 const STALE_CHECK_S = 20;       // a claim still unanswered after this stops pulsing "checking…"
 const STALE_SPEECH_MS = 15000;  // a queued line this old is no longer worth saying
 const INTERIM_MAX_S = 6;         // an interim that never got its final (dropped stream, stopped replay) fades out
+const TTS_STUCK_S = 20;         // a TTSState{speaking:true} this old lost its false (audio tab closed or cut off)
 
 if (Q.get('theme') === 'light') document.documentElement.dataset.theme = 'light';   // for a washed-out projector
 const $ = id => document.getElementById(id);
@@ -34,6 +35,9 @@ function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionS
   return S.sides[spk];
 }
 const nameOf = spk => S.names[spk] || spk;
+// The referee is audible now (saying line `id`, if given). A speaking:true whose false never came stops counting.
+const voiceOn = id => !!(S.tts && S.tts.speaking && Date.now() / 1000 - S.tts.ts < TTS_STUCK_S
+                         && (id === undefined || S.tts.interjection_id === id));
 
 // One reducer for snapshot history (live=false) and live events, so a refresh rebuilds the same state.
 function apply(e, live) {
@@ -78,7 +82,10 @@ function apply(e, live) {
 function connect() {
   setConn('connecting');
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => { backoff = 500; setConn('open'); };
+  ws.onopen = () => {
+    backoff = 500; setConn('open');
+    if (ttsWant && ttsWant !== ttsSent) ttsState(ttsWant.speaking, ttsWant.interjection_id);   // missed while down
+  };
   ws.onmessage = m => {
     let e;
     try { e = JSON.parse(m.data); } catch { return; }
@@ -104,8 +111,19 @@ function send(msg) {
   return false;
 }
 const control = (flag, value) => send({op: 'control', flag, value});
-const ttsState = (speaking, id) => send({op: 'publish', src: 'face:audio',
-                                         event: {event: 'TTSState', speaking, interjection_id: id ?? null}});
+// The bus must hear how each line ends, or every view (and the avatar's mouth) stays "Speaking": a TTSState the socket
+// was down for is sent on reconnect, and a line still audible when the tab closes or refreshes is ended by a beacon.
+let ttsWant = null, ttsSent = null;            // the TTSState this tab means, and the last one the bus got
+function ttsState(speaking, id) {
+  ttsWant = {event: 'TTSState', speaking, interjection_id: id ?? null};
+  if (send({op: 'publish', src: 'face:audio', event: ttsWant})) ttsSent = ttsWant;
+}
+window.addEventListener('pagehide', () => {
+  if (ttsSent && ttsSent.speaking && navigator.sendBeacon) {
+    navigator.sendBeacon('/publish', JSON.stringify({...ttsSent, speaking: false, src: 'face:audio'}));
+  }
+  ttsWant = ttsSent = null;
+});
 function setConn(s) { $('conn').className = `dot ${s}`; $('conn').title = `websocket ${s}: ${WS_URL}`; }
 
 // ------------------------------------------------------------------ Moderator voice (?audio=1 only)
@@ -333,7 +351,7 @@ function drawHeader() {
   setHtml($('referee'), refereeHtml());
 }
 function refereeHtml() {
-  const d = S.dstatus, speaking = S.tts && S.tts.speaking;
+  const d = S.dstatus, speaking = voiceOn();
   const why = {nothing_pending: ['listening', 'Listening'], awaiting_pause: ['waiting', 'Waiting for a pause'],
                floor_closed: ['waiting', 'Waiting for a pause'], own_tts: ['speaking', 'Speaking'], muted: ['muted', 'Muted']};
   const [cls, text] = speaking ? ['speaking', 'Speaking']
@@ -405,13 +423,13 @@ function drawFinal() {
   }).join('') || '<p class="empty">The referee stayed silent.</p>') + '</div>');
 }
 function drawBanner() {
-  const on = banner && (Date.now() < banner.until || (S.tts && S.tts.speaking && S.tts.interjection_id === banner.e.id));
+  const on = banner && (Date.now() < banner.until || voiceOn(banner.e.id));
   $('banner').hidden = !on;
   document.body.classList.toggle('referee-on', !!on);
   if (!on) return;
   const e = banner.e, ev = e.evidence && e.evidence[0], url = ev && safeUrl(ev.url);
   const to = e.target ? ` to ${esc(nameOf(e.target))}` : '', claim = e.claim_id && S.claims.get(e.claim_id);
-  const talking = S.tts && S.tts.speaking && S.tts.interjection_id === e.id;
+  const talking = voiceOn(e.id);
   setHtml($('banner'), `<span class="label ${talking ? 'speaking' : ''}">${bars}Referee${to}</span><span class="line">${esc(e.text)}</span>`
     + (claim ? `<span class="src">On: ${esc(claim.text)}</span>` : '')
     + (url ? `<span class="src">Source: ${esc(ev.title || host(url))} · ${esc(host(url))}</span>` : ''));

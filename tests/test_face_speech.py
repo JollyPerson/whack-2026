@@ -464,6 +464,32 @@ def test_app_js_voice_rules():
     assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
 
 
+@pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run app.js")
+def test_app_js_page_rules():
+    """The whole dashboard against a fake DOM: a lost TTSState false is resent on reconnect or beaconed on close, a
+    stuck "Speaking" expires, SessionStart cuts the voice, replayed TTSState is ignored, and the admin buttons and
+    Enable audio are never rebuilt under the pointer (tests/js/face_page.js)."""
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run(["deno", "run", "--allow-read", str(root / "tests/js/face_page.js"),
+                        str(root / "app/face/static/app.js")], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
+
+
+def test_the_audio_tabs_closing_beacon_ends_the_line(make_client, tmp_path):
+    """app.js ends a line still audible when the ?audio=1 tab closes with navigator.sendBeacon('/publish', json): a
+    text/plain body and no x-src header. It must land as the audio tab's TTSState and close the avatar's mouth."""
+    c = make_client()
+    _with_tts(c, tmp_path, [])
+    cur, ep = resync(c)
+    c.post("/publish", json={"event": "TTSState", "speaking": True, "interjection_id": "i-1"},
+           headers={"x-src": "face:audio"})
+    beacon = {"event": "TTSState", "speaking": False, "interjection_id": "i-1", "src": "face:audio"}
+    r = c.post("/publish", content=json.dumps(beacon), headers={"content-type": "text/plain;charset=UTF-8"})
+    assert r.status_code == 200 and r.json()[0]["src"] == "face:audio"
+    assert [(x["op"], x["id"], x["on"]) for x in poll(c, cur, ep)["cmds"]] == [("talk", "i-1", True),
+                                                                               ("talk", "i-1", False)]
+
+
 async def test_a_poll_whose_client_hung_up_ends_and_takes_nothing(tmp_path):
     """Mate Engine killed mid-poll (or its request timed out): the server doesn't cancel the handler, so the dead
     poll must notice the disconnect, drop its subscription and leave queued dances for the next, live poll."""
