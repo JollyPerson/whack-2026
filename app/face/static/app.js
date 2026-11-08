@@ -351,6 +351,7 @@ function drawHeader() {
   setHtml($('meter'), `<div class="hero"><b>${secs(last > 0 ? last : null)}</b><span>last claim checked after it was said</span></div>`
     + `<div class="meter-side">${stagesHtml(S.lastVerdict)}<div class="median">Median <b>${secs(pct(delays, .5))}</b> over ${delays.length} verdict${delays.length === 1 ? '' : 's'}</div></div>`);
   setHtml($('referee'), refereeHtml());
+  $('enable').hidden = !AUDIO || audioReady;   // its own node: the cooldown countdown re-renders #referee every second
 }
 function refereeHtml() {
   const d = S.dstatus, speaking = voiceOn();
@@ -363,8 +364,7 @@ function refereeHtml() {
     : why[d.blocked] || ['listening', 'Listening'];
   const spoke = S.interjections.length, seen = S.considered.size;
   const record = seen ? `<span class="record">Considered ${seen} point${seen === 1 ? '' : 's'}, spoke ${spoke} time${spoke === 1 ? '' : 's'}</span>` : '';
-  const audio = !AUDIO || audioReady ? '' : '<button id="enable" class="primary">Enable audio</button>';
-  return `<span class="state ${cls}">${bars}<b>Referee</b> ${esc(text)}</span>${record}${audio}`;
+  return `<span class="state ${cls}">${bars}<b>Referee</b> ${esc(text)}</span>${record}`;
 }
 const bars = '<span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>';
 function drawLive() {
@@ -455,15 +455,16 @@ function drawAdmin() {
   const isFinal = S.flags.screen === 'final', web = S.flags.web_fallback !== false;
   const decs = S.decisions.slice(-6).reverse().map(x => `<div class="dec">${esc(x.action)} ${esc(x.kind)} · ${esc(x.reason)}`
     + `${x.text ? ` · “${esc(x.text)}”` : ''}${['candidate', 'held'].includes(x.action) ? ` <button data-ctl="veto" data-val="${esc(JSON.stringify(x.key))}">veto</button>` : ''}</div>`).join('');
-  const html = `<button data-ctl="mute" data-val="${!muted}" class="${muted ? 'on' : ''}">${muted ? 'Unmute' : 'Mute'}</button>`
+  // Separate nodes: a new decision must not rebuild the buttons under the operator's pointer (the click is lost).
+  setHtml($('admin-controls'), `<button data-ctl="mute" data-val="${!muted}" class="${muted ? 'on' : ''}">${muted ? 'Unmute' : 'Mute'}</button>`
     + '<button data-ctl="force_next" data-val="true">Say next now</button>'
     + `<span class="gap">Talkative</span>${[1, 2, 3, 4, 5].map(n => `<button data-ctl="aggr" data-val="${n}" class="${n === aggr ? 'on' : ''}">${n}</button>`).join('')}`
     + `<button data-ctl="web_fallback" data-val="${!web}">Web search ${web ? 'on' : 'off'}</button>`
     + `<span class="gap"></span><button data-ctl="screen" data-val='"${isFinal ? 'live' : 'final'}"'>${isFinal ? 'Back to live' : 'Final screen'}</button>`
     + '<button data-act="picker">New debate</button><button data-act="replay">Replay recorded debate</button><button data-act="stop">Stop replay</button>'
-    + '<button data-act="hide">Hide (H)</button>'
-    + (decs ? `<details ${$('admin').querySelector('details[open]') ? 'open' : ''}><summary>Why the referee is or isn’t speaking</summary>${decs}</details>` : '');
-  setHtml($('admin'), html);
+    + '<button data-act="hide">Hide (H)</button>');
+  $('admin-why').hidden = !decs;
+  setHtml($('decisions'), decs);
 }
 function draw() {
   queued = false;

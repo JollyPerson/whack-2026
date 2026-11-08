@@ -145,5 +145,21 @@ const LINE = {event: 'Interjection', id: 'i-1', text: 'Point of fact.'};
   p.live({event: 'TTSState', speaking: true, interjection_id: 'i-1', src: 'face:audio'});
   check('live TTSState still counts', p.speakingShown());
 }
+{ // 6. a new DirectorDecision never rebuilds the admin buttons under the operator's pointer (the click would be lost)
+  const p = page('?admin=1'); p.connect([p.snap({event: 'SessionStart', motion: 'm'})]); p.draw();
+  const box = p.holder('data-ctl="mute"'), writes = box && box.writes;
+  p.live({event: 'DirectorDecision', key: 'k1', kind: 'correction', action: 'held', reason: 'awaiting pause', text: 'x'});
+  p.draw();
+  check('decision: buttons untouched', box && p.holder('data-ctl="mute"') === box && box.writes === writes, box && box.id);
+  check('decision: listed with its veto', ((p.holder('data-ctl="veto"') || {}).innerHTML || '').includes('awaiting pause'));
+}
+{ // 7. "Enable audio" isn't rebuilt by the per-second cooldown countdown, and goes once clicked
+  const p = page('?audio=1'); p.connect(); p.live({event: 'DirectorStatus', cooldown_left_s: 10}); p.draw();
+  const box = p.holder('id="enable"'), writes = box && box.writes;
+  p.live({event: 'DirectorStatus', cooldown_left_s: 9}); p.draw();
+  check('countdown: Enable audio untouched', (!box || box.writes === writes) && !p.el('enable').hidden, box && box.id);
+  p.click('enable'); p.draw();
+  check('Enable audio hidden once clicked', p.el('enable').hidden);
+}
 console.log(failures ? `${failures} FAILED` : 'all passed');
 Deno.exit(failures ? 1 : 0);
