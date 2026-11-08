@@ -2,8 +2,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
+import sys
+import threading
 import time
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -119,3 +124,31 @@ def test_utterance_times_end_on_arrival_and_keep_the_sentence_length():
     assert (u["speaker"], u["text"], u["final"]) == ("mic9", "Hello.", True)
     assert u["t_end"] - u["t_start"] == pytest.approx(2.5)
     b.finish()
+
+
+# ----------------------------------------------------------------------------- end of input
+def test_end_of_input_pauses_the_last_speaker_before_closing(monkeypatch, capsys):
+    lines = [said("mic1", 0.0, 2.0, "First."), said("mic2", 2.5, 4.0, "Second.")]
+    monkeypatch.setattr(sys, "argv", ["bridge.py", "--dry-run"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO("".join(json.dumps(x) + "\n" for x in lines) + "not json\n"))
+    bridge.main()
+    sent = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(e["event"], e["speaker"]) for e in sent] == [("Utterance", "A"), ("Pause", "A"), ("Utterance", "B"),
+                                                          ("Pause", "B")]
+
+
+def test_close_says_how_many_events_never_went_out(monkeypatch, capsys):
+    release = threading.Event()
+
+    def stuck(req, timeout):
+        release.wait(5)
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", stuck)
+    pub = bridge.Publisher("http://x", "u", "")
+    for i in range(3):
+        pub.send({"event": "Pause", "speaker": "A", "t": i})
+    pub.close(timeout=0.2)
+    release.set()
+    pub.thread.join(5)
+    assert "3 event(s) unsent" in capsys.readouterr().err

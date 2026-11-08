@@ -53,9 +53,12 @@ class Publisher:
     def send(self, event: dict) -> None:
         self.queue.put(event)
 
-    def close(self) -> None:
+    def close(self, timeout: float = 10.0) -> None:
         self.queue.put(None)
-        self.thread.join(timeout=10)
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            # The None is still queued too, standing in for the event being sent right now.
+            print(f"bridge: exiting with {self.queue.qsize()} event(s) unsent", file=sys.stderr)
 
     def _run(self) -> None:
         while (event := self.queue.get()) is not None:
@@ -165,11 +168,10 @@ def main() -> None:
                     first_start, first_wall = end, time.time()
                 time.sleep(max(0.0, (end - first_start) - (time.time() - first_wall)))
             bridge.sentence(line)
-        if args.pace:
-            time.sleep(args.pause_after + 0.3)      # let the last speaker's Pause go out
     except KeyboardInterrupt:
         pass
     finally:
+        bridge.finish()                             # end of input: the last speaker has stopped too
         publisher.close()
 
 
