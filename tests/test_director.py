@@ -829,3 +829,16 @@ def test_time_control_by_side_alias_never_invents_a_speaker():
     assert [f[1:3] for f in fired(o)] == [("time", "B")]
     d, o = run(talk("A", 0, 2) + [(3, Control(flag="time", value="nobody")), (4, P("A", 4))])
     assert fired(o) == [] and list(d.st.sides) == ["A"]
+
+
+def test_restated_claim_replacing_a_pending_line_is_logged():
+    """Same canonical_key, new claim: the old candidate is logged superseded and the new text reaches D."""
+    ev = talk("A", 0, 9) + [(4, C("c1", "A", 3, canon="k")), (4.5, V("c1", "contradicted", .9, short_fact="crime fell 3 percent")),
+                            (8, C("c9", "A", 7, canon="k")), (8.5, V("c9", "contradicted", .9, short_fact="crime fell 5 percent")),
+                            (10, P("A", 10))]
+    _, o = run(ev)
+    cands = [(x.claim_id, x.text) for _, x in o if isinstance(x, DirectorDecision) and x.action == "candidate"]
+    assert cands == [("c1", "Point of fact: the ONS says crime fell 3 percent."),
+                     ("c9", "Point of fact: the ONS says crime fell 5 percent.")]
+    assert ("correction:k", "dropped", "superseded") in logs(o)
+    assert fired(o) == [(10, "correction", "A", "c9")] and lines(o)[0].text == cands[1][1]

@@ -328,6 +328,9 @@ def _add(st: State, cd: Cand, out: list, now: float, why: Optional[str] = None) 
         _log(st, out, cd, "skipped", why)
         return
     text = _text(st, cd, now)                     # before it is pending: a line that can't render never queues
+    old = st.pending.get(cd.key)
+    if old is not None and old.claim_id != cd.claim_id:
+        _log(st, out, old, "dropped", "superseded")   # a restated claim (same canonical_key) takes its place
     st.pending[cd.key] = cd
     _log(st, out, cd, "candidate", "new", text)   # text lets D pre-synthesise TTS
 
