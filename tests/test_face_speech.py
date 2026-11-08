@@ -534,10 +534,10 @@ async def test_a_poll_whose_client_hung_up_ends_and_takes_nothing(tmp_path):
             if any(s.name == "face:mate" for s in bus.subs):
                 break
             await asyncio.sleep(0.01)
-        assert [s.name for s in bus.subs] == ["face:mate"] and state_for(bus).polls == 1
+        assert [s.name for s in bus.subs] == ["face:mate"] and state_for(bus).mates["referee"].polls == 1
         hang_up.set()
         await asyncio.wait_for(dead, 2)                        # not after the 20 s wait
-        assert bus.subs == [] and state_for(bus).polls == 0
+        assert bus.subs == [] and state_for(bus).mates["referee"].polls == 0
         await c.post("/face/mate/dance", json={"title": "PET_DANCING_01"})
         live = (await c.get("/face/mate/next", params={"after": first["cursor"], "epoch": first["epoch"],
                                                        "wait": 1})).json()
@@ -606,12 +606,13 @@ def test_mate_status_up_on_poll_down_after_silence_only_on_change():
     sub = bus.subscribe("t", {"ModuleStatus"})
     face_run.watch_mate(bus, st, 100.0)
     assert sub.q.empty()                                       # Mate Engine never connected: no dot at all
-    st.seen = 100.0
+    ref = st.mates["referee"]
+    ref.seen = 100.0
     for now in (100.5, 101.0):
         face_run.watch_mate(bus, st, now)
-    st.polls = 1                                               # a long-poll in progress counts as alive
+    ref.polls = 1                                              # a long-poll in progress counts as alive
     face_run.watch_mate(bus, st, 120.0)
-    st.polls = 0
+    ref.polls = 0
     face_run.watch_mate(bus, st, 100.0 + speech.MATE_DOWN_S + 0.1)
     face_run.watch_mate(bus, st, 200.0)
     got = [(e.module, e.state) for e in [sub.q.get_nowait() for _ in range(sub.q.qsize())]]

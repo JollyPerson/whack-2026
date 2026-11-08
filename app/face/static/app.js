@@ -17,6 +17,7 @@ const LABELS = {supported: 'Supported', contradicted: 'Contradicted', missing_co
                 unverifiable: 'Unverifiable'};
 const ICONS = {supported: '✓', contradicted: '✗', missing_context: '~', unverifiable: '?'};
 const SIDE_NAMES = {prop: 'Proposition', opp: 'Opposition'};
+const BOTS = {for: 'For', against: 'Against'};   // the side bots (BotLine.persona): Prop's second and Opp's
 const sideClass = s => s === 'prop' || s === 'opp' ? s : 'noside';
 const host = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
@@ -27,7 +28,7 @@ let banner = null, pickerOpen = false, adminHidden = false, audioReady = false;
 function reset() {   // SessionStart wipes debate state; flags + module status are process-wide
   S = {session: null, sides: {}, names: {}, utts: new Map(), claims: new Map(), verdicts: new Map(), cards: new Map(),
        map: null, research: null, decisions: [], considered: new Set(), dstatus: null, interjections: [], tts: null, lastVerdict: null,
-       flags: S ? S.flags : {}, status: S ? S.status : {}};
+       bots: {}, flags: S ? S.flags : {}, status: S ? S.status : {}};
   banner = null;
 }
 function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionStart said otherwise
@@ -70,6 +71,7 @@ function apply(e, live) {
       if (!e.speaking && banner) banner.until = Math.min(banner.until, Date.now() + 4000);
       break;
     case 'Control': S.flags[e.flag] = e.value; if (live) onControl(e); break;
+    case 'BotLine': if (Object.hasOwn(BOTS, e.persona)) S.bots[e.persona] = {e, live}; break;   // live: animates in
     case 'Interjection':
       S.interjections.push(e);
       if (live && e.seq > snapSeq) {           // NEVER replay history: a refresh mid-debate stays silent
@@ -424,6 +426,28 @@ function drawFinal() {
     return `<div class="line"><span class="meta">${to}</span>${esc(e.text)}</div>`;
   }).join('') || '<p class="empty">The referee stayed silent.</p>') + '</div>');
 }
+// Each side bot's latest line, under its side's colour. The strip stays hidden until a bot has spoken (bots off: no
+// change). Model text, so textContent only. "AI knowledge" = an unsourced challenge; a sourced rebut names its source.
+function drawBots() {
+  $('bots').hidden = !Object.keys(S.bots).length || S.flags.screen === 'final';
+  for (const [persona, label] of Object.entries(BOTS)) {
+    const box = $(`bot-${persona}`), b = S.bots[persona], key = b ? b.e.id : '';
+    if (box.dataset.key === key) continue;    // unchanged: no rebuild, no animation
+    box.dataset.key = key;
+    const n = document.createElement('div');
+    const part = (tag, cls, text) => { const x = n.appendChild(document.createElement(tag)); x.className = cls; x.textContent = text; };
+    n.className = b && b.live ? 'line enter' : 'line';
+    part('b', 'who', label);
+    if (!b) part('span', 'text empty', 'Nothing yet');
+    else {
+      const e = b.e, ev = e.sourced && e.kind === 'rebut' && (e.evidence || [])[0];
+      if (!e.sourced && e.kind === 'challenge') part('span', 'tag', 'AI knowledge');
+      part('span', 'text', e.text);
+      if (ev && (ev.title || host(ev.url))) part('span', 'src', `Source: ${ev.title || host(ev.url)}`);
+    }
+    box.replaceChildren(n);
+  }
+}
 function drawBanner() {
   const on = banner && (Date.now() < banner.until || voiceOn(banner.e.id));
   $('banner').hidden = !on;
@@ -452,7 +476,8 @@ function drawAdmin() {
   $('admin').hidden = !ADMIN || adminHidden;
   if (!ADMIN || adminHidden) return;
   const muted = S.dstatus ? S.dstatus.muted : !!S.flags.mute, aggr = S.dstatus ? S.dstatus.aggr : 3;
-  const isFinal = S.flags.screen === 'final', web = S.flags.web_fallback !== false;
+  const isFinal = S.flags.screen === 'final', web = S.flags.web_fallback !== false, bots = S.flags.bots !== false;
+  const hasBots = (MODULES.bots && MODULES.bots !== 'off') || Object.keys(S.bots).length > 0;
   const decs = S.decisions.slice(-6).reverse().map(x => `<div class="dec">${esc(x.action)} ${esc(x.kind)} · ${esc(x.reason)}`
     + `${x.text ? ` · “${esc(x.text)}”` : ''}${['candidate', 'held'].includes(x.action) ? ` <button data-ctl="veto" data-val="${esc(JSON.stringify(x.key))}">veto</button>` : ''}</div>`).join('');
   // Separate nodes: a new decision must not rebuild the buttons under the operator's pointer (the click is lost).
@@ -460,6 +485,7 @@ function drawAdmin() {
     + '<button data-ctl="force_next" data-val="true">Say next now</button>'
     + `<span class="gap">Talkative</span>${[1, 2, 3, 4, 5].map(n => `<button data-ctl="aggr" data-val="${n}" class="${n === aggr ? 'on' : ''}">${n}</button>`).join('')}`
     + `<button data-ctl="web_fallback" data-val="${!web}">Web search ${web ? 'on' : 'off'}</button>`
+    + (hasBots ? `<button data-ctl="bots" data-val="${!bots}">Side bots ${bots ? 'on' : 'off'}</button>` : '')
     + `<span class="gap"></span><button data-ctl="screen" data-val='"${isFinal ? 'live' : 'final'}"'>${isFinal ? 'Back to live' : 'Final screen'}</button>`
     + '<button data-act="picker">New debate</button><button data-act="replay">Replay recorded debate</button><button data-act="stop">Stop replay</button>'
     + '<button data-act="hide">Hide (H)</button>');
@@ -473,6 +499,7 @@ function draw() {
   $('final').hidden = !isFinal;
   drawHeader();
   if (isFinal) drawFinal(); else drawLive();
+  drawBots();
   drawBanner();
   drawFooter();
   drawAdmin();
@@ -529,6 +556,7 @@ if (ADMIN) {
     else if (/^[1-5]$/.test(k)) control('aggr', +k);
     else if (k === 'w') control('web_fallback', S.flags.web_fallback === false);
     else if (k === 'i') control('interims', S.flags.interims === false);
+    else if (k === 'b') control('bots', S.flags.bots === false);
     else if (k === 'h') { adminHidden = !adminHidden; render(); }
     else return;
     ev.preventDefault();
