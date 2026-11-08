@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -30,6 +31,9 @@ import urllib.request
 
 PAUSE_GAP = 1.2         # added to a sentence's length to get the wait for the next: the brain's PauseSynth gap
 MAX_PAUSE_GAP = 15.0    # ...capped, like the brain's
+BLEED_OVERLAP = 0.7     # share of a sentence's words the other mic sent just before: bleed, like the brain's BleedGuard
+BLEED_WINDOW = 10.0     # ...within this many seconds
+WORD = re.compile(r"[a-z0-9]+")
 
 
 def parse_map(text: str) -> dict[str, str]:
@@ -117,6 +121,7 @@ class Bridge:
         self.publisher, self.speakers, self.pause_after = publisher, speakers, pause_after
         self.lock = threading.Lock()
         self.due: dict[str, float] = {}         # speaker mid-turn -> wall time their Pause is due
+        self.heard: list[tuple[str, float, set]] = []   # recent sentences: (speaker, arrival, words)
         self.stopped = threading.Event()
         threading.Thread(target=self._watch, daemon=True, name="pauses").start()
 
@@ -132,9 +137,12 @@ class Bridge:
         length = max(0.0, float(line.get("end", 0) or 0) - float(line.get("start", 0) or 0))
         gap = max(self.pause_after, min(length + PAUSE_GAP, MAX_PAUSE_GAP))
         with self.lock:
-            for other in [s for s in self.due if s != speaker]:     # the other speaker starting ends their turn
-                self._pause(other, now)
-            self.due[speaker] = now + gap
+            # Both mics hear both debaters: a copy of the other one's sentence is not this speaker starting. The
+            # brain drops it as bleed; here it must not end the other's turn (a Pause lets the Moderator cut in).
+            if not self._bleed(speaker, set(WORD.findall(text.lower())), now):
+                for other in [s for s in self.due if s != speaker]:     # the other speaker starting ends their turn
+                    self._pause(other, now)
+                self.due[speaker] = now + gap
         # ears.py gives stream-relative times, so the end is stamped on arrival and the start set back by the
         # sentence's length. The latency meter then counts from when the sentence reached us.
         self.publisher.send({"event": "Utterance", "speaker": speaker, "text": text, "final": True,
@@ -153,6 +161,14 @@ class Bridge:
         with self.lock:
             for speaker in list(self.due):
                 self._pause(speaker, now)
+
+    def _bleed(self, speaker: str, words: set, now: float) -> bool:
+        self.heard = [h for h in self.heard if now - h[1] <= BLEED_WINDOW]
+        if len(words) >= 4 and any(other != speaker and len(words & theirs) / len(words) >= BLEED_OVERLAP
+                                   for other, _, theirs in self.heard):
+            return True
+        self.heard.append((speaker, now, words))
+        return False
 
     def _pause(self, speaker: str, now: float) -> None:
         del self.due[speaker]

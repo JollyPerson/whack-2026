@@ -102,6 +102,25 @@ def test_the_other_speaker_starting_ends_the_first_ones_turn_at_once():
     b.finish()
 
 
+
+def test_the_other_mic_hearing_the_same_sentence_does_not_end_the_turn(clock):
+    # Both mics in one room: mic2 also transcribes A. The brain drops that copy as bleed, but a Pause for A sent
+    # on it would still open the floor mid-turn and let the Moderator talk over A.
+    pub = FakePublisher()
+    b = bridge.Bridge(pub, {"mic1": "A", "mic2": "B"}, 6.0)
+    b.sentence(said("mic1", 0.0, 3.0, "The economy grew by three percent last year."))
+    clock[0] += 1.5
+    b.sentence(said("mic2", 0.2, 3.1, "the economy grew by 3 percent last year"))
+    assert pub.kinds() == [("Utterance", "A"), ("Utterance", "B")]       # still forwarded: the brain decides
+    b.check(1000.0 + 6.0)
+    assert pub.kinds() == [("Utterance", "A"), ("Utterance", "B"), ("Pause", "A")]
+    b.check(1000.0 + 60.0)
+    assert len(pub.events) == 3                                         # no turn for B to end
+    b.sentence(said("mic2", 4.0, 6.0, "That figure is simply wrong, I'm afraid."))
+    b.sentence(said("mic1", 6.5, 8.0, "It is right."))
+    assert pub.kinds()[3:] == [("Utterance", "B"), ("Pause", "B"), ("Utterance", "A")]
+    b.finish()
+
 def test_more_speech_pushes_the_pause_back(clock):
     pub = FakePublisher()
     b = bridge.Bridge(pub, {"mic1": "A"}, 6.0)
