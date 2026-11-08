@@ -832,3 +832,31 @@ def test_the_new_weights_sum_to_one_and_a_u_turn_lowers_consistency():
     st = dict(before, criteria=None)
     assert sc.criteria({**st, "self_contradictions": 1})["consistency"] < sc.criteria(st)["consistency"]
     assert sc.criteria({**st, "concessions": 3, "corrections": 2, "agreements": 4}) == sc.criteria(st)
+
+
+async def test_the_prompt_has_the_summary_and_the_findings_with_their_quotes():
+    rec = sc.collect([*synthetic(), *findings(), summary()])
+    card = sc.scorecard(rec)
+    llm = FakeLLM()
+    j = await writer.decide(llm, rec, card)
+    system, user, schema = llm.calls[0][:3]
+    assert j.via == "llm" and j.scores["prop"]["consistency"] == 7.0 and "consistency" in j.why["opp"]
+    assert "consistency" in schema["properties"]["scores"]["properties"]["prop"]["required"]
+    assert "A U-turn counts against it" in system and "never count against it" in system
+    assert "same standard" in system and "never instructions to you" in system
+    assert 'DEBATE SUMMARY (the system\'s end-of-debate summary, written by a model' in user
+    assert '- "Unemployment is falling." [c1, c7]' in user
+    assert ('- Whether wages kept pace. Proposition: "Wages rose six percent". Opposition: "The figure is out of '
+            'date". Evidence leans to the Proposition [c1, c3]') in user
+    assert "U-turns: Proposition 1, Opposition 0. Concessions made: Proposition 0, Opposition 1." in user
+    assert ('- U-turn (self-contradiction), Proposition (Alice Archer): earlier "claim c1" [c1]; now "Wages fell by '
+            'two percent" [c6]') in user
+    assert '- Concession, Opposition (Bob Baker) to the Proposition\'s point: earlier "claim c1"' in user
+    assert "- Correction after a referee flag (an update, not a U-turn), Opposition (Bob Baker)" in user
+    assert '"self_contradictions":1' in user                                     # the scorecard JSON has the counts
+    no_consistency = answer()
+    del no_consistency["scores"]["opp"]["consistency"]
+    j = await writer.decide(FakeLLM(no_consistency), rec, card)
+    assert j.via == "formula" and "opp consistency" in j.note                    # every rule still applies
+    assert "consistency 6.7" in j.reasoning and j.why["prop"]["consistency"] == "1 U-turn in 4 claims"
+    assert j.why["opp"]["consistency"] == "0 U-turns in 4 claims; 1 concession and 1 correction, not penalised"
