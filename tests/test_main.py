@@ -763,3 +763,12 @@ def test_ws_subscribe_accepts_one_name_and_rejects_non_lists(make_client):
         ws.send_json({"event": "Pause", "speaker": "A"})
         ws.send_json({"event": "Claim", "id": "c2", "speaker": "A", "text": "x"})
         assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["id"] == "c2"   # filter kept as it was
+
+
+def test_debug_history_n_zero_or_negative_is_empty(make_client):
+    """history[-0:] is the whole list (up to 5000 rows dumped on the loop); history[--5:] skipped the first rows."""
+    c = make_client()
+    for i in range(3):
+        c.post("/publish", json={"event": "Pause", "speaker": f"p{i}"})
+    assert len(c.get("/debug/history?n=2").json()) == 2
+    assert c.get("/debug/history?n=0").json() == [] and c.get("/debug/history?n=-5").json() == []

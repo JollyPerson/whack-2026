@@ -352,7 +352,7 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
 
     @app.get("/debug/history")
     async def debug_history(n: int = 200):
-        return [e.model_dump(mode="json") for e in bus.history[-n:]]
+        return [e.model_dump(mode="json") for e in bus.history[-n:]] if n > 0 else []   # [-0:] is everything
 
     @app.get("/debug")
     async def debug_page():
