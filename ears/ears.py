@@ -297,6 +297,13 @@ def transcribe_source(model, source_name, state, args, output_file):
     if audio is None or len(audio) < SAMPLE_RATE:
         return
 
+    # Nothing new since the last run: parec delivers in bursts, and nothing
+    # at all once a mic is gone. The same audio decodes to the same words.
+    if window_end == state.get("transcribed_until"):
+        return
+
+    state["transcribed_until"] = window_end
+
     segments, info = model.transcribe(
         audio,
         language="en",

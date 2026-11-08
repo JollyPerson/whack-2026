@@ -84,6 +84,17 @@ def test_transcribe_source_tells_the_buffer_where_the_window_starts(monkeypatch)
     assert (a or (kw.get("window_start"),))[0] == pytest.approx(2.0)
 
 
+def test_audio_already_transcribed_is_not_transcribed_again():
+    # parec delivers in bursts (and not at all once a mic is gone): the same audio decodes to the same words.
+    state, model = source_state(), FakeModel([(" Hi", 0.5, 0.8)])
+    for _ in range(3):
+        ears.transcribe_source(model, "mic1", state, ARGS, None)
+    assert model.calls == 1
+    state["audio"].add(np.zeros(ears.SAMPLE_RATE // 2, dtype=np.float32))
+    ears.transcribe_source(model, "mic1", state, ARGS, None)
+    assert model.calls == 2
+
+
 # ----------------------------------------------------------------------------- stitching overlapping windows
 @pytest.mark.parametrize("second_window_start", [7.5, 9.9])   # the word well inside the window, or in its head
 def test_a_word_seen_again_with_jittered_timestamps_is_one_word(second_window_start):
