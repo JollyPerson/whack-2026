@@ -69,7 +69,9 @@ def state_for(bus) -> FaceState:
 def to_cmds(ev, tts: TTS, now: float) -> list[dict]:
     if ev.event == "Interjection":
         return [] if now - ev.ts > SAY_TTL_S else [cmd("say", id=ev.id, text=ev.text, audio=tts.url_for(ev.text))]
-    if ev.event == "TTSState":                 # the ?audio=1 tab is the one player: the mouth follows it
+    if ev.event == "TTSState":                 # the ?audio=1 tab is the one player: the mouth follows it, never a
+        if ev.src.split(":")[0] == "replay":   # recorded tab's TTSState (./run.sh replay of a log made with one)
+            return []
         return [cmd("talk", id=ev.interjection_id or "", on=bool(ev.speaking))]
     if ev.event == "SessionStart":
         return [cmd("stop", clear=True)]

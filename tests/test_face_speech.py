@@ -6,8 +6,10 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -19,12 +21,12 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
-from app.bus import Bus
+from app.bus import Bus, replay
 from app.face import run as face_run, speech, tts as ttsmod
 from app.face.speech import state_for
 from app.face.tts import TTS, ElevenHTTP, ElevenTTD, Espeak, Provider, TTSError, build_tts, speakable
 from app.main import build_app
-from app.schemas import DirectorDecision, Interjection
+from app.schemas import DirectorDecision, Interjection, TTSState
 from tests.test_main import make_client  # noqa: F401  (fixture)
 
 KEYS = {"op", "id", "text", "audio", "title", "on", "clear"}
@@ -93,6 +95,23 @@ async def test_chain_falls_through_and_fails_loudly(tmp_path):
     assert path and bad.calls == good.calls == ["Hello."]
     with pytest.raises(TTSError):
         await TTS([Fake("bad", fail=True)], cache_dir=tmp_path).wav("Other.")
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root writes anywhere")
+async def test_a_cache_write_failure_is_not_a_provider_failure(tmp_path, caplog):
+    """cache/tts not writable (root-owned after a sudo run, disk full): the line was synthesised fine, so paying the
+    next provider for it again can't help, and the log must name the real cause."""
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    first, second = Fake("first"), Fake("second")
+    try:
+        with pytest.raises(TTSError):
+            await TTS([first, second], cache_dir=ro / "tts").wav("Hello.")
+    finally:
+        ro.chmod(0o700)
+    assert first.calls == ["Hello."] and second.calls == []
+    assert "tts cache write failed: PermissionError" in caplog.text and "tts first failed" not in caplog.text
 
 
 def test_speakable_rewrites_symbols_for_the_ear():
@@ -168,11 +187,35 @@ async def test_eleven_ttd_quiet_gap_and_error():
 
     async with serve(handler, "127.0.0.1", 0, logger=_quiet()) as server:
         url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/"
-        mode["error"] = False
-        assert await ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.1).synth("Hi.") == b"\x07\x08"
+        mode["error"] = False                  # audio, then silence with the socket open: a stall, not the end
+        with pytest.raises(TTSError, match="stalled"):
+            await ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.1).synth("Hi.")
         mode["error"] = True
         with pytest.raises(TTSError, match="quota_exceeded"):
             await ElevenTTD("k", "v", "m", 0.5, url=url).synth("Hi.")
+
+
+async def test_a_stalled_eleven_stream_is_not_cached_as_the_line(tmp_path):
+    """Venue wifi stalls mid-line: the first chunk lands, then nothing for longer than quiet_s. That half line must
+    not become the line's cached audio for good: the chain moves on, and later requests hit the complete line."""
+    from websockets.asyncio.server import serve
+    connections = []
+
+    async def handler(ws):
+        connections.append(ws)
+        for _ in range(4):
+            await ws.recv()
+        await ws.send(json.dumps({"audio": base64.b64encode(b"\x07\x08" * 100).decode()}))   # then the stall
+        await ws.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0, logger=_quiet()) as server:
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/"
+        eleven, http = ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.2), Fake("eleven_http")
+        tts = TTS([eleven, http], cache_dir=tmp_path)
+        path = await tts.wav("Point of fact.")
+        assert path == tts._path(http, "Point of fact.") and not tts._path(eleven, "Point of fact.").exists()
+        assert len(path.read_bytes()) == 44 + 4800 and http.calls == ["Point of fact."]
+        assert await tts.wav("Point of fact.") == path and len(connections) == 1                # a hit from now on
 
 
 async def test_eleven_http_against_a_mock_transport():
@@ -203,6 +246,51 @@ async def test_espeak_wav_is_converted_to_24k_mono(tmp_path):
     exe.chmod(0o755)
     pcm = await Espeak(str(exe)).synth("Hello.")
     assert len(pcm) == 2 * 12000 and set(pcm[i:i + 2] for i in range(0, len(pcm), 2)) == {b"\x10\x00"}
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _until_dead(pid: int, within: float = 3.0) -> bool:
+    for _ in range(int(within / 0.05)):
+        if not _alive(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def test_a_hung_espeak_is_killed_on_timeout_and_on_cancel(tmp_path):
+    """A stalled espeak-ng (audio backend, speech-dispatcher) must fail the line, so it can be retried, and never be
+    left running: neither when it times out nor when its task is cancelled (shutdown)."""
+    exe, pids = tmp_path / "espeak-ng", tmp_path / "pids"
+    exe.write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                   f"open({str(pids)!r}, 'a').write(f'{{os.getpid()}}\\n')\nsys.stdin.read()\ntime.sleep(3600)\n")
+    exe.chmod(0o755)
+    started = lambda: [int(x) for x in pids.read_text().split()] if pids.exists() else []   # noqa: E731
+    try:
+        hung = Espeak(str(exe))
+        hung.timeout = 0.3
+        with pytest.raises(TTSError, match="every TTS provider failed"):
+            await TTS([hung], cache_dir=tmp_path / "tts", miss_wait=3).wav("Hello.")
+        assert await _until_dead(started()[0])
+        task = asyncio.create_task(Espeak(str(exe)).synth("Hello again."))
+        for _ in range(100):
+            if len(started()) == 2:
+                break
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _until_dead(started()[1])
+    finally:
+        for pid in started():
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
 
 
 # ----------------------------------------------------------------------------- /face/tts
@@ -325,6 +413,23 @@ def test_events_map_to_commands(make_client, tmp_path):
     assert poll(c, body["cursor"], ep)["cmds"] == [{**blank, "op": "stop", "clear": True}]   # SessionStart
 
 
+async def test_replayed_tts_state_never_moves_the_mouth(tmp_path):
+    """./run.sh replay re-publishes a recorded log's TTSState (src "replay:face:audio") while the live ?audio=1 tab
+    speaks the same replayed lines and sends its own: only this process's player drives the avatar's mouth."""
+    log = tmp_path / "golden.jsonl"
+    rows = [{"event": "SessionStart", "motion": "m", "ts": 100.0},
+            {"event": "Interjection", "id": "i-1", "text": "Point of fact.", "ts": 100.1, "src": "brain"},
+            {"event": "TTSState", "speaking": True, "interjection_id": "i-1", "ts": 100.2, "src": "face:audio"},
+            {"event": "TTSState", "speaking": False, "interjection_id": "i-1", "ts": 100.3, "src": "face:audio"},
+            {"event": "TTSState", "speaking": False, "ts": 100.4}]                  # no src: replayed as "replay"
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    bus, tts = Bus(), TTS([], cache_dir=tmp_path)
+    assert await replay(bus, log, speed=20) == 5
+    bus.publish(TTSState(speaking=True, interjection_id="i-1"), src="face:audio")   # the live player
+    cmds = [(c["op"], c["on"]) for e in bus.history for c in speech.to_cmds(e, tts, time.time())]
+    assert cmds == [("stop", False), ("say", False), ("talk", True)]
+
+
 def test_say_audio_is_empty_without_a_server_voice(make_client, tmp_path):
     c = make_client()
     _with_tts(c, tmp_path, [])
@@ -374,6 +479,32 @@ def test_app_js_voice_rules():
     r = subprocess.run(["deno", "run", "--allow-read", str(root / "tests/js/face_voice.js"),
                         str(root / "app/face/static/app.js")], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
+
+
+@pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run app.js")
+def test_app_js_page_rules():
+    """The whole dashboard against a fake DOM: a lost TTSState false is resent on reconnect or beaconed on close, a
+    stuck "Speaking" expires, SessionStart cuts the voice, replayed TTSState is ignored, and the admin buttons and
+    Enable audio are never rebuilt under the pointer (tests/js/face_page.js)."""
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run(["deno", "run", "--allow-read", str(root / "tests/js/face_page.js"),
+                        str(root / "app/face/static/app.js")], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
+
+
+def test_the_audio_tabs_closing_beacon_ends_the_line(make_client, tmp_path):
+    """app.js ends a line still audible when the ?audio=1 tab closes with navigator.sendBeacon('/publish', json): a
+    text/plain body and no x-src header. It must land as the audio tab's TTSState and close the avatar's mouth."""
+    c = make_client()
+    _with_tts(c, tmp_path, [])
+    cur, ep = resync(c)
+    c.post("/publish", json={"event": "TTSState", "speaking": True, "interjection_id": "i-1"},
+           headers={"x-src": "face:audio"})
+    beacon = {"event": "TTSState", "speaking": False, "interjection_id": "i-1", "src": "face:audio"}
+    r = c.post("/publish", content=json.dumps(beacon), headers={"content-type": "text/plain;charset=UTF-8"})
+    assert r.status_code == 200 and r.json()[0]["src"] == "face:audio"
+    assert [(x["op"], x["id"], x["on"]) for x in poll(c, cur, ep)["cmds"]] == [("talk", "i-1", True),
+                                                                               ("talk", "i-1", False)]
 
 
 async def test_a_poll_whose_client_hung_up_ends_and_takes_nothing(tmp_path):

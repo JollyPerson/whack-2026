@@ -7,6 +7,7 @@ const BANNER_MS = 9000;         // how long a line stays on screen once it has b
 const STALE_CHECK_S = 20;       // a claim still unanswered after this stops pulsing "checking…"
 const STALE_SPEECH_MS = 15000;  // a queued line this old is no longer worth saying
 const INTERIM_MAX_S = 6;         // an interim that never got its final (dropped stream, stopped replay) fades out
+const TTS_STUCK_S = 20;         // a TTSState{speaking:true} this old lost its false (audio tab closed or cut off)
 
 if (Q.get('theme') === 'light') document.documentElement.dataset.theme = 'light';   // for a washed-out projector
 const $ = id => document.getElementById(id);
@@ -34,11 +35,15 @@ function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionS
   return S.sides[spk];
 }
 const nameOf = spk => S.names[spk] || spk;
+// The referee is audible now (saying line `id`, if given). A speaking:true whose false never came stops counting.
+const voiceOn = id => !!(S.tts && S.tts.speaking && Date.now() / 1000 - S.tts.ts < TTS_STUCK_S
+                         && (id === undefined || S.tts.interjection_id === id));
 
 // One reducer for snapshot history (live=false) and live events, so a refresh rebuilds the same state.
 function apply(e, live) {
   switch (e.event) {
     case 'SessionStart':
+      if (live && AUDIO) cutSpeech();          // a new debate: the old one's line and queue go (as on Mate Engine)
       reset(); S.session = e;
       for (const [id, sp] of Object.entries(e.speakers || {})) {
         if (sp.side) S.sides[id] = sp.side;
@@ -60,6 +65,7 @@ function apply(e, live) {
     case 'DirectorDecision': S.considered.add(e.key || e.claim_id); S.decisions.push(e); S.decisions.splice(0, S.decisions.length - 30); break;
     case 'DirectorStatus': S.dstatus = e; break;
     case 'TTSState':
+      if (/^replay(:|$)/.test(e.src || '')) break;   // a recorded tab's voice (./run.sh replay): only this room's counts
       S.tts = e;
       if (!e.speaking && banner) banner.until = Math.min(banner.until, Date.now() + 4000);
       break;
@@ -78,7 +84,10 @@ function apply(e, live) {
 function connect() {
   setConn('connecting');
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => { backoff = 500; setConn('open'); };
+  ws.onopen = () => {
+    backoff = 500; setConn('open');
+    if (ttsWant && ttsWant !== ttsSent) ttsState(ttsWant.speaking, ttsWant.interjection_id);   // missed while down
+  };
   ws.onmessage = m => {
     let e;
     try { e = JSON.parse(m.data); } catch { return; }
@@ -104,8 +113,19 @@ function send(msg) {
   return false;
 }
 const control = (flag, value) => send({op: 'control', flag, value});
-const ttsState = (speaking, id) => send({op: 'publish', src: 'face:audio',
-                                         event: {event: 'TTSState', speaking, interjection_id: id ?? null}});
+// The bus must hear how each line ends, or every view (and the avatar's mouth) stays "Speaking": a TTSState the socket
+// was down for is sent on reconnect, and a line still audible when the tab closes or refreshes is ended by a beacon.
+let ttsWant = null, ttsSent = null;            // the TTSState this tab means, and the last one the bus got
+function ttsState(speaking, id) {
+  ttsWant = {event: 'TTSState', speaking, interjection_id: id ?? null};
+  if (send({op: 'publish', src: 'face:audio', event: ttsWant})) ttsSent = ttsWant;
+}
+window.addEventListener('pagehide', () => {
+  if (ttsSent && ttsSent.speaking && navigator.sendBeacon) {
+    navigator.sendBeacon('/publish', JSON.stringify({...ttsSent, speaking: false, src: 'face:audio'}));
+  }
+  ttsWant = ttsSent = null;
+});
 function setConn(s) { $('conn').className = `dot ${s}`; $('conn').title = `websocket ${s}: ${WS_URL}`; }
 
 // ------------------------------------------------------------------ Moderator voice (?audio=1 only)
@@ -331,9 +351,10 @@ function drawHeader() {
   setHtml($('meter'), `<div class="hero"><b>${secs(last > 0 ? last : null)}</b><span>last claim checked after it was said</span></div>`
     + `<div class="meter-side">${stagesHtml(S.lastVerdict)}<div class="median">Median <b>${secs(pct(delays, .5))}</b> over ${delays.length} verdict${delays.length === 1 ? '' : 's'}</div></div>`);
   setHtml($('referee'), refereeHtml());
+  $('enable').hidden = !AUDIO || audioReady;   // its own node: the cooldown countdown re-renders #referee every second
 }
 function refereeHtml() {
-  const d = S.dstatus, speaking = S.tts && S.tts.speaking;
+  const d = S.dstatus, speaking = voiceOn();
   const why = {nothing_pending: ['listening', 'Listening'], awaiting_pause: ['waiting', 'Waiting for a pause'],
                floor_closed: ['waiting', 'Waiting for a pause'], own_tts: ['speaking', 'Speaking'], muted: ['muted', 'Muted']};
   const [cls, text] = speaking ? ['speaking', 'Speaking']
@@ -343,8 +364,7 @@ function refereeHtml() {
     : why[d.blocked] || ['listening', 'Listening'];
   const spoke = S.interjections.length, seen = S.considered.size;
   const record = seen ? `<span class="record">Considered ${seen} point${seen === 1 ? '' : 's'}, spoke ${spoke} time${spoke === 1 ? '' : 's'}</span>` : '';
-  const audio = !AUDIO || audioReady ? '' : '<button id="enable" class="primary">Enable audio</button>';
-  return `<span class="state ${cls}">${bars}<b>Referee</b> ${esc(text)}</span>${record}${audio}`;
+  return `<span class="state ${cls}">${bars}<b>Referee</b> ${esc(text)}</span>${record}`;
 }
 const bars = '<span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>';
 function drawLive() {
@@ -405,13 +425,13 @@ function drawFinal() {
   }).join('') || '<p class="empty">The referee stayed silent.</p>') + '</div>');
 }
 function drawBanner() {
-  const on = banner && (Date.now() < banner.until || (S.tts && S.tts.speaking && S.tts.interjection_id === banner.e.id));
+  const on = banner && (Date.now() < banner.until || voiceOn(banner.e.id));
   $('banner').hidden = !on;
   document.body.classList.toggle('referee-on', !!on);
   if (!on) return;
   const e = banner.e, ev = e.evidence && e.evidence[0], url = ev && safeUrl(ev.url);
   const to = e.target ? ` to ${esc(nameOf(e.target))}` : '', claim = e.claim_id && S.claims.get(e.claim_id);
-  const talking = S.tts && S.tts.speaking && S.tts.interjection_id === e.id;
+  const talking = voiceOn(e.id);
   setHtml($('banner'), `<span class="label ${talking ? 'speaking' : ''}">${bars}Referee${to}</span><span class="line">${esc(e.text)}</span>`
     + (claim ? `<span class="src">On: ${esc(claim.text)}</span>` : '')
     + (url ? `<span class="src">Source: ${esc(ev.title || host(url))} · ${esc(host(url))}</span>` : ''));
@@ -435,15 +455,16 @@ function drawAdmin() {
   const isFinal = S.flags.screen === 'final', web = S.flags.web_fallback !== false;
   const decs = S.decisions.slice(-6).reverse().map(x => `<div class="dec">${esc(x.action)} ${esc(x.kind)} · ${esc(x.reason)}`
     + `${x.text ? ` · “${esc(x.text)}”` : ''}${['candidate', 'held'].includes(x.action) ? ` <button data-ctl="veto" data-val="${esc(JSON.stringify(x.key))}">veto</button>` : ''}</div>`).join('');
-  const html = `<button data-ctl="mute" data-val="${!muted}" class="${muted ? 'on' : ''}">${muted ? 'Unmute' : 'Mute'}</button>`
+  // Separate nodes: a new decision must not rebuild the buttons under the operator's pointer (the click is lost).
+  setHtml($('admin-controls'), `<button data-ctl="mute" data-val="${!muted}" class="${muted ? 'on' : ''}">${muted ? 'Unmute' : 'Mute'}</button>`
     + '<button data-ctl="force_next" data-val="true">Say next now</button>'
     + `<span class="gap">Talkative</span>${[1, 2, 3, 4, 5].map(n => `<button data-ctl="aggr" data-val="${n}" class="${n === aggr ? 'on' : ''}">${n}</button>`).join('')}`
     + `<button data-ctl="web_fallback" data-val="${!web}">Web search ${web ? 'on' : 'off'}</button>`
     + `<span class="gap"></span><button data-ctl="screen" data-val='"${isFinal ? 'live' : 'final'}"'>${isFinal ? 'Back to live' : 'Final screen'}</button>`
     + '<button data-act="picker">New debate</button><button data-act="replay">Replay recorded debate</button><button data-act="stop">Stop replay</button>'
-    + '<button data-act="hide">Hide (H)</button>'
-    + (decs ? `<details ${$('admin').querySelector('details[open]') ? 'open' : ''}><summary>Why the referee is or isn’t speaking</summary>${decs}</details>` : '');
-  setHtml($('admin'), html);
+    + '<button data-act="hide">Hide (H)</button>');
+  $('admin-why').hidden = !decs;
+  setHtml($('decisions'), decs);
 }
 function draw() {
   queued = false;

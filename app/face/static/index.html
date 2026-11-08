@@ -13,7 +13,7 @@
   <div class="title">
     <p class="eyebrow">Debate Referee <span id="conn" class="dot" title="websocket"></span> <span id="mode"></span></p>
     <h1 id="motion">Waiting for a motion</h1>
-    <div id="referee" class="referee"></div>
+    <div class="referee"><span id="referee" style="display: contents"></span><button id="enable" class="primary" hidden>Enable audio</button></div>
     <div id="research" hidden><span id="research-text"></span><div class="bar"><div id="research-bar"></div></div></div>
   </div>
   <div id="meter" class="meter" aria-label="Latency"></div>
@@ -48,7 +48,10 @@
   <span id="modules" class="modules"></span>
 </footer>
 
-<div id="admin" class="admin" hidden></div>
+<div id="admin" class="admin" hidden>
+  <span id="admin-controls" style="display: contents"></span>
+  <details id="admin-why" hidden><summary>Why the referee is or isn’t speaking</summary><div id="decisions"></div></details>
+</div>
 
 <div id="picker" class="picker" hidden>
   <form id="session">
