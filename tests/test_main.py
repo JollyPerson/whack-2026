@@ -745,3 +745,21 @@ async def test_ws_handler_and_its_subscriber_end_when_the_client_leaves_in_a_qui
     finally:
         task.cancel()
         bus.close()
+
+
+def test_ws_subscribe_accepts_one_name_and_rejects_non_lists(make_client):
+    """{"events": "Claim"} became the set {'C','l','a','i','m'}: everything was filtered out, with no Error frame."""
+    c = make_client()
+    with c.websocket_connect("/ws") as ws:
+        recv(ws)
+        ws.send_json({"op": "subscribe", "events": "Claim"})
+        ws.send_json({"event": "Pause", "speaker": "A"})                     # frames are handled in order: a barrier
+        ws.send_json({"event": "Claim", "id": "c1", "speaker": "A", "text": "x"})
+        assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["event"] == "Claim"
+        for bad in ({"Claim": 1}, ["Claim", 3], 7):
+            ws.send_json({"op": "subscribe", "events": bad})
+            err = recv_until(ws, lambda m: m["event"] in ("Error", "Pause", "Claim"), 3)
+            assert err["event"] == "Error" and err["op"] == "subscribe"
+        ws.send_json({"event": "Pause", "speaker": "A"})
+        ws.send_json({"event": "Claim", "id": "c2", "speaker": "A", "text": "x"})
+        assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["id"] == "c2"   # filter kept as it was

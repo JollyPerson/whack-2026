@@ -186,7 +186,12 @@ def _ws_message(bus: Bus, sub, m: Any) -> None:
     elif op == "control":
         bus.publish(Control.model_validate(body), src="dashboard")
     elif op == "subscribe":
-        sub.events = set(m.get("events") or [])
+        names = m.get("events") or []
+        if isinstance(names, str):                   # "Claim" would otherwise filter on {'C', 'l', 'a', 'i', 'm'}
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError('"events" must be a list of event names, e.g. ["Claim", "Verdict"] (empty = all)')
+        sub.events = set(names)
     else:
         raise ValueError(f"unknown op {op!r} - use publish|session_start|control|subscribe")
 
