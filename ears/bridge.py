@@ -9,13 +9,15 @@ the pipeline runs anywhere. Standard library only, so it runs in the ears uv env
     python bridge.py --url http://localhost:8000 --pace < events.jsonl   # replay a saved run at real speed
 
 Each source becomes a speaker (default mic1=A, mic2=B, matching the dashboard's A = prop, B = opp).
-A Pause is sent when the other speaker starts, or after --pause-after seconds with no new sentence.
+A Pause is sent when the other speaker starts, or after --pause-after seconds with no new sentence (longer after a
+long sentence, up to 15 s: ears only sends finished sentences, so the next can be a whole sentence away).
 The Moderator only speaks at a Pause, so a lower value makes it quicker but riskier to talk over someone.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import itertools
 import json
 import os
 import queue
@@ -26,13 +28,22 @@ import urllib.error
 import urllib.request
 
 
+PAUSE_GAP = 1.2         # added to a sentence's length to get the wait for the next: the brain's PauseSynth gap
+MAX_PAUSE_GAP = 15.0    # ...capped, like the brain's
+
+
 def parse_map(text: str) -> dict[str, str]:
     pairs = (p.split("=", 1) for p in text.split(",") if "=" in p)
     return {k.strip(): v.strip() for k, v in pairs}
 
 
 class Publisher:
-    """Posts events from a queue on its own thread, so a slow network never holds up reading the mics."""
+    """Posts events from a queue on its own thread, so a slow network never holds up reading the mics.
+    A 5xx (Caddy while the app restarts) or a network blip is retried with backoff until the event is max_age
+    old; by then a late Utterance or Pause would mislead more than it helps."""
+
+    backoff = (0.25, 0.5, 1.0, 2.0)     # seconds before each retry, the last one repeating
+    max_age = 15.0
 
     def __init__(self, url: str, user: str, password: str, dry_run: bool = False):
         self.url = url.rstrip("/") + "/publish"
@@ -46,37 +57,57 @@ class Publisher:
         self.thread.start()
 
     def send(self, event: dict) -> None:
-        self.queue.put(event)
+        self.queue.put((time.monotonic(), event))
 
-    def close(self) -> None:
+    def close(self, timeout: float = 10.0) -> None:
         self.queue.put(None)
-        self.thread.join(timeout=10)
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            # The None is still queued too, standing in for the event being sent right now.
+            print(f"bridge: exiting with {self.queue.qsize()} event(s) unsent", file=sys.stderr)
 
     def _run(self) -> None:
-        while (event := self.queue.get()) is not None:
-            if self.dry_run:
-                print(json.dumps(event), flush=True)
-                continue
-            body = json.dumps(event).encode()
-            for attempt in (1, 2):
-                try:
-                    req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
-                    with urllib.request.urlopen(req, timeout=5) as r:
-                        r.read()
-                    break
-                except urllib.error.HTTPError as e:
-                    print(f"bridge: {e.code} from {self.url}: {e.read()[:200]!r}", file=sys.stderr)
-                    break               # a 401 or 422 won't fix itself on retry
-                except Exception as e:
-                    print(f"bridge: send failed (try {attempt}): {e!r}", file=sys.stderr)
+        while (item := self.queue.get()) is not None:
+            queued, event = item
+            try:
+                if self.dry_run:
+                    print(json.dumps(event), flush=True)
+                else:
+                    self._post(json.dumps(event).encode(), queued)
+            except Exception as e:      # never let one event end the thread: every later one would queue forever
+                print(f"bridge: dropped an event: {e!r}", file=sys.stderr)
+
+    def _post(self, body: bytes, queued: float) -> None:
+        for attempt in itertools.count(1):
+            try:
+                req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    r.read()
+                return
+            except urllib.error.HTTPError as e:
+                print(f"bridge: {e.code} from {self.url}: {e.read()[:200]!r}", file=sys.stderr)
+                if e.code < 500:
+                    return              # a 401 or 422 won't fix itself on retry
+            except Exception as e:
+                print(f"bridge: send failed (try {attempt}): {e!r}", file=sys.stderr)
+            delay = self.backoff[min(attempt, len(self.backoff)) - 1]
+            if time.monotonic() + delay - queued > self.max_age:
+                print(f"bridge: gave up on an event after {attempt} tries", file=sys.stderr)
+                return
+            time.sleep(delay)
 
 
 class Bridge:
+    """A Pause goes out when the other speaker starts, or once a speaker has said nothing new for a while.
+    ears only sends finished sentences, so after a long one the next can be as far away again: the wait is
+    the brain's own rule for finals-only ears (its PauseSynth), never shorter than pause_after. The brain takes
+    our Pauses as real ones and switches its own synthesis off, so a shorter wait lets the Moderator cut in."""
+
     def __init__(self, publisher: Publisher, speakers: dict[str, str], pause_after: float):
         self.publisher, self.speakers, self.pause_after = publisher, speakers, pause_after
         self.lock = threading.Lock()
-        self.last_said: dict[str, float] = {}   # speaker -> wall time of their latest sentence
-        self.paused: set[str] = set()           # speakers whose turn already got a Pause
+        self.due: dict[str, float] = {}         # speaker mid-turn -> wall time their Pause is due
+        self.stopped = threading.Event()
         threading.Thread(target=self._watch, daemon=True, name="pauses").start()
 
     def speaker_for(self, source: str) -> str:
@@ -89,29 +120,37 @@ class Bridge:
         speaker = self.speaker_for(str(line.get("source", "A")))
         now = time.time()
         length = max(0.0, float(line.get("end", 0) or 0) - float(line.get("start", 0) or 0))
+        gap = max(self.pause_after, min(length + PAUSE_GAP, MAX_PAUSE_GAP))
         with self.lock:
-            for other in list(self.last_said):      # the other speaker starting ends their turn
-                if other != speaker and other not in self.paused:
-                    self._pause(other, now)
-            self.last_said[speaker] = now
-            self.paused.discard(speaker)
+            for other in [s for s in self.due if s != speaker]:     # the other speaker starting ends their turn
+                self._pause(other, now)
+            self.due[speaker] = now + gap
         # ears.py gives stream-relative times, so the end is stamped on arrival and the start set back by the
         # sentence's length. The latency meter then counts from when the sentence reached us.
         self.publisher.send({"event": "Utterance", "speaker": speaker, "text": text, "final": True,
                              "t_start": now - length, "t_end": now})
 
+    def check(self, now: float) -> None:
+        """Send the Pauses due by `now`."""
+        with self.lock:
+            for speaker in [s for s, due in self.due.items() if now >= due]:
+                self._pause(speaker, now)
+
+    def finish(self) -> None:
+        """End of input: stop watching, and whoever was still mid-turn has stopped."""
+        self.stopped.set()
+        now = time.time()
+        with self.lock:
+            for speaker in list(self.due):
+                self._pause(speaker, now)
+
     def _pause(self, speaker: str, now: float) -> None:
-        self.paused.add(speaker)
+        del self.due[speaker]
         self.publisher.send({"event": "Pause", "speaker": speaker, "t": now})
 
     def _watch(self) -> None:
-        while True:
-            time.sleep(0.1)
-            now = time.time()
-            with self.lock:
-                for speaker, said in self.last_said.items():
-                    if speaker not in self.paused and now - said >= self.pause_after:
-                        self._pause(speaker, now)
+        while not self.stopped.wait(0.1):
+            self.check(time.time())
 
 
 def main() -> None:
@@ -120,7 +159,8 @@ def main() -> None:
     p.add_argument("--user", default=os.environ.get("EARS_USER", "debate"),
                    help="site password user (env EARS_USER); the password comes from env EARS_PASSWORD")
     p.add_argument("--map", default="mic1=A,mic2=B", help="source=speaker pairs")
-    p.add_argument("--pause-after", type=float, default=2.0, help="seconds of no new sentence before a Pause")
+    p.add_argument("--pause-after", type=float, default=6.0,
+                   help="least seconds of no new sentence before a Pause (more after a long sentence, up to 15)")
     p.add_argument("--pace", action="store_true", help="replay stdin at the speed its start times say")
     p.add_argument("--dry-run", action="store_true", help="print events instead of sending them")
     args = p.parse_args()
@@ -146,11 +186,10 @@ def main() -> None:
                     first_start, first_wall = end, time.time()
                 time.sleep(max(0.0, (end - first_start) - (time.time() - first_wall)))
             bridge.sentence(line)
-        if args.pace:
-            time.sleep(args.pause_after + 0.3)      # let the last speaker's Pause go out
     except KeyboardInterrupt:
         pass
     finally:
+        bridge.finish()                             # end of input: the last speaker has stopped too
         publisher.close()
 
 
