@@ -101,6 +101,21 @@ def _new_usage() -> dict:
             "cache_read_tokens": 0, "cache_write_tokens": 0}
 
 
+def usage_line(llms: dict) -> str:
+    """'claims=claude-haiku-5-5 12 calls 8.1k in (5.2k cached) 1.3k out; ...' for the run's cost report."""
+    k = lambda n: f"{n / 1000:.1f}k" if n >= 1000 else str(n)     # noqa: E731
+    parts, seen = [], set()
+    for label, llm in llms.items():
+        u = getattr(llm, "usage", None)
+        if not u or id(llm) in seen:
+            continue
+        seen.add(id(llm))
+        parts.append(f"{label}={getattr(llm, 'model', '?')} {u.get('calls', 0)} calls "
+                     f"{k(u.get('input_tokens', 0))} in ({k(u.get('cache_read_tokens', 0))} cache read, "
+                     f"{k(u.get('cache_write_tokens', 0))} cache write) {k(u.get('output_tokens', 0))} out")
+    return "; ".join(parts) or "no LLM calls"
+
+
 def _num(v: Any) -> int:
     return v if isinstance(v, int) else 0
 
@@ -207,6 +222,8 @@ def _claude_model(model: Any = None) -> str:
 
 
 class AnthropicLLM:
+    supports_blocks = True     # `user` may be a list of content blocks, so callers can mark a growing prefix cacheable
+
     def __init__(self, client: Any = None, model: Optional[str] = None, effort: str = "low"):
         if client is None:
             import anthropic
@@ -233,7 +250,7 @@ class AnthropicLLM:
             "model": self.model,
             "max_tokens": max_tokens if off else max(max_tokens, THINKING_MIN_TOKENS),
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": user}],   # str, or [{"type": "text", "text", "cache_control"?}]
             "output_config": output_config,
         }
         if self.thinking is not None:

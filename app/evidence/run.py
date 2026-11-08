@@ -332,4 +332,19 @@ class EvidenceModule:
 
 
 async def run(bus) -> None:
-    await EvidenceModule(bus, make_verdict_llm(), make_search(), make_embedder()).run()
+    from app.brain.llm import usage_line
+    from app.schemas import ModuleStatus
+    llm = make_verdict_llm()
+
+    async def report() -> None:                   # what this run is paying for (test-haiku prints it at the end too)
+        while True:
+            await asyncio.sleep(10)
+            bus.publish(ModuleStatus(module="usage:evidence", state="up", detail=usage_line({"verdicts": llm})),
+                        src="evidence")
+
+    reporter = asyncio.create_task(report())
+    try:
+        await EvidenceModule(bus, llm, make_search(), make_embedder()).run()
+    finally:
+        reporter.cancel()
+        log.warning("evidence LLM usage: %s", usage_line({"verdicts": llm}))

@@ -14,6 +14,10 @@ How to plug your part in: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 ./run.sh live                      # real mics
 ./run.sh replay --file logs/latest.jsonl   # demo backup: replays the last recorded run, no network
 PRINT=1 ./run.sh mock              # also print one line per event in the terminal
+./run.sh test-haiku                # the real pipeline on Haiku everywhere (claims, verdicts, consistency, summary)
+                                   # replaying fixtures/consistency_debate.jsonl. COSTS TOKENS: open /stage, then
+                                   # "⚖ Final verdict" at the end. Usage per model is in the log and the status dots
+FIXTURE=fixtures/consistency_debate.jsonl ./run.sh mock   # the same debate, free: simulated findings + summary
 ./check.sh                         # tests (run before pushing)
 ```
 

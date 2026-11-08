@@ -151,6 +151,73 @@ const CAST = {
   },
 };
 
+// ---- the centre lane: how the two sides relate (Consistency findings from the brain) ----
+Object.assign(CAST, {
+  self_contradiction: {
+    name: 'Flip', role: 'the chameleon', sign: 'U-TURN!', icon: '↺',
+    openers: [
+      'Hang on… didn\'t you just say the opposite?',
+      'Ooh, a U-turn! I do love a colour change.',
+      'Change of heart? I know the feeling.',
+      'Wait. Rewind. That\'s not what you said before.',
+      'Same speaker, two stories. Which one is it?',
+    ],
+    svg: `
+<svg viewBox="0 0 160 190" class="art" aria-hidden="true">
+  <ellipse cx="78" cy="183" rx="50" ry="6" class="shadow"/>
+  <line x1="132" y1="0" x2="132" y2="150" class="stick"/>
+  <g class="body chameleon">
+    <path d="M30 150 C6 150 4 122 22 118 C36 115 40 132 28 134 C20 135 20 126 26 126" fill="none" stroke="#2f9e44"
+          stroke-width="9" stroke-linecap="round" class="skin-stroke"/>
+    <path d="M44 172 l-6 10 M56 174 v10 M100 174 v10 M112 172 l6 10" stroke="#2b8a3e" stroke-width="6" stroke-linecap="round"/>
+    <path d="M30 150 C30 104 60 84 96 86 C128 88 140 112 136 138 C132 166 104 176 76 174 C52 172 30 168 30 150Z"
+          fill="#69db7c" stroke="#2b8a3e" stroke-width="4" class="skin"/>
+    <path d="M60 92 Q66 80 74 90 Q80 78 88 89 Q96 78 102 90" fill="none" stroke="#2b8a3e" stroke-width="4" stroke-linecap="round"/>
+    <path d="M52 132 Q78 150 108 132" fill="none" stroke="#2b8a3e" stroke-width="3" opacity=".5"/>
+    <path d="M58 150 Q80 164 104 150" fill="none" stroke="#2b8a3e" stroke-width="3" opacity=".5"/>
+    <circle cx="104" cy="112" r="17" fill="#8ce99a" stroke="#2b8a3e" stroke-width="4"/>
+    <g class="eyes swivel"><circle cx="108" cy="112" r="7" fill="#1b1b1b"/><circle cx="110" cy="109" r="2.5" fill="#fff"/></g>
+    <path d="M118 136 Q126 142 134 136" fill="none" stroke="#1b1b1b" stroke-width="3" stroke-linecap="round"/>
+    <path d="M128 118 Q142 106 134 92" class="limb" stroke="#2b8a3e"/>
+    <circle cx="133" cy="90" r="8" fill="#69db7c" stroke="#2b8a3e" stroke-width="3"/>
+  </g>
+</svg>`,
+  },
+
+  concession: {
+    name: 'Dove', role: 'the peacemaker', sign: 'POINT CONCEDED', icon: '🕊',
+    openers: [
+      'Peace breaks out!',
+      'A point conceded. How gracious.',
+      'Coo! Common ground at last.',
+      'Credit where it\'s due!',
+      'Look at that: someone changed their mind for a good reason.',
+    ],
+    svg: `
+<svg viewBox="0 0 160 190" class="art" aria-hidden="true">
+  <ellipse cx="78" cy="183" rx="40" ry="5" class="shadow"/>
+  <line x1="132" y1="0" x2="132" y2="150" class="stick"/>
+  <g class="body dove">
+    <path d="M30 130 L4 112 L10 140 L2 156 Z" fill="#dee2e6" stroke="#868e96" stroke-width="3" stroke-linejoin="round"/>
+    <ellipse cx="72" cy="128" rx="46" ry="34" fill="#fff" stroke="#868e96" stroke-width="4"/>
+    <g class="wing"><path d="M58 118 C40 80 62 60 92 74 C86 96 80 112 58 118Z" fill="#f1f3f5" stroke="#868e96" stroke-width="4"/>
+      <path d="M66 106 Q74 92 84 86 M62 98 Q70 86 78 80" fill="none" stroke="#adb5bd" stroke-width="2.5"/></g>
+    <circle cx="108" cy="104" r="24" fill="#fff" stroke="#868e96" stroke-width="4"/>
+    <g class="eyes"><circle cx="114" cy="98" r="4.5" fill="#1b1b1b"/><circle cx="115.5" cy="96.5" r="1.5" fill="#fff"/></g>
+    <circle cx="104" cy="110" r="5" fill="#ffc9c9" opacity=".8"/>
+    <path d="M128 102 L146 108 L128 114 Z" fill="#fab005" stroke="#e67700" stroke-width="2"/>
+    <g class="branch"><path d="M140 110 Q152 128 146 146" fill="none" stroke="#5c940d" stroke-width="3"/>
+      <ellipse cx="150" cy="120" rx="6" ry="3" fill="#82c91e" transform="rotate(40 150 120)"/>
+      <ellipse cx="142" cy="128" rx="6" ry="3" fill="#82c91e" transform="rotate(-30 142 128)"/>
+      <ellipse cx="150" cy="136" rx="6" ry="3" fill="#82c91e" transform="rotate(30 150 136)"/></g>
+    <path d="M60 160 l-4 16 M76 162 l0 16" stroke="#e67700" stroke-width="4" stroke-linecap="round"/>
+    <path d="M128 118 Q140 106 134 92" class="limb" stroke="#868e96"/>
+    <circle cx="133" cy="90" r="7" fill="#fff" stroke="#868e96" stroke-width="3"/>
+  </g>
+</svg>`,
+  },
+});
+
 function hashStr(s) {
   let h = 2166136261;
   for (const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
