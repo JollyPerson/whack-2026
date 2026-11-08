@@ -455,6 +455,31 @@ def port_in_use(host: str, port: int) -> bool:
     return False
 
 
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def ssl_options(env=os.environ) -> dict:
+    """SSL_CERTFILE + SSL_KEYFILE -> uvicorn's ssl_certfile/ssl_keyfile (HTTPS, so a phone on Wi-Fi may use its mic
+    on /mic). Neither set -> {} (plain HTTP, as before). One without the other, or a missing file: ValueError."""
+    cert, key = env.get("SSL_CERTFILE", "").strip(), env.get("SSL_KEYFILE", "").strip()
+    if not cert and not key:
+        return {}
+    if not (cert and key):
+        raise ValueError("set both SSL_CERTFILE and SSL_KEYFILE (or neither, for plain HTTP)")
+    for name, path in (("SSL_CERTFILE", cert), ("SSL_KEYFILE", key)):
+        if not Path(path).is_file():
+            raise ValueError(f"{name}={path}: no such file")
+    return {"ssl_certfile": cert, "ssl_keyfile": key}
+
+
+def exposure_warning(host: str, env=os.environ) -> str:
+    """A LAN bind serves /face/tts (no login) and, with PHONE_MICS, the mic socket to the whole network."""
+    if host in LOOPBACK or not env.get("PHONE_MICS", "").strip() or env.get("MIC_TOKEN"):
+        return ""
+    return (f"HOST={host} with PHONE_MICS and no MIC_TOKEN: anyone on this network can open /mic/ws and speak as a "
+            f"debater (and use /face/tts). Set MIC_TOKEN, or bind HOST=127.0.0.1 and use adb reverse")
+
+
 def main():
     import uvicorn
     p = argparse.ArgumentParser(description="debate-ref: live debate fact-checker")
@@ -479,12 +504,22 @@ def main():
         p.error(f"--file {a.file}: {e.strerror or e}")
     if port_in_use(a.host, a.port):                  # before build_app re-points logs/latest.jsonl
         p.error(f"port {a.port} is already in use: is another ./run.sh running? Stop it or pass --port")
+    try:
+        ssl = ssl_options()
+    except ValueError as e:
+        p.error(str(e))
+    if warning := exposure_warning(a.host):
+        log.warning("%s", warning)
+    if os.environ.get("PHONE_MICS", "").strip():
+        log.warning("phone mics: open %s://%s:%d/mic?ch=A on the phone (over USB: adb reverse tcp:%d tcp:%d, then "
+                    "http://localhost:%d/mic?ch=A)", "https" if ssl else "http",
+                    "<this laptop's IP>" if a.host not in LOOPBACK else "localhost", a.port, a.port, a.port, a.port)
     applied = apply_profile_env(a.profile)
     if PROFILE_ENV.get(a.profile):
         log.warning("profile %s: %s", a.profile, ", ".join(f"{k}={os.environ[k]}" for k in PROFILE_ENV[a.profile])
                     + (f" (set by the profile: {', '.join(applied)})" if applied else ""))
     app = build_app(a.profile, file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
-    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning", **ssl)
 
 
 if __name__ == "__main__":

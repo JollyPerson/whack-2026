@@ -386,3 +386,56 @@ def test_mic_page_rules():
     r = subprocess.run(["deno", "run", "--allow-read", str(ROOT / "tests/js/mic_page.js"),
                         str(ROOT / "app/face/static/mic.js")], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
+
+
+# ---------------------------------------------------------------- app/main.py: HTTPS and the LAN warning
+def test_ssl_options(tmp_path):
+    from app.main import ssl_options
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert.write_text("x")
+    key.write_text("y")
+    assert ssl_options({}) == {}                                           # plain HTTP, as before
+    assert ssl_options({"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key)}) == {
+        "ssl_certfile": str(cert), "ssl_keyfile": str(key)}
+    with pytest.raises(ValueError, match="both"):
+        ssl_options({"SSL_CERTFILE": str(cert)})
+    with pytest.raises(ValueError, match="no such file"):
+        ssl_options({"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(tmp_path / "missing.pem")})
+
+
+def test_exposure_warning():
+    from app.main import exposure_warning
+    assert exposure_warning("0.0.0.0", {}) == ""                           # no phone mics: nothing new to warn about
+    assert exposure_warning("127.0.0.1", {"PHONE_MICS": "A"}) == ""
+    assert exposure_warning("0.0.0.0", {"PHONE_MICS": "A", "MIC_TOKEN": "t"}) == ""
+    w = exposure_warning("0.0.0.0", {"PHONE_MICS": "A,B"})
+    assert "MIC_TOKEN" in w and "/face/tts" in w
+
+
+def _run_main(monkeypatch, tmp_path, env):
+    import uvicorn
+    from app import main as mainmod
+    seen = {}
+    monkeypatch.setattr(mainmod, "ROOT", tmp_path)
+    for k in ("EARS", "BRAIN", "EVIDENCE", "FACE", "BOTS", "JUDGE"):
+        monkeypatch.setenv(k, "off")
+    for k in ("SSL_CERTFILE", "SSL_KEYFILE", "PHONE_MICS", "MIC_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+    monkeypatch.setattr(sys, "argv", ["app.main", "mock", "--host", "127.0.0.1", "--port", "0"])
+    mainmod.main()
+    return seen
+
+
+def test_main_passes_ssl_to_uvicorn_only_when_set(monkeypatch, tmp_path, capsys):
+    assert "ssl_certfile" not in _run_main(monkeypatch, tmp_path, {})
+    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
+    cert.write_text("x")
+    key.write_text("y")
+    kw = _run_main(monkeypatch, tmp_path, {"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key)})
+    assert kw["ssl_certfile"] == str(cert) and kw["ssl_keyfile"] == str(key)
+    with pytest.raises(SystemExit) as e:
+        _run_main(monkeypatch, tmp_path, {"SSL_KEYFILE": str(key)})
+    assert e.value.code == 2 and "SSL_CERTFILE" in capsys.readouterr().err
