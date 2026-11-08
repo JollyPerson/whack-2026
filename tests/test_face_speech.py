@@ -248,6 +248,51 @@ async def test_espeak_wav_is_converted_to_24k_mono(tmp_path):
     assert len(pcm) == 2 * 12000 and set(pcm[i:i + 2] for i in range(0, len(pcm), 2)) == {b"\x10\x00"}
 
 
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _until_dead(pid: int, within: float = 3.0) -> bool:
+    for _ in range(int(within / 0.05)):
+        if not _alive(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def test_a_hung_espeak_is_killed_on_timeout_and_on_cancel(tmp_path):
+    """A stalled espeak-ng (audio backend, speech-dispatcher) must fail the line, so it can be retried, and never be
+    left running: neither when it times out nor when its task is cancelled (shutdown)."""
+    exe, pids = tmp_path / "espeak-ng", tmp_path / "pids"
+    exe.write_text(f"#!{sys.executable}\nimport os, sys, time\n"
+                   f"open({str(pids)!r}, 'a').write(f'{{os.getpid()}}\\n')\nsys.stdin.read()\ntime.sleep(3600)\n")
+    exe.chmod(0o755)
+    started = lambda: [int(x) for x in pids.read_text().split()] if pids.exists() else []   # noqa: E731
+    try:
+        hung = Espeak(str(exe))
+        hung.timeout = 0.3
+        with pytest.raises(TTSError, match="every TTS provider failed"):
+            await TTS([hung], cache_dir=tmp_path / "tts", miss_wait=3).wav("Hello.")
+        assert await _until_dead(started()[0])
+        task = asyncio.create_task(Espeak(str(exe)).synth("Hello again."))
+        for _ in range(100):
+            if len(started()) == 2:
+                break
+            await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _until_dead(started()[1])
+    finally:
+        for pid in started():
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+
 # ----------------------------------------------------------------------------- /face/tts
 def _with_tts(c, tmp_path, providers, miss_wait=2.5) -> TTS:
     tts = state_for(c.app.state.bus).tts = TTS(providers, cache_dir=tmp_path / "tts", miss_wait=miss_wait)

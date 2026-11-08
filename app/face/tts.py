@@ -120,14 +120,20 @@ class ElevenHTTP(Provider):
 class Espeak(Provider):
     name, model, voice = "espeak", "espeak-ng", "en-gb"
 
-    def __init__(self, exe: str):
-        self.exe = exe
+    def __init__(self, exe: str, timeout: float = 10.0):
+        self.exe, self.timeout = exe, timeout
 
     async def synth(self, text: str) -> bytes:
         p = await asyncio.create_subprocess_exec(self.exe, "--stdin", "--stdout", "-v", self.voice, "-s", "165",
                                                  stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                  stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await p.communicate(text.encode())
+        try:
+            out, _ = await asyncio.wait_for(p.communicate(text.encode()), self.timeout)
+        except TimeoutError:
+            raise TTSError(f"espeak-ng hung for {self.timeout:g} s") from None
+        finally:
+            if p.returncode is None:      # hung (audio backend, speech-dispatcher) or cancelled: never orphan it
+                p.kill()
         if p.returncode:
             raise TTSError(f"espeak-ng exited {p.returncode}")
         return await asyncio.to_thread(_pcm24k, out)
