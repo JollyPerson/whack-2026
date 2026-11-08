@@ -26,7 +26,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.bus import MAX_GAP_S, TIME_FIELDS, Bus, replay
+from app.bus import MAX_GAP_S, SUB_OWNER, TIME_FIELDS, Bus, replay
 from app.config import FLAGS
 from app.schemas import SCHEMA_VERSION, Control, ModuleStatus, SessionStart, parse_event
 
@@ -80,11 +80,28 @@ def load(spec: str):
     return getattr(importlib.import_module(mod), fn)
 
 
+HEALTHY_RUN_S = 30.0   # an attempt that ran this long before crashing restarts after 1 s again, not the backoff
+
+
+async def _restart_after_crash(bus: Bus, name: str, e: Exception, owner: object, started: float, delay: float) -> float:
+    """Red dot, close the subscriptions the crashed attempt opened (their queues would fill up forever and look
+    'too slow'), wait, and return the next backoff."""
+    log.exception("module %s crashed", name)
+    bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
+    bus.close_owned(owner)
+    if time.monotonic() - started >= HEALTHY_RUN_S:
+        delay = 1.0
+    await asyncio.sleep(delay)
+    return min(delay * 2, 10.0)
+
+
 async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
     """Run one role. Returning = done (one-shot setup, finished fixture): stays green, never re-run.
     `served` names what the server already serves for this role (routes/static) if run.py is missing."""
     delay, mod = 1.0, spec.split(":")[0]
     while True:
+        owner, started = object(), time.monotonic()
+        token = SUB_OWNER.set(owner)                 # tags the subs of this attempt and of the tasks it spawns
         try:
             fn = load(spec)
             bus.publish(ModuleStatus(module=name, state="up", detail=spec), src="main")
@@ -109,15 +126,11 @@ async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
                 bus.publish(ModuleStatus(module=name, state="down", detail=f"missing dependency {e.name!r}: add it "
                                          f"to requirements/<role>.txt and rerun ./run.sh"), src="main")
                 return
-            log.exception("module %s crashed", name)
-            bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            delay = await _restart_after_crash(bus, name, e, owner, started, delay)
         except Exception as e:                       # crash -> red dot -> restart with backoff
-            log.exception("module %s crashed", name)
-            bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            delay = await _restart_after_crash(bus, name, e, owner, started, delay)
+        finally:
+            SUB_OWNER.reset(token)
 
 
 ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAGS; every other flag is state

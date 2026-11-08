@@ -645,3 +645,72 @@ def test_nan_control_value_never_poisons_health_or_the_snapshot(make_client):
     with c.websocket_connect("/ws") as ws:
         snap = json.loads(_POOL.submit(ws.receive_text).result(5), parse_constant=strict)
     assert snap["flags"]["probe"] is None
+
+
+async def crashy(bus):
+    """Crashes on its first Pause; the background consumer it spawned stays parked on its own subscription."""
+    BG_TASKS.append(asyncio.create_task(_bg_consumer(bus)))
+    async for _ in bus.subscribe("crashy", {"Pause"}):
+        raise RuntimeError("boom")
+
+
+async def _bg_consumer(bus):
+    async for _ in bus.subscribe("crashy-bg", {"NeverPublished"}):
+        pass
+
+
+BG_TASKS: list[asyncio.Task] = []
+_REAL_SLEEP = asyncio.sleep
+
+
+async def test_supervisor_restart_closes_the_crashed_attempts_subscriptions(monkeypatch):
+    """A crashed role's Sub stayed in bus.subs after the restart: its queue filled and 'dropped N events (too slow)'
+    warnings blamed the live module."""
+    async def no_wait(d, *a, **k):
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    b, BG_TASKS[:] = Bus(), []
+    t = asyncio.create_task(supervise(b, "brain", "tests.test_main:crashy"))
+    names = lambda: [s.name for s in b.subs]                                     # noqa: E731
+    try:
+        for _ in range(3):
+            for _ in range(50):
+                await _REAL_SLEEP(0)
+                if "crashy" in names():
+                    break
+            b.publish(Pause(speaker="A"))
+        for _ in range(50):
+            await _REAL_SLEEP(0)
+        assert names().count("crashy") == 1 and names().count("crashy-bg") == 1, names()
+    finally:
+        t.cancel()
+        for bg in BG_TASKS:
+            bg.cancel()
+
+
+FLAKY: list[int] = []
+
+
+async def flaky(bus):
+    """Attempts 1-4 crash at once, attempt 5 runs 'healthy' for a while then crashes, attempt 6 returns."""
+    FLAKY.append(1)
+    if len(FLAKY) == 5:
+        await _REAL_SLEEP(0.1)
+    if len(FLAKY) <= 5:
+        raise RuntimeError(f"crash {len(FLAKY)}")
+
+
+async def test_supervisor_backoff_resets_after_a_healthy_run(monkeypatch):
+    """The backoff only ever doubled: after 4 crashes any later crash cost 10 s of downtime, even hours later."""
+    slept: list[float] = []
+
+    async def record(d, *a, **k):
+        slept.append(d)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    monkeypatch.setattr(mainmod, "HEALTHY_RUN_S", 0.05, raising=False)
+    FLAKY.clear()
+    await asyncio.wait_for(supervise(Bus(), "brain", "tests.test_main:flaky"), 5)
+    assert len(FLAKY) == 6 and slept == [1.0, 2.0, 4.0, 8.0, 1.0]

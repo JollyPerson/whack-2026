@@ -12,6 +12,7 @@ import asyncio
 import itertools
 import logging
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Union
 
@@ -35,6 +36,11 @@ def _key(ev: Event):
     return ev.event, getattr(ev, f, None) if f else None
 
 
+# Who opened a Sub: main.supervise() sets a fresh token per module attempt, and tasks the module spawns copy it,
+# so a crashed attempt's subscriptions can be closed before the restart (else they fill up as zombies).
+SUB_OWNER: ContextVar[Optional[object]] = ContextVar("bus_sub_owner", default=None)
+
+
 def age(ev: Event) -> float:
     """Seconds since the event was published (the replayer rebases ts, so this works in replay too)."""
     return time.time() - ev.ts
@@ -45,6 +51,7 @@ class Sub:
         self.bus, self.name, self.events, self.where = bus, name, events, where
         self.q: asyncio.Queue = asyncio.Queue(maxsize)
         self.dropped = 0
+        self.owner = SUB_OWNER.get()
 
     def offer(self, ev: Event) -> None:
         if self.events and ev.event not in self.events:
@@ -90,6 +97,13 @@ class Bus:
         s = Sub(self, name, set(events), where, maxsize)
         self.subs.append(s)
         return s
+
+    def close_owned(self, owner: object) -> int:
+        """Close every Sub opened under SUB_OWNER == owner; returns how many."""
+        mine = [s for s in self.subs if owner is not None and s.owner is owner]
+        for s in mine:
+            s.close()
+        return len(mine)
 
     def publish(self, ev: Union[Event, dict, str, bytes], src: str = "") -> Event:
         if not isinstance(ev, Event):
