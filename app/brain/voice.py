@@ -146,7 +146,7 @@ def fields(claim: Any = None, verdict: Any = None, side: str = "") -> dict:
     num = _get(verdict, "numeric")
     unit = _get(num, "unit", "") or ""
     actual, claimed = say(_get(num, "actual"), unit), say(_get(num, "claimed"), unit)
-    if actual == claimed:                         # nothing to contrast
+    if actual == claimed or judgemental(unit):    # nothing to contrast, or a free-text unit we can't say
         actual = claimed = ""
     f = {"src": source_name(_get(verdict, "evidence") or []), "short_fact": clean(_get(verdict, "short_fact")),
          "topic": clean(_get(claim, "topic")), "side": " ".join(clean(side).split()[:3]),

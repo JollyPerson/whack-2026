@@ -787,3 +787,11 @@ def test_malformed_evidence_url_never_blocks_the_referee():
     _, o = run(ev)
     assert fired(o) == [(6, "correction", "A", "c1")]
     assert lines(o)[0].text == "Point of fact: the source contradicts that. Details on screen."
+
+
+def test_judgement_word_in_numeric_unit_is_never_spoken():
+    v = {"evidence": [{"url": "https://www.ons.gov.uk/x"}], "numeric": {"claimed": 6, "actual": 4, "unit": "false claims"}}
+    text = voice.render("correction", verdict=v)
+    assert voice.ok(text) and text == "Point of fact: the ONS contradicts that. Details on screen."
+    v["numeric"]["unit"] = "deaths"
+    assert voice.render("correction", verdict=v) == "Point of fact: the ONS puts that at 4 deaths, not 6 deaths."
