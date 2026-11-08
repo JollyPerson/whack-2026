@@ -9,9 +9,10 @@ so the same events with the same `now`s always give the same decisions (interjec
     Director.status(now)      DirectorStatus heartbeat ("why is it silent?")
   -> [Interjection (what the referee says), DirectorDecision (state transitions, for the log panel)]
 
-Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause,
-G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips G4-G7 only: the
-referee never talks over a human or itself, and never twice without a human pause in between.
+Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause (speech, then
+a pause, since the last line), G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips
+G4-G7 only (for whatever ranks first; Control(time) for its own line, ranked first): the referee never talks over
+a human or itself, and never twice without a human pause in between.
 Dry spell: once the debate has run dry_first_s (25 s) from its first Utterance with no Interjection, and after
 that every min_gap_s since the last one, a canned "dry" line to the room becomes a candidate. It skips only G4,
 is held once nobody has spoken for dry_quiet_s, ranks below any real candidate, has no claim_id, and its wording depends on whether a figure was heard yet.
@@ -116,14 +117,20 @@ class State:
     figure_heard: bool = False                        # a statistic Claim has been made (picks the dry wording)
     tts_until: float = NEG
     force_until: float = NEG
+    force_key: Optional[str] = None                   # Control(time): the line its force is for (None = any)
     last_log: dict = field(default_factory=dict)      # key -> (action, reason): log transitions only
 
 
 # ----------------------------------------------------------------------------- config
+def _step(v: Any) -> int:
+    """+1/-1 for a relative aggr value ("+"/"up"/"-"/"down"), else 0."""
+    return {"+": 1, "up": 1, "-": -1, "down": -1}.get(v.strip().lower(), 0) if isinstance(v, str) else 0
+
+
 def clamp_aggr(v: Any, cur: int = 3) -> int:
     """1..5 from an int, a numeric string, or relative "+"/"-"/"up"/"down"; anything else keeps `cur`."""
-    if isinstance(v, str) and v.strip().lower() in ("+", "up", "-", "down"):
-        v = cur + (1 if v.strip().lower() in ("+", "up") else -1)
+    if _step(v):
+        v = cur + _step(v)
     if isinstance(v, bool):
         return cur
     try:
@@ -202,6 +209,12 @@ def floor_open(st: State, now: float) -> bool:
 def _latest_pause(st: State, now: float) -> float:
     ts = [_paused_at(st, s, now) for s in {*st.last_speech, *st.last_pause}]
     return max([t for t in ts if t is not None], default=NEG)
+
+
+def _paused_since(st: State, now: float, last: float) -> bool:
+    """G3: a human spoke after `last` (our previous line) and paused since. A Pause with no speech before it
+    (e.g. the ears reacting to our own echo, which the brain dropped) is not a human pause."""
+    return max(st.last_speech.values(), default=NEG) > last and _latest_pause(st, now) > last
 
 
 # ----------------------------------------------------------------------------- inputs
@@ -319,8 +332,12 @@ def _add(st: State, cd: Cand, out: list, now: float, why: Optional[str] = None) 
     if why:
         _log(st, out, cd, "skipped", why)
         return
+    text = _text(st, cd, now)                     # before it is pending: a line that can't render never queues
+    old = st.pending.get(cd.key)
+    if old is not None and old.claim_id != cd.claim_id:
+        _log(st, out, old, "dropped", "superseded")   # a restated claim (same canonical_key) takes its place
     st.pending[cd.key] = cd
-    _log(st, out, cd, "candidate", "new", _text(st, cd, now))   # text lets D pre-synthesise TTS
+    _log(st, out, cd, "candidate", "new", text)   # text lets D pre-synthesise TTS
 
 
 def _tts(st: State, speaking: bool, now: float) -> None:
@@ -337,7 +354,7 @@ def _on_control(st: State, ev: Control, out: list, now: float) -> None:
     elif f == "agent_speaking":
         _tts(st, truthy(v), now)
     elif f == "force_next":
-        st.force_until = now + st.cfg.force_window_s if truthy(v) else NEG
+        st.force_until, st.force_key = (now + st.cfg.force_window_s if truthy(v) else NEG), None
     elif f == "aggr":
         st.aggr = clamp_aggr(v, st.aggr)
         st.cfg = level_cfg(st.aggr, st.cfg)
@@ -346,17 +363,18 @@ def _on_control(st: State, ev: Control, out: list, now: float) -> None:
     elif f == "time":
         spk = _resolve_speaker(st, v)
         if spk is not None:
-            _add(st, Cand(f"time:{spk}:{now:.0f}", "time", spk, side_of(st, spk), 1.0, 1.0, now), out, now)
-            st.force_until = now + st.cfg.force_window_s
+            key = f"time:{spk}:{now:.0f}"
+            _add(st, Cand(key, "time", spk, side_of(st, spk), 1.0, 1.0, now), out, now)
+            st.force_until, st.force_key = now + st.cfg.force_window_s, key
 
 
 def _veto(st: State, v: Any, out: list, now: float) -> None:
     """value = decision key or claim id; True (no value) vetoes whatever would be said next."""
     if isinstance(v, bool) or v is None:
-        ranked = sorted(st.pending.values(), key=lambda cd: _rank(st, cd, _score(st, cd, now)))
+        ranked = _order(st, now)
         if not (v and ranked):
             return
-        v = ranked[0].key
+        v = ranked[0][0].key
     v = str(v)
     st.vetoed.add(v)
     for k, cd in list(st.pending.items()):
@@ -365,12 +383,14 @@ def _veto(st: State, v: Any, out: list, now: float) -> None:
 
 
 def _resolve_speaker(st: State, v: Any) -> Optional[str]:
-    """Control(time) value: a speaker id, or a side ("prop"/"opp"), or True = whoever spoke last."""
+    """Control(time) value: a speaker id, or a side ("prop"/"opp", aliases ok), or True = whoever spoke last.
+    An unknown id, or a side nobody is on yet, is None: a made-up speaker would shift later speakers' sides."""
     if isinstance(v, str) and v.strip():
         v = v.strip()
         if v in st.sides or v in st.last_speech:
             return v
-        return next((s for s, side in st.sides.items() if side == v), v)
+        side = norm_side(v)
+        return next((s for s, sd in st.sides.items() if sd == side), None) if side else None
     if v is True and st.last_speech:
         return max(st.last_speech, key=lambda s: (st.last_speech[s], s))
     return None
@@ -400,18 +420,20 @@ def try_fire(st: State, now: float) -> list[Event]:
     if not st.pending or now < st.tts_until or not floor_open(st, now):      # G1, G2
         return out
     last = st.fires[-1][0] if st.fires else NEG
-    if _latest_pause(st, now) <= last:                                       # G3: a human must pause again
+    if not _paused_since(st, now, last):                                     # G3: a human must pause again
         return out
     forced = now < st.force_until
-    for cd in st.pending.values():
-        cd.score = _score(st, cd, now)
-    for cd in sorted(st.pending.values(), key=lambda cd: _rank(st, cd)):
-        why = None if forced else _gate(st, cd, now, last)
+    ranked = _order(st, now)
+    for cd, s in ranked:
+        cd.score = s
+    for cd, _ in ranked:
+        skip = forced and st.force_key in (None, cd.key)                     # Control(time): its own line only
+        why = None if skip else _gate(st, cd, now, last)
         if why is None and (st.muted or st.director_off):
             why = "muted_would_fire"
         if why is None:
             text = _text(st, cd, now)
-            _log(st, out, cd, "fired", "forced" if forced else "ok", text)
+            _log(st, out, cd, "fired", "forced" if skip else "ok", text)
             return out + [_fire(st, cd, now, text)]
         _log(st, out, cd, "held", why, _text(st, cd, now) if why == "muted_would_fire" else "")
         if why == "muted_would_fire":
@@ -442,6 +464,14 @@ def _score(st: State, cd: Cand, now: float) -> float:
             _side_pressure(st, cd.side) - _side_pressure(st, cd.side, same=False) >= c.confirm_boost_gap:
         boost = c.confirm_boost                   # an accurate claim by the over-pressured side gets voiced
     return KIND_W[cd.kind] * cd.conf * cd.imp * recency * boost
+
+
+def _order(st: State, now: float) -> list[tuple[Cand, float]]:
+    """(candidate, score), in the order try_fire tries them: while a Control(time) force window is open its own
+    line first, then _rank. _veto(True) and status() use it too, so "what is said next" agrees everywhere."""
+    first = st.force_key if now < st.force_until else None
+    return sorted(((cd, _score(st, cd, now)) for cd in st.pending.values()),
+                  key=lambda x: (x[0].key != first, _rank(st, *x)))
 
 
 def _rank(st: State, cd: Cand, score: Optional[float] = None) -> tuple:
@@ -493,7 +523,7 @@ def _spent(st: State, key: Optional[str], kind: str, cid: Optional[str], target:
     st.fires.append((now, target, side, kind))
     if kind in PRESSURE and target is not None:
         st.pressure[target] += 1
-    st.force_until = NEG
+    st.force_until, st.force_key = NEG, None
 
 
 def restore_fired(st: State, ij: Interjection) -> None:
@@ -524,10 +554,10 @@ def _log(st: State, out: list, cd: Cand, action: str, reason: str, text: str = "
 
 def status(st: State, now: float) -> DirectorStatus:
     last = st.fires[-1][0] if st.fires else None
-    ranked = sorted(((cd, _score(st, cd, now)) for cd in st.pending.values()), key=lambda x: _rank(st, *x))
+    ranked = _order(st, now)
     fl, busy, muted = floor_open(st, now), now < st.tts_until, st.muted or st.director_off
     blocked = ("nothing_pending" if not ranked else "own_tts" if busy else "floor_closed" if not fl else
-               "awaiting_pause" if _latest_pause(st, now) <= (last if last is not None else NEG) else
+               "awaiting_pause" if not _paused_since(st, now, last if last is not None else NEG) else
                "muted" if muted else "")
     return DirectorStatus(
         floor_open=fl, tts_busy=busy, muted=muted, aggr=st.aggr,
@@ -543,8 +573,10 @@ class Director:
     def __init__(self, aggr: int = 3, side_names: Optional[dict] = None, cfg: Optional[Cfg] = None):
         self.side_names = dict(side_names or {})   # operator overrides: speaker id or side -> spoken name
         self._custom_cfg = cfg
+        flags = getattr(config, "FLAGS", {}) or {}  # a crash-restart keeps the operator's mute and aggr
         a = clamp_aggr(aggr)
-        flags = getattr(config, "FLAGS", {}) or {}  # a crash-restart keeps the operator's mute
+        if not _step(flags.get("aggr")):            # a relative step can't be replayed onto a fresh level
+            a = clamp_aggr(flags.get("aggr"), a)
         self.st = State(cfg=cfg or level_cfg(a), aggr=a, muted=truthy(flags.get("mute", False)),
                         director_off=not truthy(flags.get("director", True)))
         self.reset()

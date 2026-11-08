@@ -103,7 +103,10 @@ def _site_from_title(title: str) -> str:
 def source_name(evidence: Iterable[Any]) -> str:
     """Spoken name for the first usable evidence item: known domain > site name in title > title > host."""
     for e in evidence or []:
-        host = (urlparse(str(_get(e, "url", "") or "")).hostname or "").lower()
+        try:
+            host = (urlparse(str(_get(e, "url", "") or "")).hostname or "").lower()
+        except ValueError:                        # "https://[broken/x": an unmatched IPv6 bracket raises
+            host = ""
         host = host[4:] if host.startswith("www.") else host
         for dom in _DOMAINS:
             if host == dom or host.endswith("." + dom):
@@ -143,7 +146,7 @@ def fields(claim: Any = None, verdict: Any = None, side: str = "") -> dict:
     num = _get(verdict, "numeric")
     unit = _get(num, "unit", "") or ""
     actual, claimed = say(_get(num, "actual"), unit), say(_get(num, "claimed"), unit)
-    if actual == claimed:                         # nothing to contrast
+    if actual == claimed or judgemental(unit):    # nothing to contrast, or a free-text unit we can't say
         actual = claimed = ""
     f = {"src": source_name(_get(verdict, "evidence") or []), "short_fact": clean(_get(verdict, "short_fact")),
          "topic": clean(_get(claim, "topic")), "side": " ".join(clean(side).split()[:3]),

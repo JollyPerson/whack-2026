@@ -17,7 +17,7 @@ from app import config
 from app.brain import run as brain_run
 from app.brain.run import BleedGuard, EchoGuard, LateInterims, PauseSynth, _fill_times
 from app.bus import Bus
-from app.schemas import Claim, Control, Evidence, Pause, SessionStart, TTSState, Utterance, Verdict
+from app.schemas import Claim, Control, Evidence, Interjection, Pause, SessionStart, TTSState, Utterance, Verdict
 
 T0 = 1_762_532_400.0
 EVID = [Evidence(url="https://www.ons.gov.uk/x", title="ONS", quote="q")]
@@ -99,6 +99,24 @@ def test_echo_guard_while_speaking_drops_only_our_words():
     assert c("cars are not the problem here", T0 + 121, T0 + 123) == "speech"
     assert c("cars are not the problem here", T0 + 136, T0 + 137) == "speech"
     assert e.speaking_since is None                                      # the 15 s cap still applies
+
+
+def test_echo_guard_after_the_fact_window_counts_from_when_our_tts_stopped():
+    """The 10 s after-the-fact window ran from publish(): TTS start-up, the line's audio and STT latency used it
+    up, so our own words came back as a debater's speech (into the map, extraction and the floor model)."""
+    e = EchoGuard()
+    e.spoke("Point of fact: the ONS contradicts that. Details on screen.", T0)
+    e.speaking(True, T0 + 3)
+    e.speaking(False, T0 + 8)
+    c = lambda text, a, b: e.classify(U("A", text, a, b, ts=b + .1), b + .1)          # noqa: E731
+    assert c("the ONS contradicts that details on screen", T0 + 8.7, T0 + 10.5) == "echo"
+    assert c("Details on screen.", T0 + 10.5, T0 + 11) == "echo"
+    assert c("on that point", T0 + 9, T0 + 9.5) == "echo"                             # within 10 s of publish
+    assert c("on that point", T0 + 11, T0 + 11.5) == "speech"         # later: 1 content word is too little to tell
+    assert c("the ONS contradicts that", T0 + 18, T0 + 18.9) == "speech"              # 10.5 s after it stopped
+    e.spoke("For the record, that checks out. Source: the ONS.", T0 + 30)             # D never reported playing it
+    assert c("that checks out source the ONS", T0 + 39, T0 + 39.9) == "echo"
+    assert c("that checks out source the ONS", T0 + 40, T0 + 41) == "speech"
 
 
 def test_pause_synth_waits_longer_until_interims_are_seen():
@@ -426,3 +444,147 @@ async def test_barge_in_over_our_tts_is_heard_and_closes_the_floor(brain):
     own = [c for c in h.of("Claim") if c.src == "brain"]
     assert any(c.speaker == "B" and "30 percent" in c.text for c in own)          # B's barge-in was extracted
     assert [c.id for c in own if c.speaker == "A"] == own_a                       # the echo never was
+
+
+async def test_a_failing_tick_step_never_stops_the_heartbeat_or_the_map(brain, monkeypatch, caplog):
+    """One try wrapped every ticker step: a step that kept raising (e.g. the Director's) stopped the DirectorStatus
+    heartbeat, the map snapshots and the brain ModuleStatus for good."""
+    h = brain
+    boom, real = {"on": True}, brain_run.Director.tick
+
+    def tick(self, now):
+        if boom["on"]:
+            raise RuntimeError("boom")
+        return real(self, now)
+
+    monkeypatch.setattr(brain_run.Director, "tick", tick)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    n = len(h.of("DirectorStatus"))
+    for _ in range(3):
+        await h.step(1.1)
+    assert len(h.of("DirectorStatus")) >= n + 2 and h.of("ArgMapSnapshot")[-1].turns
+    boom["on"] = False
+    await h.step()
+    assert any("boom" in (r.exc_text or "") or r.exc_info for r in caplog.records)
+    caplog.clear()
+
+
+async def test_snapshot_hz_zero_turns_snapshots_off(brain, monkeypatch):
+    """1.0 / ARGMAP_SNAPSHOT_HZ raised ZeroDivisionError on every tick once the map changed."""
+    monkeypatch.setattr(config, "ARGMAP_SNAPSHOT_HZ", 0.0)
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    n = len(h.of("DirectorStatus"))
+    for _ in range(3):
+        await h.step(1.1)
+    assert len(h.of("DirectorStatus")) >= n + 2 and not h.of("ArgMapSnapshot")
+
+
+async def test_a_director_error_on_an_utterance_never_drops_it_from_the_map_or_extraction(brain, monkeypatch, caplog):
+    """The Director ran first in the Utterance branch: when it raised, the utterance never reached the argument
+    map or claim extraction."""
+    h = brain
+    real = brain_run.Director.handle
+
+    def handle(self, ev, now):
+        if getattr(ev, "event", "") == "Utterance":
+            raise RuntimeError("boom")
+        return real(self, ev, now)
+
+    monkeypatch.setattr(brain_run.Director, "handle", handle)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    await h.step(.5)
+    await h.step(.5)
+    assert [c for c in h.of("Claim") if c.src == "brain" and c.speaker == "A"]
+    assert [x["speaker"] for x in h.of("ArgMapSnapshot")[-1].turns] == ["A"]
+    caplog.clear()
+
+
+async def test_a_map_error_on_an_utterance_never_hides_it_from_the_director(brain, monkeypatch, caplog):
+    """When the Director ran last, an argument-map error skipped it: its floor model never heard the speech and
+    the referee could talk over a human it thought had paused."""
+    from app.brain.argmap import ArgMap
+    h = brain
+    seen, real = {}, brain_run.Director.handle
+
+    def handle(self, ev, now):
+        if getattr(ev, "event", "") == "Utterance":
+            seen.setdefault(self, []).append(ev.id)
+        return real(self, ev, now)
+
+    def on_utterance(self, u):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(brain_run.Director, "handle", handle)
+    monkeypatch.setattr(ArgMap, "on_utterance", on_utterance)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    await h.step(.5)
+    [(d, ids)] = seen.items()
+    assert ids == ["u-A-1"] and not d.status(h.now()).floor_open        # A has the floor
+    assert any("boom" in (r.exc_text or "") or r.exc_info for r in caplog.records)
+    caplog.clear()
+
+
+async def test_warmup_task_is_cancelled_with_the_brain(brain, monkeypatch):
+    """asyncio.create_task(extractor.warmup(...)) was fire-and-forget: never cancelled on shutdown or on the next
+    SessionStart (back-to-back sessions stacked warmup LLM calls against old extractors)."""
+    from app.brain import llm as llm_mod
+
+    class HangLLM:
+        name = "hang"
+
+        async def complete_json(self, *a, **kw):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(llm_mod, "make_llm", HangLLM)
+    h = brain
+    await h.start()
+    warm = lambda: [t for t in asyncio.all_tasks()                                  # noqa: E731
+                    if getattr(t.get_coro(), "__qualname__", "") == "ClaimExtractor.warmup" and not t.done()]
+    h.session()
+    await h.step(.1)
+    assert len(warm()) == 1
+    h.session()
+    await h.step(.1)
+    assert len(warm()) == 1                                    # the old session's warmup was cancelled
+    await h.stop()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert warm() == []
+
+
+async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatch):
+    """restore_from_history fed every final to the argument map: after a restart our own echoed lines and the
+    other mic's bleed copies became debate turns."""
+    from app.brain.argmap import ArgMap
+    seen, real = [], ArgMap.on_utterance
+    monkeypatch.setattr(ArgMap, "on_utterance", lambda self, u: (seen.append(u.id), real(self, u))[1])
+    h = brain
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    h.pub(U("B", "air pollution causes 40,000 early deaths a year in the UK", t - 3.8, t - .1, uid="u-B-bleed"))
+    h.pub(Interjection(id="i-1", text="Point of fact: the ONS says it is 4.1 percent.", kind="correction",
+                       claim_id="a1", target="A"), src="brain")
+    h.clock.t += 1
+    h.pub(TTSState(speaking=True))
+    h.clock.t += 3
+    h.pub(TTSState(speaking=False))
+    h.clock.t += 1
+    t = h.now()
+    h.pub(U("A", "the ONS says it is 4.1 percent", t - 1.5, t - .5, uid="u-A-echo"))
+    h.pub(U("B", "Diesel buses produce more nitrogen dioxide than cars do.", t - .4, t, uid="u-B-1"))
+    await h.start()
+    assert seen == ["u-A-1", "u-B-1"]
