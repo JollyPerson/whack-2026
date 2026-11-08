@@ -471,3 +471,54 @@ def test_prompt_asks_for_figures_said_in_words():
 def test_word_figure_reported_beside_a_year_is_compared_and_stays_on_air():
     g = apply_guards(raw(label="contradicted", quote=ROADS_QUOTE, claimed=500000, actual=128272), ROADS, ROADS_SRC)
     assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
+
+
+# --- regressions: index
+def test_query_vector_of_the_wrong_size_leaves_bm25_to_answer():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e")
+    assert index.search("bus use in London", 1, query_vector=[1.0] * 5)[0]["url"].endswith("/0")
+
+
+def test_save_without_vectors_removes_old_vectors(tmp_path):
+    np = pytest.importorskip("numpy")
+    five = [{"url": f"https://x.org/{i}", "title": "t", "text": f"bus use {i}"} for i in range(5)]
+    EvidenceIndex(five, np.eye(5, dtype="float32"), "e").save(tmp_path / "m")
+    EvidenceIndex(five[:1]).save(tmp_path / "m")
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and len(idx.search("bus use", 5, query_vector=[1, 0, 0, 0, 0])) == 1
+
+
+def test_load_drops_vectors_that_do_not_match_the_chunks(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    np.save(tmp_path / "m.npy", np.eye(5, dtype="float32"))
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and idx.search("bus use", 3, query_vector=[0, 0, 0, 0, 1])
+
+
+def test_save_leaves_no_temporary_files(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["m.json", "m.npy"]
+
+
+def test_openai_embedder_reuses_one_connection(monkeypatch):
+    import httpx
+    from app.evidence import index as index_module
+    made, sent = [], []
+
+    def reply(request):
+        sent.append(request)
+        n = len(json.loads(request.content)["input"])
+        return httpx.Response(200, json={"data": [{"index": i, "embedding": [float(i)]} for i in range(n)]})
+
+    class Counting(httpx.Client):
+        def __init__(self, **kw):
+            made.append(self)
+            super().__init__(transport=httpx.MockTransport(reply), **kw)
+    monkeypatch.setattr(index_module.httpx, "Client", Counting)
+    monkeypatch.setattr(index_module.httpx, "post", lambda *a, **k: pytest.fail("a new connection for every call"))
+    embedder = index_module.OpenAIEmbedder("k")
+    assert embedder.embed(["a"]) == [[0.0]] and embedder.embed(["a", "b"]) == [[0.0], [1.0]]
+    assert len(made) == 1 and len(sent) == 2 and sent[0].headers["authorization"] == "Bearer k"

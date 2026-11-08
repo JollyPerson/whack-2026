@@ -5,11 +5,13 @@ the few thousand chunks a Motion produces. Raw text stays beside each vector so 
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import os
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Optional, Protocol
@@ -48,12 +50,13 @@ class OpenAIEmbedder:
         self.name = f"openai:{model}"
         self.model, self.timeout = model, timeout
         self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.client = httpx.Client()       # one kept-alive connection: a query embedding has 1 s, TLS alone eats a lot
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
         for i in range(0, len(texts), 256):
-            r = httpx.post("https://api.openai.com/v1/embeddings", headers=self.headers, timeout=self.timeout,
-                           json={"model": self.model, "input": texts[i:i + 256]})
+            r = self.client.post("https://api.openai.com/v1/embeddings", headers=self.headers, timeout=self.timeout,
+                                 json={"model": self.model, "input": texts[i:i + 256]})
             r.raise_for_status()
             out += [d["embedding"] for d in sorted(r.json()["data"], key=lambda d: d["index"])]
         return out
@@ -134,7 +137,10 @@ class EvidenceIndex:
         depth = max(50, k * 10)
         rankings = [self._bm25_ranked(query)[:depth]]
         if query_vector is not None and self.vectors is not None and len(self.chunks):
-            rankings.append(self._vector_ranked(query_vector, depth))
+            try:
+                rankings.append(self._vector_ranked(query_vector, depth))
+            except ValueError as e:                # a vector from another model: BM25 still answers
+                log.warning("query vector doesn't fit the index, using BM25: %r", e)
         fused: dict[int, float] = {}
         for ranking in rankings:
             for rank, i in enumerate(ranking):
@@ -149,20 +155,38 @@ class EvidenceIndex:
         return out
 
     def save(self, path: Path) -> None:
+        """Each file is replaced whole, and an older build's vectors never stay behind to be paired with these chunks."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.with_suffix(".json").write_text(json.dumps({"embedder": self.embedder_name, "chunks": self.chunks}))
         if self.vectors is not None:
             import numpy as np
-            np.save(path.with_suffix(".npy"), self.vectors)
+            buf = io.BytesIO()
+            np.save(buf, self.vectors)
+            _write_atomic(path.with_suffix(".npy"), buf.getvalue())
+        else:
+            path.with_suffix(".npy").unlink(missing_ok=True)
+        _write_atomic(path.with_suffix(".json"), json.dumps({"embedder": self.embedder_name, "chunks": self.chunks}).encode())
 
     @classmethod
     def load(cls, path: Path) -> "EvidenceIndex":
         data = json.loads(path.with_suffix(".json").read_text())
-        vectors = None
+        chunks, vectors = data["chunks"], None
         if path.with_suffix(".npy").exists():
             import numpy as np
             vectors = np.load(path.with_suffix(".npy"))
-        return cls(data["chunks"], vectors, data.get("embedder", ""))
+            if vectors.ndim != 2 or len(vectors) != len(chunks):
+                log.warning("%s: %s vectors for %d chunks, using BM25 only", path.name, vectors.shape, len(chunks))
+                vectors = None
+        return cls(chunks, vectors, data.get("embedder", ""))
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Readers see the old file or the new one, never half of one: the server may load while pre-research saves."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def build_vectors(chunks: list[dict], embedder: Optional[Embedder]):
