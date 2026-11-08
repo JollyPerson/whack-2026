@@ -66,7 +66,8 @@ class Judge:
     def __init__(self, publish: Callable[[Event], Any], llm: Any = None,
                  history: Callable[[], list[Event]] = list, log_path: Optional[Path] = None):
         self.publish, self.llm, self.history = publish, llm, history
-        self.run_name = Path(log_path).stem if log_path else ""
+        # <run> in <run>-summary.md: the bus log's stem, else when this module started (one name per run)
+        self.run_name = Path(log_path).stem if log_path else time.strftime("%Y%m%d-%H%M%S")
         self.task: Optional[asyncio.Task] = None
         self.session = 0
         self.reset()
@@ -129,12 +130,11 @@ class Judge:
             card = scorecard.scorecard(rec)
             j = await writer.decide(self.llm, rec, card)
             dances, music, dance_s = dances_for(j.winner), music_for(j.winner), float(config.JUDGE_DANCE_S)
-            run = self.run_name or time.strftime("%Y%m%d-%H%M%S")
             where = ""
             try:
-                self.path = self.path or report.new_path(run)
+                self.path = self.path or report.new_path(self.run_name)
                 path = await asyncio.to_thread(report.write, self.path, rec, card, j, dances, music, dance_s,
-                                               None, run)
+                                               None, self.run_name)
                 where = report.display(path)
             except Exception:
                 log.exception("judge: writing the summary failed")
