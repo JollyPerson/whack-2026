@@ -241,10 +241,14 @@ const sinceOf = c => (c.marks || {}).speech_end || c.t_end || c.ts || Date.now()
 function chipHtml(c) {
   const v = S.verdicts.get(c.id);
   if (v) return `<span class="chip ${esc(v.label)}"><i aria-hidden="true">${ICONS[v.label] || '?'}</i>${esc(LABELS[v.label] || v.label)}</span>`;
+  if (!c.checkable) return `<span class="chip uncheckable">${esc(UNCHECKED[c.type] || 'Not checked')}</span>`;
   if (Date.now() / 1000 - sinceOf(c) > STALE_CHECK_S) return '<span class="chip stale">No verdict</span>';
   return `<span class="chip checking"><i class="pulse" aria-hidden="true">●</i>Checking <span class="clock" data-since="${esc(sinceOf(c))}"></span></span>`;
 }
-const shown = c => c.checkable || S.verdicts.has(c.id);
+// Every claim is shown: ones the checker won't look up (opinions, predictions, vague) get a plain chip, not "Checking".
+const shown = c => !!c;
+const UNCHECKED = {value: 'Opinion', prediction: 'Prediction'};
+const pending = c => c.checkable && !S.verdicts.has(c.id);
 const claimsOf = uttId => [...S.claims.values()].filter(c => c.utterance_id === uttId && shown(c));
 
 // Lights up the spoken words of each claim, when the claim's text appears verbatim in the utterance.
@@ -260,7 +264,7 @@ function markedText(u, claims) {
   for (const {from, to, c} of spans) {
     if (from < pos) continue;
     const v = S.verdicts.get(c.id);
-    out += `${esc(text.slice(pos, from))}<mark class="${v ? esc(v.label) : 'checking'}">${esc(text.slice(from, to))}</mark>`;
+    out += `${esc(text.slice(pos, from))}<mark class="${v ? esc(v.label) : pending(c) ? 'checking' : 'uncheckable'}">${esc(text.slice(from, to))}</mark>`;
     pos = to;
   }
   return out + esc(text.slice(pos));
@@ -301,7 +305,7 @@ function tally(side) {
   for (const c of S.claims.values()) {
     if (sideOf(c.speaker) !== side || !shown(c)) continue;
     const v = S.verdicts.get(c.id);
-    t[v ? v.label : 'checking'] += 1;
+    if (v) t[v.label] += 1; else if (c.checkable) t.checking += 1;
   }
   return t;
 }
@@ -383,9 +387,9 @@ function drawLive() {
   patch(box, rows.length ? rows : [{key: 'empty', html: `<p class="empty">${S.session ? 'Waiting for speech…' : 'The debate appears here.'}</p>`}]);
   if (pinned) box.scrollTop = box.scrollHeight;
 
-  const claims = [...S.claims.values()].filter(shown).slice(-30).reverse();
+  const claims = [...S.claims.values()].filter(shown).slice(-60).reverse();
   patch($('feed'), claims.length ? claims.map(c => ({key: c.id, html: cardHtml(c)}))
-                                 : [{key: 'empty', html: '<p class="empty">Checkable claims appear here as they are spoken.</p>'}]);
+                                 : [{key: 'empty', html: '<p class="empty">Claims appear here as they are spoken.</p>'}]);
   setHtml($('tally'), ['prop', 'opp'].map(side => `<div class="${side}"><b class="who">${SIDE_NAMES[side]}</b>${countsHtml(tally(side))}</div>`).join(''));
 }
 function sideHtml(side) {
@@ -407,7 +411,7 @@ function sideHtml(side) {
   const unanswered = score && score.unanswered ? `<span class="count">${esc(score.unanswered)} left unanswered</span>` : '';
   return `<h3 class="who">${SIDE_NAMES[side]}${speakers ? ` <span>${esc(speakers)}</span>` : ''}</h3>`
     + verdictBarHtml(t) + `<div class="counts">${countsHtml(t)}${unanswered}</div>`
-    + `<div class="scroll">${rows || '<p class="empty">No checkable claims.</p>'}</div>`;
+    + `<div class="scroll">${rows || '<p class="empty">No claims.</p>'}</div>`;
 }
 function drawFinal() {
   setHtml($('call'), esc((S.map && S.map.call) || 'The evidence so far'));

@@ -28,7 +28,12 @@ What counts as a claim
 SENTENCE; use the other sections only to resolve references and to choose links.
 - Skip greetings, thanks, procedure ("can I finish", "I'll take that point"), filler, jokes, genuine questions, \
 and claims the speaker mentions only to reject them (extract the rejection instead).
-- Most sentences contain 0 or 1 claims; never return more than 3.
+- In a debate speech most sentences take a position: rhetorical, figurative or emotive assertions count \
+("history is filled with the corpses of his decisions" is a value claim). Return [] only when the SENTENCE \
+asserts nothing; when unsure whether it is a claim, extract it (checkable decides whether it gets checked). \
+Never return more than 3.
+- Speech recognition often cuts a sentence in two. If SENTENCE is a fragment, complete it from EARLIER IN THIS \
+TURN and extract the claim it completes.
 - "text": the claim as a standalone sentence of at most 20 words, in the third person, with pronouns and \
 references resolved from context ("it" -> "the tuition fee cap", "that figure" -> "the 45,000 pound figure"). \
 Keep every number, unit, date, place and named source exactly as spoken. Add nothing that was not said. Drop \

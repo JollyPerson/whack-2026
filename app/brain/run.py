@@ -14,8 +14,7 @@ Flexible on purpose:
 - Finals-only ears (no interims seen yet): a final is no proof the speaker stopped, so synthetic Pauses and
   the Director's floor timeout wait longer (>= 6 s) before the floor counts as open.
 - Ingress guards: our own TTS (echo: only words matching what we're saying, so a human talking over us still
-  counts; expires if TTSState speaking:false never comes), the other speaker's voice leaking into a mic (bleed),
-  and interims arriving after their final never count as speech.
+  counts; expires if TTSState speaking:false never comes) and interims arriving after their final never count as speech.
 - A crash-restart rebuilds the argument map + Director state (incl. lines already spoken, vetoes, mute,
   aggressiveness) from the bus history, silently.
 """
@@ -155,31 +154,6 @@ class EchoGuard:
         return "speech"
 
 
-class BleedGuard:
-    """Two mics in one room: speaker B's mic also transcribes speaker A. Drop a final utterance whose
-    words mostly match another speaker's utterance overlapping in time (keeps the first one heard)."""
-
-    def __init__(self, overlap: float = 0.7, slack_s: float = 1.5):
-        self.overlap, self.slack_s = overlap, slack_s
-        self.recent: list[tuple[str, float, float, set]] = []   # (speaker, t_start, t_end, tokens)
-
-    def reset(self) -> None:
-        self.recent = []
-
-    def is_bleed(self, u: Utterance) -> bool:
-        words = _toks(u.text)
-        self.recent = [r for r in self.recent if u.ts - r[2] < 30][-40:]
-        for spk, a, b, toks in self.recent:
-            if spk == u.speaker or len(words) < 4:
-                continue
-            if u.t_start <= b + self.slack_s and a <= u.t_end + self.slack_s:
-                if len(words & toks) / len(words) >= self.overlap:
-                    return True
-        if u.final:
-            self.recent.append((u.speaker, u.t_start, u.t_end, words))
-        return False
-
-
 class LateInterims:
     """An interim that arrives after its final (out-of-order STT callbacks) is stale: never new speech."""
 
@@ -229,7 +203,7 @@ async def run(bus) -> None:
     amap = ArgMap(k_turns=config.ARGMAP_K_TURNS)
     director = Director(aggr=config.DIRECTOR_AGGR)
     pauses = PauseSynth(config.PAUSE_SYNTH, config.PAUSE_SYNTH_GAP_S, float(getattr(config, "FINALS_ONLY_WAIT_S", 6.0)))
-    echo, bleed, late = EchoGuard(), BleedGuard(), LateInterims()
+    echo, late = EchoGuard(), LateInterims()
     # Subscribe and snapshot the history in one synchronous step: every event is restored or handled live, once.
     sub = bus.subscribe("brain", {"SessionStart", "Utterance", "Pause", "Claim", "Verdict", "Control", "TTSState"},
                         maxsize=512)
@@ -321,8 +295,7 @@ async def run(bus) -> None:
                     director.reset(ev)
                     checker.reset()
                 elif ev.event == "Utterance" and ev.final:   # the live ingress guards, in the live order
-                    heard = echo.classify(ev, ev.ts)         # (bleed also remembers a floor-only final)
-                    if heard != "echo" and not bleed.is_bleed(ev) and heard == "speech":
+                    if echo.classify(ev, ev.ts) == "speech":
                         amap.on_utterance(ev)
                 elif ev.event == "Claim":
                     amap.add_claim(ev)
@@ -415,12 +388,11 @@ async def run(bus) -> None:
                         t.cancel()
                     for m in (amap, director):
                         m.reset(ev)
-                    for m in (extractor, pauses, echo, bleed, late, checker):
+                    for m in (extractor, pauses, echo, late, checker):
                         m.reset()
                     spawn(extractor.warmup(ev.motion))
                 elif name == "Utterance":
-                    if late.is_late(ev) or (heard := echo.classify(ev, now)) == "echo" or \
-                            (ev.final and bleed.is_bleed(ev)):
+                    if late.is_late(ev) or (heard := echo.classify(ev, now)) == "echo":
                         continue
                     pauses.on_utterance(ev, now)
                     with guarded("director"):                  # first, on its own: the floor model hears the

@@ -612,3 +612,45 @@ async def test_heuristic_on_fixture(factory):
     assert all(not l or l.relation == "attacks" for c in pub for l in c.links)
     assert all(1 <= len(c.topic.split()) <= 4 for c in pub)
     assert not any("Thank you" in c.text or "finish my point" in c.text for c in pub)
+
+
+# ---------------------------------------------------------------- cut-off sentences (STT chunk boundaries)
+def test_mr_and_ellipsis_do_not_end_a_sentence():
+    assert C._split_complete("Next I would like to welcome Mr.") == ("", "Next I would like to welcome Mr.")
+    assert C._split_complete("Wages fell. But for over 90 of them...") == ("Wages fell.", "But for over 90 of them...")
+    assert C.split_sentences("For over 90 of the population... of laborers, wages fell.") == \
+        ["For over 90 of the population... of laborers, wages fell."]
+
+
+def _cutoff_run(texts):
+    from app.brain.argmap import ArgMap
+    out, t = [], 1000.0
+    ex = ClaimExtractor(ArgMap(), out.append, None, clock=lambda: t)
+
+    async def go():
+        nonlocal t
+        for i, txt in enumerate(texts):
+            u = Utterance(id=f"u{i}", speaker="A", text=txt, final=True, t_start=t, t_end=t + 1, ts=t + 1)
+            for unit in ex.assemble(u, t + 1):
+                await ex.extract(unit)
+            t += 1.5
+        for unit in ex.flush(now=t):
+            await ex.extract(unit)
+
+    asyncio.run(go())
+    return [c.text for c in out]
+
+
+def test_a_title_cut_at_mr_is_rejoined():
+    got = _cutoff_run(["Next I would like to welcome Mr.", "Yousaf, who says the famine killed 3 million people."])
+    assert any("Mr. Yousaf" in c and "3 million" in c for c in got), got
+
+
+def test_a_short_lowercase_tail_is_joined_to_its_sentence_not_dropped():
+    got = _cutoff_run(["The Bengal famine under Churchill was an", "atrocity."])
+    assert any("atrocity" in c and "Bengal famine" in c for c in got), got
+    ex = ClaimExtractor(None, lambda e: e, None)
+    u = Utterance(id="u1", speaker="A", text="The war cabinet ignored Bengal. atrocity.", final=True)
+    assert ex._sentences(u) == ["The war cabinet ignored Bengal atrocity."]
+    u = Utterance(id="u2", speaker="A", text="Thank you. and Canada.", final=True)
+    assert ex._sentences(u) == []

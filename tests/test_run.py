@@ -1,4 +1,4 @@
-"""brain/run.py: ingress guards (echo, bleed, late interims), pause synthesis, time rebasing and crash-restore.
+"""brain/run.py: ingress guards (echo, late interims), pause synthesis, time rebasing and crash-restore.
 
 Units are tested directly; the wiring runs the real brain on a real Bus with a fake wall clock that only moves
 when a test says so (brain, bus and Director all read time.time()). asyncio sleeps stay real but short.
@@ -15,7 +15,7 @@ import pytest
 
 from app import config
 from app.brain import run as brain_run
-from app.brain.run import BleedGuard, EchoGuard, LateInterims, PauseSynth, _fill_times
+from app.brain.run import EchoGuard, LateInterims, PauseSynth, _fill_times
 from app.bus import Bus
 from app.schemas import Claim, Control, Evidence, Interjection, Pause, SessionStart, TTSState, Utterance, Verdict
 
@@ -140,18 +140,6 @@ def test_pause_synth_waits_longer_until_interims_are_seen():
     assert not ps.active and ps.due(T0 + 200) == []
     ps.reset()
     assert ps.active and not ps.interims_seen
-
-
-def test_bleed_guard_drops_the_other_mic_hearing_a_speaker():
-    b = BleedGuard()
-    assert not b.is_bleed(U("A", "Air pollution causes 40,000 early deaths a year", T0, T0 + 4))
-    assert b.is_bleed(U("B", "air pollution causes 40,000 early deaths a year", T0 + .3, T0 + 4.2))
-    assert not b.is_bleed(U("B", "That figure is a modelled estimate, not a count", T0 + 1, T0 + 4))
-    assert not b.is_bleed(U("A", "Air pollution causes 40,000 early deaths a year", T0 + 5, T0 + 9))   # same speaker
-    assert not b.is_bleed(U("B", "air pollution causes 40,000 early deaths a year", T0 + 20, T0 + 24))  # no overlap
-    assert not b.is_bleed(U("B", "yes yes", T0 + 5, T0 + 6))                                         # too short
-    b.reset()
-    assert b.recent == []
 
 
 def test_late_interims_after_their_final_are_ignored():
@@ -565,9 +553,9 @@ async def test_warmup_task_is_cancelled_with_the_brain(brain, monkeypatch):
     assert warm() == []
 
 
-async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatch):
-    """restore_from_history fed every final to the argument map: after a restart our own echoed lines and the
-    other mic's bleed copies became debate turns."""
+async def test_crash_restore_applies_the_echo_guard(brain, monkeypatch):
+    """restore_from_history fed every final to the argument map: after a restart our own echoed lines became
+    debate turns. Two mics hearing the same words both count: there is no bleed guard."""
     from app.brain.argmap import ArgMap
     seen, real = [], ArgMap.on_utterance
     monkeypatch.setattr(ArgMap, "on_utterance", lambda self, u: (seen.append(u.id), real(self, u))[1])
@@ -575,7 +563,7 @@ async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatc
     h.session()
     t = h.now()
     h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
-    h.pub(U("B", "air pollution causes 40,000 early deaths a year in the UK", t - 3.8, t - .1, uid="u-B-bleed"))
+    h.pub(U("B", "air pollution causes 40,000 early deaths a year in the UK", t - 3.8, t - .1, uid="u-B-2"))
     h.pub(Interjection(id="i-1", text="Point of fact: the ONS says it is 4.1 percent.", kind="correction",
                        claim_id="a1", target="A"), src="brain")
     h.clock.t += 1
@@ -587,4 +575,4 @@ async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatc
     h.pub(U("A", "the ONS says it is 4.1 percent", t - 1.5, t - .5, uid="u-A-echo"))
     h.pub(U("B", "Diesel buses produce more nitrogen dioxide than cars do.", t - .4, t, uid="u-B-1"))
     await h.start()
-    assert seen == ["u-A-1", "u-B-1"]
+    assert seen == ["u-A-1", "u-B-2", "u-B-1"]
