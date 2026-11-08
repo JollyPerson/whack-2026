@@ -77,8 +77,8 @@ JUDGE_MODEL = _env("JUDGE_MODEL", "claude-opus-5-5")     # weighs the scorecard 
 JUDGE_TIMEOUT_S = _env("JUDGE_TIMEOUT_S", 60.0)          # then the scorecard formula decides (DebateResult.via=formula)
 JUDGE_SUMMARY_WAIT_S = _env("JUDGE_SUMMARY_WAIT_S", 15.0)   # after the click, wait this long for the brain's DebateSummary
 JUDGE_DIR = _env("JUDGE_DIR", "logs/summaries")          # <run>-summary.md + .json
-JUDGE_DANCE_WIN = _env("JUDGE_DANCE_WIN", "MMD-Conqueror")             # alternative: MMD-KING
-JUDGE_DANCE_LOSE = _env("JUDGE_DANCE_LOSE", "MMD-Lost One_s Weeping")  # alternative: MMD-Failure Girl
+JUDGE_DANCE_WIN = _env("JUDGE_DANCE_WIN", "Victory")    # Mixamo "Victory" idle (mate-engine/README.md)
+JUDGE_DANCE_LOSE = _env("JUDGE_DANCE_LOSE", "Defeat")   # Mixamo "Defeat" idle
 JUDGE_DANCE_DRAW = _env("JUDGE_DANCE_DRAW", "MMD-皆大欢喜-卜逻desu")       # both bots, on a draw
 JUDGE_DANCE_S = _env("JUDGE_DANCE_S", 30.0)              # the dances stop after this long (or at the next SessionStart)
 JUDGE_MUSIC = _env("JUDGE_MUSIC", "winner")              # winner | none | both (a draw with "winner": silent)

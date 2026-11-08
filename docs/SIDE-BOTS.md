@@ -65,8 +65,8 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
 6. **End.** Click **Final screen**.
    - The bots stop.
    - The judge writes `logs/summaries/<run>-summary.md` (and `.json`), and the verdict card appears.
-   - The winner's bot dances `MMD-Conqueror` with music, and the loser's bot dances `MMD-Lost One_s Weeping` in
-     silence. A draw makes both dance `MMD-皆大欢喜-卜逻desu`.
+   - The winner's bot plays the `Victory` idle (with music, if its bundle has any), and the loser's bot the
+     `Defeat` idle in silence. A draw makes both dance `MMD-皆大欢喜-卜逻desu`.
    - The dances stop after 30 s, or at the next debate.
 
 ## Settings worth knowing
@@ -100,11 +100,11 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
   - Neither project is affiliated with or endorses whack-2026.
   - The speech bubble in our changes mirrors `LLMUnitySamples.Bubble` from [LLMUnity](https://github.com/undreamai/LLMUnity)
     by Undream AI (MIT).
-- **Verdict dances.** They come from the Mate Engine community's CustomDances collection: "MMD-Conqueror",
-  "MMD-Lost One_s Weeping" and "MMD-皆大欢喜-卜逻desu". The motions and songs belong to their original MMD motion and
-  music creators and to the collection's contributors. They are not redistributed here.
-  - A later upgrade could use [Mixamo](https://www.mixamo.com) animations ("Victory", "Defeated"), which are
-    royalty-free with an Adobe account.
+- **Verdict dances.** "Victory" and "Defeat" are built from [Mixamo](https://www.mixamo.com) animations (Adobe;
+  royalty-free in projects, not redistributable as animation files) with `VerdictDanceCli`; they are not included
+  here. The draw dance, "MMD-皆大欢喜-卜逻desu", comes from the Mate Engine community's CustomDances collection; its
+  motion and song belong to their original MMD creators and the collection's contributors, and it is not
+  redistributed here.
 - **Speech to text.** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) by SYSTRAN (MIT), running OpenAI's
   [Whisper](https://github.com/openai/whisper) models (MIT).
 - **Language models.** [Claude](https://www.anthropic.com/claude) by Anthropic, through the Anthropic API.

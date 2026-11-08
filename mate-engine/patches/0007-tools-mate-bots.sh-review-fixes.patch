@@ -1,7 +1,7 @@
 From 1d246b405cc654f3ba50c8d3c4a45ffd65771afe Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 05:18:20 +0000
-Subject: [PATCH 07/12] tools/mate-bots.sh: review fixes
+Subject: [PATCH 07/13] tools/mate-bots.sh: review fixes
 
 - Unset MEX_SPEECH_BRIDGE for the bots: it overrides speech_bridge.json,
   so a value exported for the referee would redirect or disable them.

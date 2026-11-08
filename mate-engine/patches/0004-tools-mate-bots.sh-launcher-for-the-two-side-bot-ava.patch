@@ -1,7 +1,7 @@
 From 6dbc762580f153f60e22f45fe8294aeb05a30f24 Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 04:59:54 +0000
-Subject: [PATCH 04/12] tools/mate-bots.sh: launcher for the two side-bot
+Subject: [PATCH 04/13] tools/mate-bots.sh: launcher for the two side-bot
  avatars
 
 start|stop|status|place [for|against] runs the debate's side bots from

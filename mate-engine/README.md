@@ -13,6 +13,7 @@ series. There is no separate fork repository. The patches apply on top of the un
 | 0004, 0006, 0007, 0010 | `tools/mate-bots.sh`: launches the two side-bot avatars (own config, channel, window, avatar) and installs the verdict dances |
 | 0009 | Dance music on/off and automatic stop, for the verdict dances |
 | 0012 | Credits and a note about what this fork is |
+| 0013 | `VerdictDanceCli`: humanoid FBX (Mixamo Victory / Defeated idles) to `Victory.unity3d` / `Defeat.unity3d` verdict dances; launcher and mock default to them |
 
 The protocol, every setting and the credits are in `Assets/MATE ENGINE - Referee/README.md` once the patches are
 applied. Running the whole system is covered in [`docs/SIDE-BOTS.md`](../docs/SIDE-BOTS.md).
@@ -49,5 +50,8 @@ The verdict dances are not included (see Credits). Without `DANCE_LIBRARY`, ever
   Marksonthegamer. Neither project is affiliated with or endorses whack-2026.
 - The bubble mirrors `LLMUnitySamples.Bubble` from [LLMUnity](https://github.com/undreamai/LLMUnity) by Undream AI
   (MIT).
-- The verdict dances ("MMD-Conqueror", "MMD-Lost One_s Weeping", "MMD-皆大欢喜-卜逻desu") come from the Mate Engine
-  community's CustomDances collection. They belong to their MMD motion and music creators and are not redistributed.
+- The winner/loser dances "Victory" and "Defeat" are built from [Mixamo](https://www.mixamo.com) animations (Adobe;
+  royalty-free in projects, not redistributable as animation files), so build them yourself:
+  `-executeMethod VerdictDanceCli.Build --fbx "<Victory.fbx>" --name Victory --fbx "<Defeat.fbx>" --name Defeat
+  --out <dance-library>/Verdict`. The draw dance "MMD-皆大欢喜-卜逻desu" comes from the Mate Engine community's
+  CustomDances collection; it belongs to its MMD motion and music creators and is not redistributed.

@@ -1,7 +1,7 @@
 From c88e489893291472eed0cc9dd7e9f5417f4a38dc Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 06:05:29 +0000
-Subject: [PATCH 09/12] Referee bridge: dance music switch and auto-stop
+Subject: [PATCH 09/13] Referee bridge: dance music switch and auto-stop
  (verdict dances)
 
 The debate server's DebateResult has each side bot dance after the

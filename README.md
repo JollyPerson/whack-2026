@@ -135,15 +135,16 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
   landed (or was revised), a consistency finding came in or the debate summary arrived since. Replaying a log recorded with the judge on shows its recorded
   verdict: a replayed Final screen click never starts a second judgement.
 - **Verdict dances.** The `DebateResult` makes both side bots dance on their Mate Engine channels (see
-  [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot `MMD-Conqueror` with its music,
-  the loser's `MMD-Lost One_s Weeping` without; on a draw both do `MMD-皆大欢喜-卜逻desu`, silently. The titles are
+  [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot plays `Victory` with its music,
+  the loser's `Defeat` without (Mixamo idles, looping in place); on a draw both do `MMD-皆大欢喜-卜逻desu`, silently. The titles are
   the dance files' names in Mate Engine's `CustomDances` (matched case-insensitively) and are shown on screen.
   `JUDGE_MUSIC=winner|none|both` picks who gets music; the dances stop after `JUDGE_DANCE_S` (30 s) or at the next
   debate. Tunables: the `JUDGE_*` names in `app/config.py` and `.env.example`.
-- **Later upgrade: Mixamo.** Proper victory and defeat animations instead of dances: on
-  [mixamo.com](https://www.mixamo.com) (free with an Adobe account) download "Victory" and "Defeated" (or "Sad Idle")
-  as FBX without skin, export each to a Mate Engine dance mod with the fork's `DanceModCli`, and set
-  `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE` to their titles.
+- **Building the Victory / Defeat dances.** They come from [Mixamo](https://www.mixamo.com) (free with an Adobe
+  account) as FBX and are turned into `Victory.unity3d` / `Defeat.unity3d` with the patched Mate Engine's
+  `VerdictDanceCli` (see `mate-engine/README.md`). Mixamo's terms don't allow redistributing the animation files,
+  so the bundles aren't in this repository: build them, put them in your `DANCE_LIBRARY`, and the launcher installs
+  them. Other titles: set `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE`.
 
 ## Layout and ownership
 

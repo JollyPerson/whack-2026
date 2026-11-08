@@ -94,12 +94,13 @@ on the final screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(
 and clears the bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
 
 **Verdict dances.** A `DebateResult` makes both side bots dance (the referee's avatar doesn't). The winner's bot dances
-`JUDGE_DANCE_WIN` (default `MMD-Conqueror`) with its music, and the loser's bot dances `JUDGE_DANCE_LOSE`
-(`MMD-Lost One_s Weeping`) with no sound. On a draw both dance `JUDGE_DANCE_DRAW` (`MMD-皆大欢喜-卜逻desu`), silently with
+`JUDGE_DANCE_WIN` (default `Victory`, a Mixamo idle) with its music, and the loser's bot dances `JUDGE_DANCE_LOSE`
+(`Defeat`) with no sound. On a draw both dance `JUDGE_DANCE_DRAW` (`MMD-皆大欢喜-卜逻desu`), silently with
 `JUDGE_MUSIC=winner`. Mate Engine matches each title to a dance file's name in its CustomDances, ignoring case; a
 title it can't find plays its first dance. Each dance stops after `JUDGE_DANCE_S` (30 s), sent as the command's
 `seconds`, or at the next `SessionStart`, which sends `dance_stop` to both bots. While a bot dances, its `BotLine`s
 don't reach its avatar, because a `say` stops the dance in Mate Engine. The operator route takes the same switches,
-which is handy for a rehearsal: `-d '{"title":"MMD-Conqueror","channel":"for","on":true,"seconds":30}'` (`on` =
+which is handy for a rehearsal: `-d '{"title":"Victory","channel":"for","on":true,"seconds":30}'` (`on` =
 with music, `seconds` 0 or absent = to the end). A Mate Engine build that predates `on` and `seconds` ignores both: it
-plays at its configured volume to the end. Mixamo "Victory" and "Defeated" animations are a later upgrade, not built.
+plays at its configured volume to the end. Victory and Defeat are built from Mixamo FBX files with the patched Mate Engine's
+`VerdictDanceCli` (`mate-engine/README.md`).

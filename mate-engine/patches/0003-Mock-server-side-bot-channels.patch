@@ -1,7 +1,7 @@
 From 1f9a90987fa7dfdafdad9261c5b0543b35590d33 Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 04:59:46 +0000
-Subject: [PATCH 03/12] Mock server: side-bot channels
+Subject: [PATCH 03/13] Mock server: side-bot channels
 
 tools/mock_mate_server.py now serves /face/mate/next/{referee|for|against}
 like the debate server (/face/mate/next is referee, unknown channels 404),
