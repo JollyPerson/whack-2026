@@ -456,16 +456,24 @@ function drawBots() {
   }
 }
 // The judge's verdict (DebateResult) on the final screen: winner, margin, headline, overall and per-criterion scores,
-// each bot's dance. Before it arrives, "Judging…" (only when the judge module runs, and for JUDGING_MAX_S after the
-// Final screen click). Model text, so textContent only. Rebuilt only when the result changes.
+// each bot's dance. Before it arrives, "Judging…" (only when the judge module runs, for JUDGING_MAX_S after the
+// Final screen click at most, and not once the judge's status since the click says no verdict is coming: nothing to
+// judge, judging failed, or the module restarted). A click that re-judges (more speech since) replaces the earlier
+// verdict with "Judging…" as soon as the judge says it is at it. Model text, so textContent only. Rebuilt only when
+// the result changes.
 const MARGINS = {narrow: 'Narrow margin', clear: 'Clear margin', decisive: 'Decisive margin'};
 const scoreText = v => typeof v === 'number' && Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : v.toFixed(1))
                  : typeof v === 'string' && v ? v : '–';
 const criterionName = k => { const t = String(k).replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); };
+// The judge's ModuleStatus while it works on a click (app/judge/run.py: settling, the summary wait, judging).
+const JUDGE_BUSY = /^(waiting up to |judging: )/;
 function drawVerdict() {
-  const box = $('verdict'), r = S.result;
+  const box = $('verdict'), clicked = S.finalAt != null;
   const judgeOn = (MODULES.judge && MODULES.judge !== 'off') || !!S.status.judge;
-  const judging = !r && judgeOn && S.finalAt != null && Date.now() / 1000 - S.finalAt < JUDGING_MAX_S;
+  const said = clicked && S.status.judge && S.status.judge.ts >= S.finalAt ? S.status.judge : null;  // since the click
+  const busy = !!said && said.state === 'up' && JUDGE_BUSY.test(said.detail || '');
+  const r = S.result && busy && S.result.e.ts < S.finalAt ? null : S.result;   // an earlier click's, being redone
+  const judging = !r && judgeOn && clicked && Date.now() / 1000 - S.finalAt < JUDGING_MAX_S && (!said || busy);
   box.hidden = S.flags.screen !== 'final' || (!r && !judging);
   const key = r ? `result ${r.e.seq}` : 'judging';
   if (box.hidden || box.dataset.key === key) return;

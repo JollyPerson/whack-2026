@@ -24,6 +24,8 @@ Once per session: a later final click judges again only if new final Utterances 
 arrived since the last judgement, otherwise it publishes nothing. The judgement runs as a background task (the bus
 loop never waits on Claude); a click while one runs is ignored. SessionStart resets everything and cancels a
 judgement in flight. After a crash-restart, a DebateResult already in the history counts as judged.
+Its ModuleStatus details that start "waiting up to " or "judging: " mean it is at a click; the dashboard shows
+"Judging…" for those (app/face/static/app.js, JUDGE_BUSY) and stops once any other status follows the click.
 Replays: a final click replayed from a log (src "replay:...") is ignored, only a live click judges; a DebateResult
 from another src (a replayed one) counts as this session's judgement and cancels one in flight, so a replayed log
 never shows two verdicts.
