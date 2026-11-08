@@ -319,35 +319,36 @@ async def run(bus) -> None:
             log.info("brain restored %d events from history", n)
 
     @contextmanager
-    def tick_step(what: str) -> Iterator[None]:
-        """Each ticker step on its own: one that keeps failing never stops the heartbeat or the others."""
+    def guarded(what: str) -> Iterator[None]:
+        """One step on its own: a step that raises is logged and the steps after it still run (a ticker step that
+        keeps failing never stops the heartbeat; a Director error never costs the map or extraction)."""
         try:
             yield
         except Exception:
-            log.exception("brain tick failed: %s", what)
+            log.exception("brain step failed: %s", what)
 
     async def ticker() -> None:
         last_ver, last_snap, last_status, last_stats = -1, 0.0, 0.0, time.time()
         while True:
             await asyncio.sleep(TICK_S)
             now = time.time()
-            with tick_step("pauses"):
+            with guarded("tick pauses"):
                 for p in pauses.due(now):
                     bus.publish(p, src="brain:pause_synth")   # comes back through the subscription
-            with tick_step("flush"):
+            with guarded("tick flush"):
                 start_extract(extractor.flush_due(now))
-            with tick_step("director"):
+            with guarded("tick director"):
                 emit(director.tick(now))
-            with tick_step("snapshot"):
+            with guarded("tick snapshot"):
                 hz = config.ARGMAP_SNAPSHOT_HZ                # <= 0: snapshots off
                 if hz > 0 and amap.version != last_ver and now - last_snap >= 1.0 / hz:
                     last_ver, last_snap = amap.version, now
                     publish(amap.snapshot())
-            with tick_step("status"):
+            with guarded("tick status"):
                 if now - last_status >= 1.0:
                     last_status = now
                     publish(director.status(now))
-            with tick_step("stats"):
+            with guarded("tick stats"):
                 if now - last_stats >= STATS_EVERY_S:
                     last_stats = now
                     s = getattr(extractor, "stats", {}) or {}
@@ -379,11 +380,13 @@ async def run(bus) -> None:
                             (ev.final and bleed.is_bleed(ev)):
                         continue
                     pauses.on_utterance(ev, now)
-                    if heard != "floor":                       # a 1-2 word barge-in over our TTS: floor only
-                        if ev.final:
-                            amap.on_utterance(ev)
-                        start_extract(extractor.assemble(ev, now))     # an interim only keeps a fragment open
-                    emit(director.handle(ev, now))             # last: a Director error never costs map/extraction
+                    with guarded("director"):                  # first, on its own: the floor model hears the
+                        emit(director.handle(ev, now))         # speech even if the map raises, and vice versa
+                    if heard == "floor":                       # a 1-2 word barge-in over our TTS: floor only
+                        continue
+                    if ev.final:
+                        amap.on_utterance(ev)
+                    start_extract(extractor.assemble(ev, now))     # an interim only keeps a fragment open
                 elif name == "Pause":
                     pauses.on_pause(ev)
                     start_extract(extractor.on_pause(ev.speaker))

@@ -509,6 +509,34 @@ async def test_a_director_error_on_an_utterance_never_drops_it_from_the_map_or_e
     caplog.clear()
 
 
+async def test_a_map_error_on_an_utterance_never_hides_it_from_the_director(brain, monkeypatch, caplog):
+    """When the Director ran last, an argument-map error skipped it: its floor model never heard the speech and
+    the referee could talk over a human it thought had paused."""
+    from app.brain.argmap import ArgMap
+    h = brain
+    seen, real = {}, brain_run.Director.handle
+
+    def handle(self, ev, now):
+        if getattr(ev, "event", "") == "Utterance":
+            seen.setdefault(self, []).append(ev.id)
+        return real(self, ev, now)
+
+    def on_utterance(self, u):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(brain_run.Director, "handle", handle)
+    monkeypatch.setattr(ArgMap, "on_utterance", on_utterance)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    await h.step(.5)
+    [(d, ids)] = seen.items()
+    assert ids == ["u-A-1"] and not d.status(h.now()).floor_open        # A has the floor
+    assert any("boom" in (r.exc_text or "") or r.exc_info for r in caplog.records)
+    caplog.clear()
+
+
 async def test_warmup_task_is_cancelled_with_the_brain(brain, monkeypatch):
     """asyncio.create_task(extractor.warmup(...)) was fire-and-forget: never cancelled on shutdown or on the next
     SessionStart (back-to-back sessions stacked warmup LLM calls against old extractors)."""
@@ -560,5 +588,3 @@ async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatc
     h.pub(U("B", "Diesel buses produce more nitrogen dioxide than cars do.", t - .4, t, uid="u-B-1"))
     await h.start()
     assert seen == ["u-A-1", "u-B-1"]
-
-
