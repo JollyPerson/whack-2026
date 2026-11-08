@@ -239,7 +239,8 @@ const verdict = p => { const walk = n => [[n.className, n.textContent], ...n.chi
 const has = (parts, cls, text) => parts.some(([c, t]) => c === cls && t === text);
 const WIN = 'MMD-Conqueror', LOSE = 'MMD-Lost One_s Weeping', DRAW = 'MMD-皆大欢喜-卜逻desu';
 const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline: 'Priya wins on the evidence.',
-  scores: {prop: {factuality: 8, evidence_use: 7.5, overall: 7.5}, opp: {factuality: 5, evidence_use: 6, overall: 5.25}},
+  scores: {prop: {factuality: 8, evidence_use: 7.5, consistency: 6.7, overall: 7.5},
+           opp: {factuality: 5, evidence_use: 6, consistency: 10, overall: 5.25}},
   report: 'logs/summaries/20261108-run-summary.md', dances: {for: WIN, against: LOSE}, music: {for: true, against: false},
   dance_s: 30, via: 'llm'};
 const SESSION = {event: 'SessionStart', motion: 'Ban cars', speakers: {A: {name: 'Priya', side: 'prop'}, B: {name: 'Tom', side: 'opp'}}};
@@ -257,8 +258,9 @@ const SESSION = {event: 'SessionStart', motion: 'Ban cars', speakers: {A: {name:
   check('verdict: overall scores per side', same(parts.filter(([c]) => c === 'prop' || c === 'opp').slice(0, 2),
     [['prop', ''], ['opp', '']]) && has(parts, '', '7.5') && has(parts, '', '5.3') && has(parts, '', 'Proposition'), parts);
   check('verdict: headline and one compact row per criterion, without overall', has(parts, 'headline', 'Priya wins on the evidence.')
-    && same(parts.filter(([c]) => ['name', 'prop', 'opp'].includes(c)).slice(-6),
-            [['name', 'Factuality'], ['prop', '8'], ['opp', '5'], ['name', 'Evidence use'], ['prop', '7.5'], ['opp', '6']]),
+    && same(parts.filter(([c]) => ['name', 'prop', 'opp'].includes(c)).slice(-9),
+            [['name', 'Factuality'], ['prop', '8'], ['opp', '5'], ['name', 'Evidence use'], ['prop', '7.5'], ['opp', '6'],
+             ['name', 'Consistency'], ['prop', '6.7'], ['opp', '10']]),
     parts);
   check('verdict: each bot\'s dance, music only for the winner', has(parts, 'dance prop', `For bot dances: ${WIN}`)
     && has(parts, 'music', ' ♪') && has(parts, 'dance opp', `Against bot dances: ${LOSE}`)
