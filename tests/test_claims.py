@@ -469,6 +469,14 @@ def test_heuristic_types(text, typ, checkable):
     assert [(x.type, x.checkable) for x in d] == [(typ, checkable)]
 
 
+def test_heuristic_drops_bare_numeric_echo_questions():
+    """'Forty thousand?' shouted over the speaker became an important, checkable statistic claim."""
+    for q in ("Forty thousand?", "Ten percent?", "40,000?", "Is it 40%?", "Twice as many?"):
+        assert C.heuristic_drafts(q, "opp") == [], q
+    assert [d.type for d in C.heuristic_drafts("Didn't the IFS say that?", "opp")] == ["attribution"]
+    assert [d.type for d in C.heuristic_drafts("So 40% of journeys are by car?", "opp")] == ["statistic"]
+
+
 def test_heuristic_cleaning_and_filters():
     assert C.clean_text("Honestly, I just think people should be free.") == ("People should be free.", True)
     assert C.clean_text("So the answer is simply to invest") == ("The answer is to invest.", False)

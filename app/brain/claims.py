@@ -465,8 +465,8 @@ def heuristic_drafts(sentence: str, side: str, context: Iterable[Any] = (),
                      side_of: Optional[Callable[[Any], str]] = None, motion: str = "") -> list[Draft]:
     """Deterministic, regex-only claim extraction for one sentence (no LLM, no clock)."""
     raw = (sentence or "").strip()
-    if not raw or (raw.endswith("?") and not (has_quantity(raw) or named_source(raw))):
-        return []                                  # genuine questions aren't claims
+    if not raw or (raw.endswith("?") and not (named_source(raw) or (has_quantity(raw) and len(raw.split()) >= 4))):
+        return []                                  # genuine questions ("Forty thousand?") aren't claims
     ctx = list(context)
     side_of = side_of or (lambda c: getattr(c, "side", None))
     mstems = _motion_stems(motion)
