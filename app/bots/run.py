@@ -15,8 +15,11 @@ A claim with no side is ignored, and a bot never answers its own side. Per oppon
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
 finished non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
-Banter (BOTS_BANTER): after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S across both, the
-other bot may answer it with one dry line, if it is idle (banter never delays a real line). Banter is never answered.
+Banter (BOTS_BANTER), lowest priority: after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S
+across both, the other bot may answer it with one dry line. It starts only when nothing important is running or
+waiting: no claim being answered for either bot (its knowledge check, its Verdict wait or its line being written),
+no non-banter line queued for either bot, and the replying bot idle. If that only comes true later, it may still
+start within BANTER_FRESH_S of the line. A real line ready first drops a queued banter. Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
@@ -41,6 +44,7 @@ DISAGREES = {"likely_false": {"supported"}, "misleading": {"supported"},   # che
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
+BANTER_FRESH_S = 8.0      # banter answers a line at most this old (it waits for the bots to be quiet)
 
 
 class Bots:
@@ -84,6 +88,8 @@ class Bots:
         self.banters: list[str] = []                  # the banter among them
         self.last_banter = -1e18
         self.banter_busy = False
+        self.pending: set[str] = set()                # claims being answered (check, Verdict wait, line writing)
+        self.cue: Optional[tuple[BotLine, float]] = None   # the latest real line banter may answer, and when
 
     def cancel(self) -> None:
         for t in list(self.tasks):
@@ -124,6 +130,8 @@ class Bots:
         if self.paused and not self.pacer.paused:
             self.cancel()
             self.banter_busy = False                  # a banter task cancelled before it started never resets it
+            self.pending.clear()                      # nor does an answer task
+            self.cue = None
             for talk in self.pacer.clear():           # close any open mouth now
                 self.publish(talk)
         self.pacer.paused = self.paused
@@ -146,6 +154,7 @@ class Bots:
                                       for o in self.claims.values())
         if dup:                                       # the same side said it again: answered the first time
             return
+        self.pending.add(c.id)
         self.spawn(self.answer(c, persona, self.session))
 
     # ------------------------------------------------------------------------------------------- claims
@@ -168,6 +177,10 @@ class Bots:
             raise
         except Exception:
             log.exception("bots: answering %s failed", c.id)
+        finally:
+            if session == self.session:
+                self.pending.discard(c.id)
+                self.maybe_banter()                   # it may have been waiting for this claim
 
     async def _answer(self, c: Claim, persona: str, session: int) -> None:
         checkable = c.checkable and c.type not in lines.NO_CHECK
@@ -287,15 +300,31 @@ class Bots:
         """Free to post within `within` seconds, with nothing of its own waiting (banter never displaces a line)."""
         return self.pacer.free(persona, self.clock() + within) and not self.pacer.queued(persona)
 
+    def quiet(self) -> bool:
+        """Nothing important running or waiting for either bot: no claim being answered, no real line queued."""
+        return not self.pending and all(ln.kind == "banter" for p in lines.PERSONAS for ln in self.pacer.queued(p))
+
     def on_botline(self, line: BotLine) -> None:
         if line.src != "bots" or line.kind == "banter" or line.reply_to:
             return                                    # never chained; replayed or foreign lines don't count
-        if not config.BOTS_BANTER or self.paused or self.writer.fast is None or self.banter_busy:
+        self.cue = (line, self.clock())
+        self.maybe_banter()
+
+    def maybe_banter(self) -> None:
+        """Start the other bot's banter reply to the cued line if everything allows it now (see the module doc)."""
+        if self.cue is None:
+            return
+        line, at = self.cue
+        if self.clock() - at > BANTER_FRESH_S:
+            self.cue = None
+            return
+        if not config.BOTS_BANTER or self.paused or self.writer.fast is None or self.banter_busy or not self.quiet():
             return
         other = lines.OTHER.get(line.persona)
         if not other or not self.idle(other, BANTER_SOON_S) or \
                 self.clock() - self.last_banter < config.BOTS_BANTER_GAP_S:
             return
+        self.cue = None
         prev, self.last_banter, self.banter_busy = self.last_banter, self.clock(), True   # reserves the gap
         self.spawn(self.banter(line, other, prev, self.session))
 
@@ -327,6 +356,7 @@ class Bots:
                     self.last_banter = self.clock()
                     self.banters.append(ev.text)
             self.publish(ev)
+        self.maybe_banter()
 
     def restore(self, history: list[Event]) -> None:
         """After a crash-restart: the session, claims, verdicts, map statuses and lines already posted, silently.

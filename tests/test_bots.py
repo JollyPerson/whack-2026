@@ -670,6 +670,106 @@ async def test_banter_goes_only_to_an_idle_bot():
     assert said(out)[3].reply_to == said(out)[2].id
 
 
+def banters(fast) -> int:
+    return sum(k == "banter" for k, _ in fast.calls)
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_banter_waits_while_a_verdict_wait_is_in_flight(late):
+    config.BOTS_BANTER, config.BOTS_VERDICT_WAIT_S = True, 5.0
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", "A", "prop", imp=0.3))                    # Against waits for c1's Verdict (no line after)
+    bots.handle(C("c2", typ="value", checkable=False, text="Markets know best."))
+    await asyncio.sleep(0.05)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")] and banters(fast) == 0
+    clock.t += 9 if late else 2                                   # the cue goes stale after BANTER_FRESH_S
+    bots.handle(V("c1", label="unverifiable", evidence=[]))
+    await settle(bots, 1.0)
+    want = [("for", "followup")] + ([] if late else [("against", "banter")])
+    assert [(b.persona, b.kind) for b in said(out)] == want
+    if not late:
+        assert said(out)[1].reply_to == said(out)[0].id
+
+
+async def test_banter_waits_while_a_knowledge_check_is_in_flight():
+    config.BOTS_BANTER = True
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast, check=FakeLLM(check=false_check(), delay=0.2))
+    bots.handle(C("c1", "A", "prop", "Unemployment is 6% in the UK."))   # Against's check: 0.2 s
+    bots.handle(C("c2", typ="value", checkable=False, text="Markets know best."))
+    await asyncio.sleep(0.1)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")] and banters(fast) == 0
+    await settle(bots, 1.0)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup"), ("against", "challenge")]
+    assert banters(fast) == 0                                     # then Against is busy and For is in its gap
+
+
+async def test_banter_waits_while_a_real_line_is_queued_for_either_bot():
+    config.BOTS_BANTER = True
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c2", typ="causal", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")] and bots.pacer.queued("for")
+    assert banters(fast) == 0                                     # For's second line waits: Against stays quiet
+    clock.t += 10
+    bots.tick()                                                   # For's second line posts; now all is quiet
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup"), ("for", "followup"), ("against", "banter")]
+    assert said(out)[2].reply_to == said(out)[1].id
+
+
+async def test_banter_gap_is_20_s_across_both_bots():
+    config.BOTS_BANTER = True
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup"), ("against", "banter")]
+    clock.t += 19.9
+    fast.line = "Steady on, that was rhetorical."
+    bots.handle(C("c2", typ="causal", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    assert [b.kind for b in said(out)] == ["followup", "banter", "followup"] and banters(fast) == 1
+    clock.t += 0.1                                                # 20 s after the first banter: the cue is fresh
+    bots.tick()
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)[3:]] == [("against", "banter")] and banters(fast) == 2
+
+
+@pytest.mark.parametrize("how", ["pause", "session"])
+async def test_a_pause_or_new_session_forgets_the_claims_in_flight(how):
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    bots, out, clock = make()
+    bots.handle(C("c1"))
+    bots.handle(C("c2", typ="value", checkable=False, text="Markets know best."))
+    assert bots.pending == {"c1", "c2"}                          # from the moment each is taken on
+    await asyncio.sleep(0.01)
+    assert bots.pending == {"c1"} and bots.cue is not None
+    if how == "pause":
+        bots.handle(Control(flag="bots", value=False))
+        bots.handle(Control(flag="bots", value=True))
+    else:
+        bots.handle(SessionStart(motion="Another motion", speakers=SPEAKERS))
+    assert bots.pending == set() and bots.cue is None
+    await asyncio.sleep(0.01)
+    assert not bots.tasks and bots.pending == set()
+
+
+def test_pacer_drops_a_queued_banter_when_a_real_line_is_ready_first():
+    p = Pacer(min_gap=10, ttl=30, banter_ttl=10)
+    p.push(L(text="First?"), 0)
+    p.tick(0)
+    assert p.push(L(text="Quip.", kind="banter"), 1) and p.push(L("against", "Other quip.", kind="banter"), 1)
+    assert p.push(L(text="Real one?"), 2)
+    assert [x.text for x in p.queued("for")] == ["Real one?"]                  # For's banter is gone
+    assert [x.text for x in p.queued("against")] == ["Other quip."]            # not the other bot's
+    assert not p.push(L(text="Late quip.", kind="banter"), 3)                   # never queued behind a real line
+    assert posted(p.tick(10)) == ["Real one?", "Other quip."] and posted(p.tick(30)) == []
+
+
 async def test_banter_switch_off():
     fast = FakeLLM()
     bots, out, clock = make(fast=fast)                                          # BOTS_BANTER=False (fixture)
