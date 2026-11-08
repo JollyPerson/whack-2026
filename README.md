@@ -191,8 +191,8 @@ ears re-emit only its SessionStart/Utterance/Pause lines and the live brain does
   under the MateEngine Pro License v2.0. Our changes for the referee avatar and the side bots are the patches in
   [`mate-engine/`](mate-engine/README.md), under the same licence. Neither project is affiliated with this one.
 - Verdict dances: the Mate Engine community's CustomDances collection. They belong to their MMD motion and music
-  creators and are not redistributed here.
-- Speech to text: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (SYSTRAN, MIT) with OpenAI Whisper
-  models (MIT). Language models: Claude by Anthropic. Voice: [ElevenLabs](https://elevenlabs.io).
+  creators.
+- Speech-to-text: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (SYSTRAN, MIT) with OpenAI Whisper
+  models (MIT). Language models: Claude by Anthropic.
 - Full list and the side-bot runbook: [`docs/SIDE-BOTS.md`](docs/SIDE-BOTS.md).
 
