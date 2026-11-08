@@ -716,6 +716,28 @@ async def test_supervisor_backoff_resets_after_a_healthy_run(monkeypatch):
     assert len(FLAKY) == 6 and slept == [1.0, 2.0, 4.0, 8.0, 1.0]
 
 
+def test_second_server_on_a_busy_port_leaves_latest_jsonl_alone(tmp_path, monkeypatch, capsys):
+    """An accidental second ./run.sh re-pointed logs/latest.jsonl at its own empty log, then died on the busy port."""
+    import socket
+    import uvicorn
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "golden.jsonl").write_text('{"event": "SessionStart", "ts": 1.0}\n')
+    (logs / "latest.jsonl").symlink_to("golden.jsonl")
+    monkeypatch.setattr(mainmod, "ROOT", tmp_path)
+    for k in ROLES:
+        monkeypatch.setenv(k, "off")
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: sys.exit(3))     # what uvicorn does on a busy port
+    with socket.create_server(("127.0.0.1", 0)) as busy:
+        port = busy.getsockname()[1]
+        monkeypatch.setattr(sys, "argv", ["app.main", "mock", "--host", "127.0.0.1", "--port", str(port)])
+        with pytest.raises(SystemExit) as e:
+            mainmod.main()
+    assert e.value.code == 2 and f"port {port}" in capsys.readouterr().err
+    assert os.readlink(logs / "latest.jsonl") == "golden.jsonl"
+    assert sorted(p.name for p in logs.iterdir()) == ["golden.jsonl", "latest.jsonl"]   # no new empty log either
+
+
 async def test_ws_handler_and_its_subscriber_end_when_the_client_leaves_in_a_quiet_period(tmp_path, monkeypatch):
     """Under real uvicorn the writer sat in `async for ev in sub` after a disconnect until the next event arrived:
     every refresh in a quiet period left a zombie handler and a 2000-slot Sub (TestClient cancels it, hiding this)."""
@@ -763,6 +785,19 @@ def test_ws_subscribe_accepts_one_name_and_rejects_non_lists(make_client):
         ws.send_json({"event": "Pause", "speaker": "A"})
         ws.send_json({"event": "Claim", "id": "c2", "speaker": "A", "text": "x"})
         assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["id"] == "c2"   # filter kept as it was
+
+
+@pytest.mark.parametrize("bad", [["--speed", "0"], ["--speed", "-2"], ["--speed", "nan"], ["--max-gap", "-1"]])
+def test_cli_rejects_non_positive_speed_and_negative_max_gap(tmp_path, monkeypatch, capsys, bad):
+    """--speed 0 was a ZeroDivisionError inside the replay (red dot); negative values ran time backwards."""
+    import uvicorn
+    f = _write_log(tmp_path / "x.jsonl", [{"event": "Pause", "speaker": "A", "ts": 1.0}])
+    monkeypatch.setattr(mainmod, "ROOT", tmp_path)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["app.main", "replay", "--file", str(f), *bad])
+    with pytest.raises(SystemExit) as e:
+        mainmod.main()
+    assert e.value.code == 2 and bad[0] in capsys.readouterr().err
 
 
 def test_debug_history_n_zero_or_negative_is_empty(make_client):

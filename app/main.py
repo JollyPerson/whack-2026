@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import importlib
 import inspect
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -216,15 +218,21 @@ def _create_hint(path: Path) -> str:
     return f"Save a recorded run there first: cp logs/latest.jsonl {path} (e.g. the 20:00 golden run)."
 
 
+def replay_file(file: str | Path) -> Path:
+    """Resolve a replay --file NOW: follows logs/latest.jsonl before it is re-pointed; a missing file fails loudly."""
+    try:
+        path = Path(file).resolve(strict=True)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(e.errno, f"No such file. {_create_hint(Path(file))}", str(file)) from None
+    if not path.is_file():
+        raise FileNotFoundError(f"not a file: {path}")
+    return path
+
+
 def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0, only=(),
               log_dir: Path | None = None, last: bool = True, max_gap: float = MAX_GAP_S) -> FastAPI:
-    if file:   # resolve NOW: follows logs/latest.jsonl before it is re-pointed; a missing file fails loudly
-        try:
-            file = Path(file).resolve(strict=True)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(e.errno, f"No such file. {_create_hint(Path(file))}", str(file)) from None
-        if not file.is_file():
-            raise FileNotFoundError(f"not a file: {file}")
+    if file:
+        file = replay_file(file)
     log_dir = log_dir or ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{profile}.jsonl"
@@ -388,16 +396,40 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
     return app
 
 
+def speed_arg(s: str) -> float:
+    v = float(s)
+    if not v > 0:                                    # also NaN; 0 divides by zero, < 0 runs time backwards
+        raise argparse.ArgumentTypeError(f"must be > 0, not {s}")
+    return v
+
+
+def max_gap_arg(s: str) -> float:
+    v = float(s)
+    if not v >= 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (0 = keep every gap), not {s}")
+    return v
+
+
+def port_in_use(host: str, port: int) -> bool:
+    """Another server (an accidental second ./run.sh) already listens there. uvicorn only finds out after the app
+    is built, when logs/latest.jsonl already points at this run's empty log. Other bind errors: uvicorn's to report."""
+    try:
+        socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET).close()
+    except OSError as e:
+        return e.errno == errno.EADDRINUSE
+    return False
+
+
 def main():
     import uvicorn
     p = argparse.ArgumentParser(description="debate-ref: live debate fact-checker")
     p.add_argument("profile", nargs="?", default="mock", choices=PROFILES)
     p.add_argument("--file", help="replay a JSONL (fixture or logs/*.jsonl; logs/latest.jsonl = the last run)")
-    p.add_argument("--speed", type=float, default=1.0)
+    p.add_argument("--speed", type=speed_arg, default=1.0)
     p.add_argument("--only", nargs="*", default=[], help="replay only these event types, e.g. Utterance Pause")
     p.add_argument("--all-sessions", action="store_true",
                    help="replay every session in the file (default: from the last SessionStart on)")
-    p.add_argument("--max-gap", type=float, default=MAX_GAP_S,
+    p.add_argument("--max-gap", type=max_gap_arg, default=MAX_GAP_S,
                    help=f"cut replayed silences longer than this many seconds (default {MAX_GAP_S:g}; 0 = keep)")
     p.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
@@ -407,9 +439,12 @@ def main():
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        app = build_app(a.profile, a.file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
+        file = replay_file(a.file) if a.file else None
     except FileNotFoundError as e:
         p.error(f"--file {a.file}: {e.strerror or e}")
+    if port_in_use(a.host, a.port):                  # before build_app re-points logs/latest.jsonl
+        p.error(f"port {a.port} is already in use: is another ./run.sh running? Stop it or pass --port")
+    app = build_app(a.profile, file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 
