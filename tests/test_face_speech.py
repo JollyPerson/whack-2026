@@ -617,3 +617,19 @@ def test_mate_status_up_on_poll_down_after_silence_only_on_change():
     face_run.watch_mate(bus, st, 200.0)
     got = [(e.module, e.state) for e in [sub.q.get_nowait() for _ in range(sub.q.qsize())]]
     assert got == [("mate", "up"), ("mate", "down")]
+
+
+def test_an_operator_dance_stop_lets_the_bot_talk_again(make_client):
+    """dance/stop ends a verdict dance early: the bot's next line is shown, not held back until dance_s runs out."""
+    c = make_client()
+    b = c.get("/face/mate/next/for", params={"after": -1, "epoch": "", "wait": 0}).json()
+    cur, ep = b["cursor"], b["epoch"]
+    c.post("/publish", json={"event": "DebateResult", "winner": "prop", "dances": {"for": "MMD-Conqueror"},
+                             "music": {"for": True}, "dance_s": 30.0})
+    got = c.get("/face/mate/next/for", params={"after": cur, "epoch": ep, "wait": 0}).json()
+    assert [x["op"] for x in got["cmds"]] == ["dance"]
+    cur = got["cursor"]
+    assert c.post("/face/mate/dance/stop", json={"channel": "for"}).json()["ok"] is True
+    c.post("/publish", json={"event": "BotLine", "persona": "for", "id": "b-0001", "text": "Back to it."})
+    got = c.get("/face/mate/next/for", params={"after": cur, "epoch": ep, "wait": 0}).json()
+    assert [(x["op"], x["id"]) for x in got["cmds"]] == [("say", "b-0001"), ("talk", "b-0001"), ("dance_stop", "")]

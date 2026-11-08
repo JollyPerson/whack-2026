@@ -239,6 +239,8 @@ def _queue(req: Request, c: dict, channel: str) -> dict:
     mates = [st.mates[_channel(channel)]] if channel else list(st.mates.values())
     for m in mates:
         m.queue(c)
+        if c["op"] == "dance_stop":
+            m.dancing_until = 0.0      # the verdict dance is over: the bot's lines are no longer held back
     return {"ok": True, "mate": any(m.alive(time.monotonic()) for m in mates)}
 
 
