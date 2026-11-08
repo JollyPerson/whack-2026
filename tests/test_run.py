@@ -111,6 +111,8 @@ def test_echo_guard_after_the_fact_window_counts_from_when_our_tts_stopped():
     c = lambda text, a, b: e.classify(U("A", text, a, b, ts=b + .1), b + .1)          # noqa: E731
     assert c("the ONS contradicts that details on screen", T0 + 8.7, T0 + 10.5) == "echo"
     assert c("Details on screen.", T0 + 10.5, T0 + 11) == "echo"
+    assert c("on that point", T0 + 9, T0 + 9.5) == "echo"                             # within 10 s of publish
+    assert c("on that point", T0 + 11, T0 + 11.5) == "speech"         # later: 1 content word is too little to tell
     assert c("the ONS contradicts that", T0 + 18, T0 + 18.9) == "speech"              # 10.5 s after it stopped
     e.spoke("For the record, that checks out. Source: the ONS.", T0 + 30)             # D never reported playing it
     assert c("that checks out source the ONS", T0 + 39, T0 + 39.9) == "echo"

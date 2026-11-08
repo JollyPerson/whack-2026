@@ -144,8 +144,10 @@ class EchoGuard:
             # else a human claiming the floor. Too short to be a claim: floor tracking only, no extraction/argmap.
             return "echo" if any(words <= s for s in said) else "floor"
         if len(words) >= 3:     # after the fact: TTS start-up, the line's audio and STT latency all come first
+            late_ok = len(words - STOP) >= 2   # past publish + window_s: "it is the" is too little to call echo
             for ts, said in self.said:
-                if now - self._stopped(ts, now) <= self.window_s and len(words & said) / len(words) >= self.overlap:
+                recent = now - ts <= self.window_s or (late_ok and now - self._stopped(ts, now) <= self.window_s)
+                if recent and len(words & said) / len(words) >= self.overlap:
                     return "echo"
         return "speech"
 
