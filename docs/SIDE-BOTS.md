@@ -49,6 +49,9 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
    ```bash
    MIC1=<prop mic> MIC2=<opp mic> scripts/ears-two-mics.sh
    ```
+   No phone app? Start the server with `PHONE_MICS=A,B` too, open `http://localhost:8000/mic?ch=A` on a phone
+   after `adb reverse tcp:8000 tcp:8000`, and use `MIC1=whack_phone_A.monitor`. See
+   [`LIVE-MICS.md` section 12](LIVE-MICS.md#12-phone-as-a-microphone-without-an-app).
 3. **Avatars,** from the patched Mate Engine checkout:
    ```bash
    PAYLOAD=<out-dir>/Payload DANCE_LIBRARY=<CustomDances folder> tools/mate-bots.sh start
@@ -79,6 +82,9 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
 | `JUDGE_DANCE_WIN` / `_LOSE` / `_DRAW` | see above | Dance titles (Mate Engine matches file names, ignoring case) |
 | `JUDGE_MUSIC` | `winner` | `winner`, `none` or `both` |
 | `JUDGE_DANCE_S` | 30 | How long the dances last |
+| `PHONE_MICS` | off | `A,B` (or `A`, `B`): the phone-browser microphones. Creates the null sinks `whack_phone_A`/`_B` at start-up and unloads them at shutdown; phones open `/mic?ch=A` |
+| `MIC_TOKEN` | unset | When set, a phone needs `?token=<MIC_TOKEN>` on `/mic`. Set it whenever the server binds to the LAN |
+| `SSL_CERTFILE`, `SSL_KEYFILE` | unset | Both set: the server speaks HTTPS, which a phone on Wi-Fi needs to use its mic. Self-signed certificate: `LIVE-MICS.md` section 12 |
 
 ## Troubleshooting
 - **No avatar.** On a fresh config, Mate Engine's first-run tutorial hides the avatar. The launcher seeds

@@ -24,6 +24,7 @@ phone mic --USB/adb--> MicYou desktop --> PipeWire source "MicYouVirtualSink.mon
 USB-C mic --------------------------------> PipeWire source "alsa_input.usb-..." --------+          --> ears/bridge.py --> server
 ```
 
+- No MicYou? The server's own phone page does the same job from the phone's browser, with no app: section 12.
 - `scripts/ears-two-mics.sh` runs `ears/ears.py` with `--source mic1=$MIC1 --source mic2=$MIC2`. It pipes the
   sentences into `ears/bridge.py`, which posts them to `$SERVER/publish` (default `http://127.0.0.1:8000/publish`).
   Every sentence is also written to `logs/ears-<date>-<time>.jsonl`.
@@ -491,6 +492,8 @@ Lines starting with `!!` need you. `micN` is mic1 (Prop, phone) or mic2 (Opp, US
   laptop output, so you'd have to route it into a null sink and capture that sink's monitor. That's too fiddly to set
   up on the day **(untested)**.
 - **The phone's own recorder app is not an option.** Nothing reaches the laptop live.
+- **The phone's browser, no app at all:** the server's own `/mic` page, with `PHONE_MICS=A,B`. See
+  [section 12](#12-phone-as-a-microphone-without-an-app).
 
 ## 11. Printable pre-demo checklist
 
@@ -526,6 +529,109 @@ Lines starting with `!!` need you. `micN` is mic1 (Prop, phone) or mic2 (Opp, US
 **After**
 - [ ] Ctrl+C the ears at **Final screen** (or `JUDGE_MUSIC=none`)
 - [ ] `tools/mate-bots.sh stop`
+
+## 12. Phone as a microphone without an app
+
+The server can take a phone's microphone straight from the phone's **browser**: no MicYou, nothing installed on the
+phone. It's an alternative to MicYou for either debater, or for both (two phones).
+
+```
+phone browser /mic?ch=A --WebSocket, 16 kHz s16le--> server /mic/ws --> pacat --> null sink "whack_phone_A"
+                                                                                  |
+                                       ears (MIC1=whack_phone_A.monitor) <--------+   (exactly like any other source)
+```
+
+- The page (`/mic?ch=A` for Prop, `/mic?ch=B` for Opp) shows the side in big letters, a **Start/Stop** button, a live
+  level meter, the connection state, and a clear error when something's wrong. While the mic is live it keeps the
+  screen on (Wake Lock), where the browser supports it.
+- It captures with echo cancellation and noise suppression on. The phone's auto gain is on too; add `&agc=0` to turn
+  it off if the level pumps up in pauses. The page downsamples to 16 kHz mono in an AudioWorklet and sends 80 ms frames.
+- The server writes each phone's audio into its own null sink. The sinks exist only when the server is started with
+  `PHONE_MICS` (e.g. `PHONE_MICS=A,B`, or `PHONE_MICS=A` for one phone plus the USB-C mic). They are created at
+  start-up and unloaded at shutdown. Without a phone connected, their monitors are pure silence.
+- **One phone per side.** A second phone on the same side is refused ("another phone is already microphone A"), and
+  so is a side that isn't in `PHONE_MICS`. A dropped connection reconnects on its own with backoff (0.5 s up to 10 s).
+- The dashboard gets a status dot per phone: `phone_A` is amber while it waits for a phone, green while one streams,
+  and red if the sink couldn't be created.
+- **Browsers only give a page the microphone in a secure context:** `https://…`, or `http://localhost`. So use USB
+  with `adb reverse` (recommended), or HTTPS over Wi-Fi.
+
+### Over USB (recommended): adb reverse
+
+Needs `adb` on the laptop (`sudo pacman -S android-tools`) and USB debugging on the phone (step 1 in section 4).
+
+```bash
+# T3: the server, still localhost only
+HOST=127.0.0.1 PHONE_MICS=A EARS=external BOTS=real JUDGE=real SKIP_PIP=1 ./run.sh live
+#   log: phone mic A: sink whack_phone_A (module <id>); ears source whack_phone_A.monitor
+
+adb reverse tcp:8000 tcp:8000          # the phone's localhost:8000 is now the laptop's; redo it after a replug
+```
+
+On the phone, open **`http://localhost:8000/mic?ch=A`** in Chrome, tap **Start**, and allow the microphone. The state
+line says "Live: microphone A (Proposition) is on the laptop". Then start the ears with the sink's monitor:
+
+```bash
+export MIC1=whack_phone_A.monitor MIC2=<usb name>      # or MIC2=whack_phone_B.monitor with a second phone
+HF_HUB_OFFLINE=1 scripts/ears-two-mics.sh
+```
+
+The launcher accepts `whack_phone_A.monitor` like any other source, and `micmeter "$MIC1" "$MIC2"` (step 6) works on
+it too. Start the server **before** the ears: the sink only exists while the server runs, so the launcher refuses
+the name otherwise ("is not a source right now").
+
+### Over Wi-Fi: HTTPS and a token
+
+Plain `http://<laptop IP>:8000` is not a secure context, so the page will say "Not a secure context" and the mic stays
+off. Serve HTTPS with a self-signed certificate:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout cache/key.pem -out cache/cert.pem \
+  -subj "/CN=whack-laptop" -addext "subjectAltName=IP:<laptop IP>,DNS:localhost"
+export MIC_TOKEN=$(openssl rand -hex 8)        # keep it out of shell history on a shared screen
+HOST=0.0.0.0 PHONE_MICS=A,B SSL_CERTFILE=cache/cert.pem SSL_KEYFILE=cache/key.pem \
+  EARS=external BOTS=real JUDGE=real ./run.sh live
+```
+
+On the phone, open `https://<laptop IP>:8000/mic?ch=A&token=<MIC_TOKEN>`. Accept the certificate warning once
+(Advanced, Proceed). The dashboard is then also `https://…`.
+
+- **A LAN bind exposes more than the mic.** `HOST=0.0.0.0` serves the whole server to the network: `/face/tts` (no
+  login), `/publish`, the dashboard, and the mic socket. Anyone on the network could speak as a debater, hence
+  `MIC_TOKEN`: with it set, a connection without the right `?token=` is refused. The server logs a warning when it
+  binds to the LAN with `PHONE_MICS` and no `MIC_TOKEN`. Prefer USB.
+- Venue Wi-Fi often isolates clients, and firewalld blocks port 8000 until you open it for this boot:
+  `sudo firewall-cmd --add-port=8000/tcp`. A phone hotspot is more reliable.
+
+### On the phone
+
+- Keep the page in the foreground with the screen on. Android may stop a background tab's mic, so don't switch apps.
+  Set Battery saver off, Do Not Disturb on, and Airplane mode on for USB (Wi-Fi back on for the Wi-Fi route).
+- Don't use the same phone for MicYou and the page at once: the mic is busy, and the page says so.
+- The level meter is what the phone captures, before the network. Aim for speech peaks around −20 to −6 dBFS. Set
+  the gain by distance; `CLIP` means move the phone back. Then check with `micmeter` on the laptop, which hears what
+  ears hears.
+
+### When it fails
+
+| The phone page says | Do |
+|---|---|
+| `Not a secure context: …` | You opened `http://<IP>`. Use `adb reverse` and `http://localhost:8000/…`, or the HTTPS route |
+| `Microphone permission denied. …` | Allow the microphone in the site settings (the icon left of the address), then Start |
+| `The microphone is busy: …` | Close MicYou, a call, or a recorder app, then Start |
+| `This microphone is not switched on at the server: …` | Restart the server with `PHONE_MICS=A,B` (or the side you need) |
+| `The server wants a token: …` | Add `&token=<MIC_TOKEN>` to the address |
+| `Another phone is already this microphone. …` | Stop the other phone (or close its tab), then Start |
+| `Connection lost; retrying in …`, then `Cannot reach the server …` | The server is down, or the cable was replugged: run `adb reverse tcp:8000 tcp:8000` again. The page reconnects by itself |
+
+While the phone is disconnected, ears hears **silence** on that sink, never another device: after 15 s, the
+`pure digital silence` line from section 9. It says `sound again from micN` once the phone is back. If the sink itself is gone (the server stopped), ears goes **deaf** as in section 9. Restart the
+server, then the ears.
+
+**What was verified:** on this laptop, with no phone, a WAV was streamed through `/mic/ws` by a small Python client
+over HTTP and over HTTPS. `parec` on `whack_phone_A.monitor` heard it: RMS about 2540, against exactly 0 with no
+phone. A second connection was refused, and the sinks were unloaded at shutdown. The page itself is tested against a
+fake browser in `tests/js/`. **A real phone has not been tested: rehearse it.**
 
 ## Sources
 - MicYou project and releases: <https://github.com/MicYou-Dev/MicYou>, <https://github.com/MicYou-Dev/MicYou/releases> (v2.1.1, 11 Oct 2026)
