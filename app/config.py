@@ -71,6 +71,16 @@ BOTS_BANTER_GAP_S = _env("BOTS_BANTER_GAP_S", 45.0)      # at most one banter li
 BOTS_MODEL = _env("BOTS_MODEL", "claude-haiku-5-5")      # follow-ups and banter: fast
 BOTS_CHECK_MODEL = _env("BOTS_CHECK_MODEL", "claude-opus-5-5")   # the unsourced knowledge check: most accurate
 
+# --- judge (app/judge): post-debate summary + verdict on the Final screen click. Enable with JUDGE=real ----------
+JUDGE_MODEL = _env("JUDGE_MODEL", "claude-opus-5-5")     # weighs the scorecard + transcript, names the victor
+JUDGE_TIMEOUT_S = _env("JUDGE_TIMEOUT_S", 60.0)          # then the scorecard formula decides (DebateResult.via=formula)
+JUDGE_DIR = _env("JUDGE_DIR", "logs/summaries")          # <run>-summary.md + .json
+JUDGE_DANCE_WIN = _env("JUDGE_DANCE_WIN", "MMD-Conqueror")             # alternative: MMD-KING
+JUDGE_DANCE_LOSE = _env("JUDGE_DANCE_LOSE", "MMD-Lost One_s Weeping")  # alternative: MMD-Failure Girl
+JUDGE_DANCE_DRAW = _env("JUDGE_DANCE_DRAW", "MMD-皆大欢喜-卜逻desu")       # both bots, on a draw
+JUDGE_DANCE_S = _env("JUDGE_DANCE_S", 30.0)              # the dances stop after this long (or at the next SessionStart)
+JUDGE_MUSIC = _env("JUDGE_MUSIC", "winner")              # winner | none | both (a draw with "winner": silent)
+
 # --- brain: claim extraction ----------------------------------------------------------------
 LLM_PROVIDER = _env("LLM_PROVIDER", "auto")               # auto | anthropic (claude) | openai (chatgpt) | heuristic
 LLM_MODEL = _env("LLM_MODEL", "claude-haiku-5-5")          # OpenAI: set OPENAI_MODEL (default gpt-6-luna)

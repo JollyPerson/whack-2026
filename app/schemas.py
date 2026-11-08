@@ -455,8 +455,24 @@ class BotTalk(Event):
     on: bool = False
 
 
+class DebateResult(Event):
+    """The debate's verdict: once per session, when the operator shows the final screen (Control screen=final).
+    Owner: B (app/judge, JUDGE=real), which also writes the Markdown + JSON summary. D shows it on the final screen
+    and has each side bot dance (dance title per bot persona, music only where music[persona] is true)."""
+    event: Literal["DebateResult"] = "DebateResult"
+    winner: str = "draw"           # prop | opp | draw (a narrow margin is a draw)
+    margin: str = ""               # narrow | clear | decisive ("" for a draw)
+    headline: str = ""             # one sentence for the final screen
+    scores: dict[str, dict] = Field(default_factory=dict)   # side (prop|opp) -> {criterion: 0-10, ..., "overall": 0-10}
+    report: str = ""               # path of the Markdown summary; the JSON sits beside it
+    dances: dict[str, str] = Field(default_factory=dict)    # bot persona (for|against) -> dance title
+    music: dict[str, bool] = Field(default_factory=dict)    # bot persona -> play that dance's music
+    dance_s: float = 30.0          # the dances stop after this long
+    via: str = "llm"               # llm | formula (no LLM answer: the scorecard formula decided)
+
+
 KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress, ResearchRequest, FactSheet,
-         ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState, BotLine, BotTalk)
+         ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState, BotLine, BotTalk, DebateResult)
 EVENT_TYPES = {m.model_fields["event"].default: m for m in KNOWN}
 
 AnyEvent = Annotated[Union[KNOWN], Field(discriminator="event")]   # type: ignore[valid-type]

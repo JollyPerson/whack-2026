@@ -142,7 +142,7 @@ moves its mouth while the `?audio=1` tab plays it. It is a pure consumer: it pub
 ```
 GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default 10, max 25>
 -> 200 {"v":1,"epoch":"<8 hex>","cursor":<int>,"cmds":[Cmd,...]}
-Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"","title":"","on":false,"clear":false}
+Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"","title":"","on":false,"clear":false,"seconds":0}
 ```
 
 - Every field is always present and never null (Unity's `JsonUtility` handles neither).
@@ -156,6 +156,10 @@ Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"
   `POST /face/mate/dance {"title":"","channel":""}` and `POST /face/mate/dance/stop {"channel":""}` (`channel`:
   one avatar, or `""`/absent for every one). They are not bus events: each is held for up to 10 s and delivered
   once, to that channel's next poll.
+- `dance` also carries `on` (play the dance's music; false = silent) and `seconds` (stop after this long; 0 = play
+  to the end). Older builds ignore both and play with their configured volume to the end.
+- **Verdict dances.** On the `for` and `against` channels, `DebateResult` becomes `dance` with
+  `title=dances[channel]`, `on=music[channel]`, `seconds=dance_s`, and `SessionStart` also sends `dance_stop`.
 - **Channels (side bots).** `GET /face/mate/next/{channel}` takes the same query and returns the same payload, one
   avatar per channel. `referee` is exactly the route above (`/face/mate/next` = `/face/mate/next/referee`). `for` and
   `against` carry only that side bot's lines: `BotLine{persona}` becomes `say` (`audio: ""`) plus `talk on` (dropped,

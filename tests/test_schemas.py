@@ -10,7 +10,7 @@ import pytest
 from app import latency
 from app.bus import Bus, load_jsonl
 from app.mocks import mock_ears
-from app.schemas import (EVENT_TYPES, ArgMapSnapshot, BotLine, BotTalk, Claim, Control, DirectorDecision, DirectorStatus, Event,
+from app.schemas import (EVENT_TYPES, ArgMapSnapshot, BotLine, BotTalk, DebateResult, Claim, Control, DirectorDecision, DirectorStatus, Event,
                          Evidence, Interjection, Link, MapEdge, MapNode, ModuleStatus, Numeric, Pause,
                          ResearchProgress, ResearchRequest, FactSheet, Fact, Score, SessionStart, SourceCard, SpeakerInfo, TTSState, Utterance,
                          ValidationError, Verdict, parse_event)
@@ -79,6 +79,12 @@ def producer_samples() -> dict[str, Event]:
         "bots/BotLine(banter)": BotLine(persona="against", text="Bold of you to cite a source.", kind="banter",
                                         reply_to="b-0001", hold_s=6.0, src="bots"),
         "bots/BotTalk": BotTalk(persona="for", line_id="b-0001", on=False, src="bots"),
+        "judge/DebateResult": DebateResult(winner="prop", margin="clear", headline="Prop wins on the evidence.",
+                                           scores={"prop": {"factuality": 8, "overall": 7.5},
+                                                   "opp": {"factuality": 5, "overall": 5.5}},
+                                           report="logs/summaries/20261108-run-summary.md",
+                                           dances={"for": "MMD-Conqueror", "against": "MMD-Lost One_s Weeping"},
+                                           music={"for": True, "against": False}, src="judge"),
     }
 
 
