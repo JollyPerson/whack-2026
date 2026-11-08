@@ -7,10 +7,11 @@ The For bot is Prop's second and answers Opp's claims; the Against bot mirrors i
 A claim with no side is ignored, and a bot never answers its own side. Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
-  Supported -> no fact line. Otherwise, with confidence >= BOTS_CHECK_MIN_CONF, the check's assessment decides,
-  every line tagged "(unsourced)": likely_false -> "challenge" with Claude's correction; misleading (true figure,
-  misrepresented) -> a "True, but ..." "challenge"; surprising_true (a well-known misconception) -> a grudging
-  "concede". A check that disagrees with the claim's Verdict label is dropped. At most one fact line per claim.
+  Supported -> no fact line. Otherwise the check's assessment decides, every line tagged "(unsourced)":
+  likely_false -> "challenge" with Claude's correction; surprising_true (a well-known misconception) -> a grudging
+  "concede", both only with confidence >= BOTS_CHECK_MIN_CONF; misleading (true figure, misrepresented) -> a
+  "True, but ..." "challenge" from BOTS_MISLEADING_MIN_CONF, its own bar. A check that disagrees with the claim's
+  Verdict label is dropped. At most one fact line per claim.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
@@ -243,8 +244,8 @@ class Bots:
         kind = CHECK_KIND.get(res.assessment)
         if kind is None:
             return "", None, res.assessment
-        if res.confidence < config.BOTS_CHECK_MIN_CONF:
-            return kind, None, f"below {config.BOTS_CHECK_MIN_CONF:.2f}"
+        if res.confidence < bar(res.assessment)[1]:
+            return kind, None, "below the bar"
         if verdict is not None and verdict.label in DISAGREES[res.assessment]:
             return kind, None, f"the Verdict says {verdict.label}"
         if res.assessment == "likely_false":
@@ -414,11 +415,23 @@ class Bots:
             self.pacer.close_at(line, line.ts + line.hold_s)
 
 
+def bar(assessment: str) -> tuple[str, float]:
+    """The confidence an assessment needs to fire, and its name for the log: a "True, but" (misleading) has its own
+    bar, as the check model rates a true but misrepresented figure lower than a plain error."""
+    if assessment == "misleading":
+        return "misleading bar", config.BOTS_MISLEADING_MIN_CONF
+    return "check bar", config.BOTS_CHECK_MIN_CONF
+
+
 def log_check(cid: str, res: Any, outcome: str) -> None:
-    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF at rehearsal: claim, assessment,
-    confidence, and whether a line fired (or why not)."""
+    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF and BOTS_MISLEADING_MIN_CONF at
+    rehearsal: claim, assessment, confidence, the bar that applied (for an assessment that can fire), and whether a
+    line fired (or why not)."""
     if res is None:
         log.info("bots: check %s: no result -> %s", cid, outcome)
+    elif res.assessment in CHECK_KIND:
+        name, at = bar(res.assessment)
+        log.info("bots: check %s: %s %.2f (%s %.2f) -> %s", cid, res.assessment, res.confidence, name, at, outcome)
     else:
         log.info("bots: check %s: %s %.2f -> %s", cid, res.assessment, res.confidence, outcome)
 

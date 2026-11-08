@@ -30,7 +30,7 @@ SPEAKERS = {"A": SpeakerInfo(name="Alice Archer", side="prop"), "B": SpeakerInfo
 def _tunables(monkeypatch):
     monkeypatch.setattr(config, "FLAGS", {"bots": True})
     for k, v in dict(BOTS_MIN_GAP_S=10.0, BOTS_LINE_TTL_S=30.0, BOTS_VERDICT_WAIT_S=0.05, BOTS_CHECK_MIN_CONF=0.80,
-                     BOTS_BANTER=False, BOTS_BANTER_GAP_S=20.0).items():
+                     BOTS_MISLEADING_MIN_CONF=0.60, BOTS_BANTER=False, BOTS_BANTER_GAP_S=20.0).items():
         monkeypatch.setattr(config, k, v)
 
 
@@ -174,6 +174,7 @@ async def test_a_capped_verdict_is_not_sourced_so_the_knowledge_check_answers():
 
 
 @pytest.mark.parametrize("check,kind", [
+    (false_check(0.60), "followup"),                       # a contested claim: the misleading bar is not its bar
     (false_check(0.79), "followup"),                       # below BOTS_CHECK_MIN_CONF: no challenge
     (false_check(0.80), "challenge"),
     (false_check("90%"), "challenge"),                     # percentages are read as 0..1
@@ -228,7 +229,7 @@ ULEZ = "London's ULEZ cut nitrogen dioxide in central London by 46 per cent."
 STROKE = "Lightning often strikes the same place twice."
 
 
-@pytest.mark.parametrize("conf,kind", [(0.79, "followup"), (0.80, "challenge"), (0.95, "challenge")])
+@pytest.mark.parametrize("conf,kind", [(0.59, "followup"), (0.60, "challenge"), (0.95, "challenge")])   # own bar
 @pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
 async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bot(conf, kind, spk, side, persona):
     bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=misleading_check(conf)))
@@ -240,6 +241,18 @@ async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bo
         assert b.text == "True, but that's against a modelled baseline. (unsourced)"
     else:
         assert "(unsourced)" not in b.text
+
+
+@pytest.mark.parametrize("check,kind", [
+    (misleading_check(0.85), "followup"), (misleading_check(0.90), "challenge"),
+    (false_check(0.85), "challenge"), (surprising_check(0.85), "concede"),
+])
+async def test_the_misleading_bar_and_the_check_bar_are_tuned_apart(check, kind):
+    config.BOTS_MISLEADING_MIN_CONF = 0.90                                    # above BOTS_CHECK_MIN_CONF (0.80)
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=check))
+    bots.handle(C("c1", text=ULEZ))
+    await settle(bots)
+    assert [b.kind for b in said(out)] == [kind]
 
 
 @pytest.mark.parametrize("line,text", [
@@ -356,12 +369,13 @@ async def test_knowledge_drops_a_line_against_every_verdict_label_it_would_contr
 
 
 @pytest.mark.parametrize("check,verdict,kind,log", [
-    (false_check(), dict(), "rebut", "likely_false 0.95 -> not fired: sourced verdict"),
+    (false_check(), dict(), "rebut", "likely_false 0.95 (check bar 0.80) -> not fired: sourced verdict"),
     (surprising_check(), dict(guard_notes=CAPPED), "followup",
-     "surprising_true 0.90 -> not fired: the Verdict says contradicted"),
-    (misleading_check(), dict(label="supported"), "followup", "misleading 0.90 -> not fired: supported verdict"),
-    (misleading_check(), dict(label="missing_context", guard_notes=CAPPED), "challenge", "misleading 0.90 -> fired "
-                                                                                         "challenge"),
+     "surprising_true 0.90 (check bar 0.80) -> not fired: the Verdict says contradicted"),
+    (misleading_check(), dict(label="supported"), "followup",
+     "misleading 0.90 (misleading bar 0.60) -> not fired: supported verdict"),
+    (misleading_check(), dict(label="missing_context", guard_notes=CAPPED), "challenge",
+     "misleading 0.90 (misleading bar 0.60) -> fired challenge"),
 ])
 async def test_a_verdict_that_comes_in_while_the_check_outlasts_the_wait_still_wins(caplog, check, verdict, kind, log):
     caplog.set_level(logging.INFO, logger="bots")
@@ -399,14 +413,17 @@ def test_priority_order():
 
 
 @pytest.mark.parametrize("check,verdict,want", [
-    (false_check(0.95), None, "bots: check c1: likely_false 0.95 -> fired challenge"),
-    (misleading_check(0.79), None, "bots: check c1: misleading 0.79 -> not fired: below 0.80"),
-    (surprising_check(0.9), None, "bots: check c1: surprising_true 0.90 -> fired concede"),
+    (false_check(0.95), None, "bots: check c1: likely_false 0.95 (check bar 0.80) -> fired challenge"),
+    (false_check(0.60), None, "bots: check c1: likely_false 0.60 (check bar 0.80) -> not fired: below the bar"),
+    (misleading_check(0.59), None, "bots: check c1: misleading 0.59 (misleading bar 0.60) -> not fired: below the bar"),
+    (misleading_check(0.60), None, "bots: check c1: misleading 0.60 (misleading bar 0.60) -> fired challenge"),
+    (surprising_check(0.9), None, "bots: check c1: surprising_true 0.90 (check bar 0.80) -> fired concede"),
+    (surprising_check(0.79), None, "bots: check c1: surprising_true 0.79 (check bar 0.80) -> not fired: below the bar"),
     (check_answer("likely_true", 0.99), None, "bots: check c1: likely_true 0.99 -> not fired: likely_true"),
     (false_check(0.9, challenge="", correction="that is wrong"), None,
-     "bots: check c1: likely_false 0.90 -> not fired: dropped by the guards"),
-    (surprising_check(0.9), "contradicted", "bots: check c1: surprising_true 0.90 -> not fired: the Verdict says "
-                                            "contradicted"),
+     "bots: check c1: likely_false 0.90 (check bar 0.80) -> not fired: dropped by the guards"),
+    (surprising_check(0.9), "contradicted", "bots: check c1: surprising_true 0.90 (check bar 0.80) -> not fired: the "
+                                            "Verdict says contradicted"),
     (false_check(0.9), "supported", "bots: check c1: no result -> not fired: supported verdict"),
     (None, None, "bots: check c1: no result -> not fired: no answer (timeout or error)"),
 ])
@@ -432,7 +449,7 @@ async def test_the_check_log_line_shows_a_finished_check_that_a_sourced_verdict_
     await settle(bots, 1.0)
     assert [b.kind for b in said(out)] == ["rebut"]
     assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [
-        "bots: check c1: misleading 0.80 -> not fired: sourced verdict"]
+        "bots: check c1: misleading 0.80 (misleading bar 0.60) -> not fired: sourced verdict"]
 
 
 # ----------------------------------------------------------------------------- follow-ups
@@ -1076,7 +1093,8 @@ def test_tunable_defaults():
     import sys
     from pathlib import Path
     env = {k: v for k, v in os.environ.items() if not k.startswith("BOTS_")} | {"DEBATE_REF_NO_DOTENV": "1"}
-    code = "from app import config as c; print(c.BOTS_CHECK_MIN_CONF, c.BOTS_BANTER_GAP_S, c.BOTS_MIN_GAP_S)"
+    code = ("from app import config as c; "
+            "print(c.BOTS_CHECK_MIN_CONF, c.BOTS_MISLEADING_MIN_CONF, c.BOTS_BANTER_GAP_S, c.BOTS_MIN_GAP_S)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env,
                          cwd=Path(__file__).resolve().parent.parent, check=True).stdout
-    assert out.split() == ["0.8", "20.0", "10.0"]
+    assert out.split() == ["0.8", "0.6", "20.0", "10.0"]

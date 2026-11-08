@@ -72,12 +72,13 @@ BOTS=real ./run.sh live                    # or drive, mock, ...
 ```
 
 - A sourced Verdict becomes a `rebut` that names its source ("The ONS says 4.2%, not 6%. Try again."). Without one,
-  Claude checks the claim from its own knowledge and, only when confident (`BOTS_CHECK_MIN_CONF`, 0.80), posts a
-  line ending "(unsourced)": a `challenge` when the claim looks wrong ("6%? Last I checked, it was nearer 4%.") or
-  true but misrepresented ("True, but that's against a modelled baseline."), or, rarely, a grudging `concede` when
-  it is true but widely believed false ("Annoyingly, that one checks out."). At most one of these per claim, and
-  never against the claim's Verdict. Otherwise a `followup` question. Every check result is logged at INFO
-  ("bots: check c7: misleading 0.79 -> not fired: below 0.80"), to tune the bar at rehearsal.
+  Claude checks the claim from its own knowledge and, only when confident, posts a line ending "(unsourced)": a
+  `challenge` when the claim looks wrong ("6%? Last I checked, it was nearer 4%.", `BOTS_CHECK_MIN_CONF`, 0.80) or
+  true but misrepresented ("True, but that's against a modelled baseline.", its own bar `BOTS_MISLEADING_MIN_CONF`,
+  0.60: Opus rates those at about 0.60), or, rarely, a grudging `concede` when it is true but widely believed false
+  ("Annoyingly, that one checks out.", 0.80). At most one of these per claim, and never against the claim's
+  Verdict. Otherwise a `followup` question. Every check result is logged at INFO with the bar that applied
+  ("bots: check c7: misleading 0.59 (misleading bar 0.60) -> not fired: below the bar"), to tune at rehearsal.
 - Unanswered points get a `nudge`. The bots trade a dry `banter` line at most every `BOTS_BANTER_GAP_S` (20 s),
   only while nothing more important is running or queued for either bot (`BOTS_BANTER=0` turns it off).
   Priority: rebut > challenge > concede > nudge > followup > banter.
