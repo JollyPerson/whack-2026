@@ -3,10 +3,11 @@
 Two bots heckle the opposing debater in speech bubbles: the For bot is Prop's second and answers Opp's claims, the
 Against bot is Opp's second and answers Prop's. Every line, templated or written by the LLM, goes through guard():
 - at most MAX_WORDS words (a rebut, which names its source, REBUT_MAX_WORDS);
-- no judgement or insult words (voice.BANNED and its stems, plus INSULTS), no URLs, no emojis or hashtags;
-- figures only if the `allowed` text has them (the claim, the Verdict, the line a banter replies to); a challenge
-  may carry Claude's own figure because it always ends with UNSOURCED;
-- LLM-written lines (strict=True) also may not mention people (PERSONAL), and banter may not cite sources.
+- no judgement or insult words (voice.BANNED and its stems, INSULTS, PUT_DOWNS), no URLs, no emojis or hashtags;
+- figures only if the `allowed` text has them (the claim, the Verdict, the line a banter replies to), in digits
+  or in words ("two", "half", "forty"); a challenge may carry Claude's own figure because it ends with UNSOURCED;
+- LLM-written lines (strict=True) also may not mention people (PERSONAL) or the debaters' names; banter, which is
+  between the two bots, may not mention the debaters at all (DEBATERS) or cite sources.
 A line that fails is dropped (or the next template is tried), never trimmed into shape.
 """
 from __future__ import annotations
@@ -33,20 +34,33 @@ INSULTS = frozenset({
     "idiot", "idiots", "idiotic", "moron", "morons", "moronic", "dumb", "dimwit", "clown", "clowns", "pathetic",
     "loser", "losers", "ignorant", "clueless", "fool", "fools", "foolish", "silly", "shut", "embarrassing",
     "hypocrite", "hypocrites", "hypocritical", "coward", "cowards", "cowardly", "incompetent", "laughable",
-    "dishonest", "shameful", "disgrace", "disgraceful", "garbage", "trash", "crap", "hell", "damn", "bloody"})
+    "dishonest", "shameful", "disgrace", "disgraceful", "garbage", "trash", "crap", "hell", "damn", "bloody",
+    "lazy", "weak", "bully", "bullies", "arrogant", "arrogance", "smug", "rude", "desperate", "desperation",
+    "panic", "panicking", "panicked", "rattled", "flailing", "floundering", "sloppy", "lame", "childish", "naive",
+    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing"})
+PUT_DOWNS = re.compile(   # questions about a debater's honesty or wits ("Did you just make that up?")
+    r"\b(?:make|made|making) (?:that|this|it|those|these) up\b|\b(?:do|did|does) you even\b|\bthin air\b|"
+    r"\bout of (?:your|their) depth\b", re.I)
 PERSONAL = frozenset({   # LLM lines never remark on the debaters as people (also drops "he"/"she" gossip)
     "hair", "haircut", "face", "voice", "accent", "outfit", "clothes", "shirt", "tie", "suit", "shoes", "glasses",
     "looks", "ugly", "fat", "skinny", "bald", "sweat", "sweating", "sweaty", "nervous", "stutter", "stammer",
     "mumble", "mumbling", "shouting", "he", "she", "him", "her", "his", "hers", "himself", "herself"})
+DEBATERS = frozenset({   # banter is bot to bot: it never mentions the debaters (or anyone else) at all
+    "debater", "debaters", "speaker", "speakers", "prop", "proposition", "opp", "opposition", "they", "them",
+    "their", "theirs", "themselves", "person", "people", "human", "humans", "champion", "guy", "guys", "man",
+    "woman", "folks"})
 SOURCE_WORDS = frozenset({"according", "study", "studies", "survey", "surveys", "poll", "polls", "census",
                           "researchers", "report", "reports"})
-NUMBER_WORDS = frozenset({
+NUMBER_WORDS = frozenset({   # not "one": "which one", "no one" (and "one in five" has its "five")
+    "zero", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "half", "halves", "quarter",
+    "quarters", "third", "thirds", "double", "twice", "triple", "dozen", "dozens",
     "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
     "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "hundreds", "thousand",
     "thousands", "million", "millions", "billion", "billions", "trillion", "percent", "cent", "bn"})
 _SOURCE_NAMES = sorted({s.lower() for s in voice.SOURCES.values()}, key=len, reverse=True)
-_URL = re.compile(r"\bhttps?://|\bwww\.|"
-                  r"\b[\w-]+\.(?:com|org|net|io|gov|edu|int|eu|info|co\.uk|ac\.uk|org\.uk|nhs\.uk)\b", re.I)
+_URL = re.compile(r"\bhttps?://|\bwww\.|\b[\w-]+\.[a-z]{2,}/|"     # a link: a dot then a slash ("bit.ly/x")
+                  r"\b[\w-]+\.(?:com|org|net|io|ai|ly|co|me|tv|app|dev|uk|gov|edu|int|eu|info)\b", re.I)
+_TAG = re.compile(r"\(?\s*\bunsourced\b\s*\)?\.?", re.I)   # the tag as the LLM may write it: "(Unsourced)."
 _DIGITS = re.compile(r"\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[a-z]+")
 _FIGURE = re.compile(r"[£$€]?\d[\d,.]*\d?(?:\s?(?:%|per ?cent|percent|million|billion|trillion|bn|m|k)\b|%)?", re.I)
@@ -105,7 +119,7 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
         return None
     low = s.lower()
     toks = set(_WORD.findall(low))
-    if voice.judgemental(s) or toks & INSULTS or _URL.search(s) or _ODD.search(s):
+    if voice.judgemental(s) or toks & INSULTS or PUT_DOWNS.search(s) or _URL.search(s) or _ODD.search(s):
         return None
     if any(ord(ch) >= 0x2000 and ch not in _OK_HIGH for ch in s):   # emojis and other pictographs
         return None
@@ -119,7 +133,7 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
     if any(n and n.lower() in toks for n in names):
         return None
     if kind == "banter":
-        if toks & SOURCE_WORDS:
+        if toks & SOURCE_WORDS or toks & DEBATERS:
             return None
         allowed_low = allowed.lower()
         if any(re.search(rf"\b{re.escape(n)}\b", low) and n not in allowed_low for n in _SOURCE_NAMES):
@@ -192,12 +206,12 @@ def rebut(claim: Any, verdict: Any, used: Iterable[str] = ()) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------------- AI-knowledge challenge
-def challenge(claim: Any, text: Any = "", correction: Any = "") -> Optional[str]:
+def challenge(claim: Any, text: Any = "", correction: Any = "", names: Iterable[str] = ()) -> Optional[str]:
     """Claude's own-knowledge challenge, tagged: its line if fit, else one built from its correction (a phrase that
-    completes "Last I checked, ...", e.g. "it was nearer 4%")."""
-    body = tidy(text).replace(UNSOURCED, "").strip()
+    completes "Last I checked, ...", e.g. "it was nearer 4%"). `names`: as for guard()."""
+    body = re.sub(r"\s+([.,;:?!])", r"\1", _TAG.sub(" ", tidy(text))).strip(" ,;:-")   # any tag it wrote itself
     if body:
-        line = guard(f"{_finish(body)} {UNSOURCED}", "challenge", strict=True)
+        line = guard(f"{_finish(body)} {UNSOURCED}", "challenge", strict=True, names=names)
         if line:
             return line
     fix = voice.clean(correction)
@@ -208,7 +222,7 @@ def challenge(claim: Any, text: Any = "", correction: Any = "") -> Optional[str]
     if fig:
         tpls.insert(0, f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}")
     for tpl in tpls:
-        line = guard(_finish(tpl.format(fig=fig, fix=fix)), "challenge", strict=True)
+        line = guard(_finish(tpl.format(fig=fig, fix=fix)), "challenge", strict=True, names=names)
         if line:
             return line
     return None

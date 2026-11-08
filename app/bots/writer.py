@@ -27,7 +27,8 @@ SIDE_NAME = {"prop": "Proposition", "opp": "Opposition"}
 PERSONA_NAME = {"for": "FOR", "against": "AGAINST"}
 
 _RULES = """\
-- No insults, nothing about any person: not their looks, voice, manner, intelligence or character.
+- No insults, nothing about any person: not their looks, voice, manner, intelligence, honesty or character \
+(never "did you make that up", "do you even know").
 - Never the words lie, false, wrong, misleading, nonsense, incorrect, myth.
 - No hashtags, emojis, quotation marks or URLs."""
 
@@ -70,9 +71,10 @@ quips at ringside.
 
 You are one of the bots. The other bot just posted a line aimed at your side's debater. Reply to the other bot \
 (not to the debaters) with ONE dry, witty sentence of at most 10 words: the bubble cuts anything longer.
-- Tease the other bot's line, its style or its confidence; you may lightly stand up for your side.
+- Tease the other bot's line, its style or its confidence. Keep it between the two bots: never mention the \
+debaters, the speakers, the sides or any other people ("you" is the other bot).
 - Don't open the way an earlier line did.
-- No numbers, facts, statistics, names or sources, and no new claims about the topic.
+- No numbers (not even in words), facts, statistics, names or sources, and no new claims about the topic.
 {_RULES}
 - If nothing good and safe comes to mind, return an empty line.
 Return JSON: {{"line": "..."}}"""

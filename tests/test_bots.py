@@ -218,6 +218,9 @@ async def test_low_importance_claims_get_only_a_sourced_rebut():
     (FakeLLM(question="Is that a lie, or just a guess?"), "Source for that 6%?"),   # judgement word
     (FakeLLM(question="Wasn't it 40% last year?"), "Source for that 6%?"),      # a figure the claim lacks
     (FakeLLM(question="Did his figure include part-time work?"), "Source for that 6%?"),   # about a person
+    (FakeLLM(question="Did you just make that up?"), "Source for that 6%?"),   # their honesty
+    (FakeLLM(question="Do you even understand what a baseline is?"), "Source for that 6%?"),   # their wits
+    (FakeLLM(question="Isn't it nearer four?"), "Source for that 6%?"),        # Claude's own figure, untagged
     (FakeLLM(question="Which month is that 6% from?"), "Which month is that 6% from?"),
 ])
 async def test_followup_falls_back_to_a_template_when_the_llm_fails_or_breaks_a_rule(fast, text):
@@ -254,10 +257,38 @@ def test_followup_templates_by_type_skip_used_lines():
     ("Her confidence is doing a lot of work.", False),                          # about a person
     ("Sure, and I'm the referee's favourite toaster, apparently, if we are all being very honest here.", False),
     ("Bold claim 😂", False),
+    ("Steady on, it was a question, not a closing speech.", True),
+    ("Your debater is lazy and weak.", False),                                  # the debaters, judged
+    ("Your debater is clearly panicking now.", False),
+    ("Their speaker is flailing badly tonight.", False),
+    ("Your speaker's arrogance is showing.", False),
+    ("Spoken like a true bully.", False),
+    ("Tell that to the Opposition.", False),                                    # any mention of the debaters
+    ("Two questions in and still no answer.", False),                           # small numbers in words
+    ("Ten out of ten for confidence.", False),
+    ("Half the country would disagree with you.", False),
+    ("Check bit.ly/abc before heckling.", False),                               # short links, other TLDs
+    ("Ask claude.ai about that.", False),
 ])
 def test_banter_guards(text, ok):
     got = lines.guard(text, "banter", "Source for that 40%?", strict=True, names=["Bob", "Baker"])
     assert (got == text) is ok
+
+
+def test_strict_followup_guards_keep_plain_questions():
+    for text in ("Which one: headline or core inflation?", "How many people does that 6% cover?",
+                 "Is that two years of data or one?", "Compared with what, e.g. the 2010 level?"):
+        assert lines.guard(text, "followup", "Over two years, 6% since 2010", strict=True, names=["Bob"]) == text
+
+
+def test_challenge_tags_once_and_never_names_a_debater():
+    claim = C("c1")
+    for raw in ("6%? Last I checked it was nearer 4%. (Unsourced)", "6%? Last I checked it was nearer 4%. (unsourced).",
+                "Unsourced: 6%? Last I checked it was nearer 4%."):
+        assert lines.challenge(claim, raw) == "6%? Last I checked it was nearer 4%. (unsourced)"
+    got = lines.challenge(claim, "Bob, last I checked it was nearer 4%.", "it was nearer 4%", names=["Bob", "Baker"])
+    assert got == "6%? Last I checked, it was nearer 4%. (unsourced)"
+    assert lines.challenge(claim, "Bob, last I checked it was nearer 4%.", names=["Bob"]) is None
 
 
 def test_line_guards_lengths_tags_and_hold():

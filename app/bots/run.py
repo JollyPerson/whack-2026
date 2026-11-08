@@ -186,7 +186,7 @@ class Bots:
             res = None if granted else await check
             check.cancel()
             if res and res.likely_false and res.confidence >= config.BOTS_CHECK_MIN_CONF:
-                text = lines.challenge(c, res.challenge, res.correction)
+                text = lines.challenge(c, res.challenge, res.correction, names=self.names)
                 if text and self.queue(session, persona=persona, text=text, kind="challenge", target=c.speaker,
                                        claim_id=c.id):
                     return
