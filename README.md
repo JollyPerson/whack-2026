@@ -63,6 +63,9 @@ Check speed with `.venv/bin/python scripts/bench_llm.py` and quality with `.venv
 
 ## Side bots
 
+Start-to-finish setup (two mics, server flags, the Mate Engine fork, dances, launcher, judge) and credits:
+[`docs/SIDE-BOTS.md`](docs/SIDE-BOTS.md).
+
 Two seconds heckle the opposing debater in text speech bubbles (two Mate Engine avatars, see
 [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Channels (side bots)"): **For** is Prop's second and only answers Opp's
 claims, **Against** mirrors it. No profile starts them; add `BOTS=real` to any run:
@@ -170,3 +173,17 @@ once with "No such file" and that same `cp` hint, so check `ls fixtures/golden_r
 log from a live rehearsal works as it is: the replay starts at its last `SessionStart` and cuts idle gaps. The
 same log also works as a `drive` fixture (`FIXTURE=fixtures/golden_run.jsonl ./run.sh drive`). In that case mock
 ears re-emit only its SessionStart/Utterance/Pause lines and the live brain does the rest.
+
+## Credits
+
+- [Mate Engine](https://github.com/shinyflvre/Mate-Engine) by shinyflvre (Shiny / Johnson Jason) and contributors, via
+  the unofficial [Linux port](https://github.com/Marksonthegamer/Mate-Engine-Linux-Port) by Marksonthegamer. Both are
+  under the MateEngine Pro License v2.0. Our fork for the referee avatar and the side bots is
+  [dabestthebest/Mate-Engine-Linux-Port](https://github.com/dabestthebest/Mate-Engine-Linux-Port/tree/side-bots), under
+  the same licence. Neither project is affiliated with this one.
+- Verdict dances: the Mate Engine community's CustomDances collection. They belong to their MMD motion and music
+  creators and are not redistributed here.
+- Speech to text: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (SYSTRAN, MIT) with OpenAI Whisper
+  models (MIT). Language models: Claude by Anthropic. Voice: [ElevenLabs](https://elevenlabs.io).
+- Full list and the side-bot runbook: [`docs/SIDE-BOTS.md`](docs/SIDE-BOTS.md).
+
