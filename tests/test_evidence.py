@@ -395,3 +395,79 @@ async def test_slow_query_embedding_falls_back_to_bm25(monkeypatch):
     index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"))
     found = await Checker(None, embedder=Slow(), index=index).retrieve("bus use in London")
     assert found[0].url.endswith("/0")
+
+
+# --- regressions: guards
+@pytest.mark.parametrize("kw,text", [(dict(claimed=50, actual=27), "Bus use fell by 50%"),
+                                     (dict(directly_states=False), "Bus use fell"),
+                                     (dict(claimed=99, actual=27), "Bus use fell by 27%"),
+                                     ({}, "Bus use fell by 27%")])
+def test_guard_capped_verdict_is_marked_even_below_the_cap(kw, text):
+    """At aggressiveness 4-5 the Director voices .65+, so a cap the guard chose must be marked whatever the confidence."""
+    g = apply_guards(raw(confidence=.7, **kw), text, SRC)
+    assert "capped" in g.notes and g.confidence == .7
+
+
+def test_figures_followed_by_letters_are_read_whole():
+    assert numbers_in("20mph zones") == [20] and numbers_in("over-75s") == [75] and numbers_in("the 1990s") == [1990]
+    assert numbers_in("5m people, 3 metres, 12km") == [5e6, 3, 12] and numbers_in("COVID-19 cases") == [19]
+
+
+WALES = "The default speed limit on restricted roads in Wales changed from 30mph to 20mph in September 2023."
+WALES_SRC = [Source("https://gov.wales/20mph", "20mph", WALES)]
+
+
+def test_figure_with_a_unit_attached_is_compared():
+    g = apply_guards(raw(quote="changed from 30mph to 20mph", claimed=20, actual=20, unit="mph"),
+                     "The default limit in Wales is now 20mph", WALES_SRC)
+    assert g.numeric is not None and g.numeric.actual == 20 and g.notes == [] and g.confidence == .9
+
+
+RAIL = "Passenger fares brought in £11.2 billion in the year to March."
+RAIL_SRC, RAIL_QUOTE = [Source("https://orr.gov.uk/rail", "Rail finance", RAIL)], "Passenger fares brought in £11.2 billion"
+
+
+def test_figure_given_without_its_scale_word_is_compared():
+    """FACT-CARDS WRONG #8: the model writes 2 and 11.2 with unit "billion pounds"; both mean billions."""
+    g = apply_guards(raw(label="contradicted", quote=RAIL_QUOTE, claimed=2, actual=11.2, unit="billion pounds"),
+                     "Rail fares only bring in about £2 billion a year", RAIL_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
+    assert (g.numeric.claimed, g.numeric.actual) == (2, 11.2)
+
+
+@pytest.mark.parametrize("text,quote,actual", [
+    ("It cost £3.2 billion", "It cost 3,200,000,000 pounds", 3.2e9),     # a mantissa against a full figure
+    ("It cost £3.2 billion", "It cost £3.2 million", 3.2),               # billions against millions
+])
+def test_mantissa_is_never_compared_with_another_basis(text, quote, actual):
+    g = apply_guards(raw(label="contradicted", quote=quote, claimed=3.2, actual=actual), text, [Source("u", "t", quote)])
+    assert g.numeric is None and "numeric_dropped" in g.notes and g.label == "contradicted"
+
+
+def test_close_figure_in_words_does_not_flip_contradicted_to_supported():
+    """The 25% band for words only stops code calling a fair "about a quarter" wrong; "half" is not 38%."""
+    src = [Source("u", "t", "Transport produced 38% of emissions in 2023.")]
+    g = apply_guards(raw(label="contradicted", quote="Transport produced 38% of emissions", claimed=50, actual=38, unit="%"),
+                     "Transport produces half of emissions", src)
+    assert g.label == "contradicted" and "numeric_override" not in g.notes and "capped" in g.notes
+
+
+def test_far_figure_in_words_still_overrules_supported():
+    g = apply_guards(raw(quote=GHG_QUOTE, claimed=50, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.label == "contradicted" and "numeric_override" in g.notes and "capped" in g.notes
+
+
+ROADS = "More than half a million people were hurt on Britain's roads in 2024."
+ROADS_TEXT = "In 2024 there were an estimated 128,272 casualties of all severities on Britain's roads."
+ROADS_SRC, ROADS_QUOTE = [Source("https://gov.uk/roads", "Road casualties", ROADS_TEXT)], "an estimated 128,272 casualties"
+
+
+def test_prompt_asks_for_figures_said_in_words():
+    """The code compares figures said in words, so the prompt must not tell the model to leave them out."""
+    from app.evidence import verdicts
+    assert "counts as no figure" not in verdicts.SYSTEM and "500000" in verdicts.SYSTEM
+
+
+def test_word_figure_reported_beside_a_year_is_compared_and_stays_on_air():
+    g = apply_guards(raw(label="contradicted", quote=ROADS_QUOTE, claimed=500000, actual=128272), ROADS, ROADS_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
