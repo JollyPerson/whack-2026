@@ -71,7 +71,9 @@ _TAG = re.compile(r"\(?\s*\bunsourced\b\s*\)?\.?", re.I)   # the tag as the LLM 
 _DIGITS = re.compile(r"\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[a-z]+")
 _LETTERS = re.compile(r"[^\W\d_]+")             # words in any script: a name's "Siobhán", "Anne-Marie", "O'Neill"
-_FIGURE = re.compile(r"[£$€]?\d[\d,.]*\d?(?:\s?(?:%|per ?cent|percent|million|billion|trillion|bn|m|k)\b|%)?", re.I)
+_NUM = r"[£$€]?\d[\d,.]*\d?"
+_FIGURE = re.compile(rf"{_NUM}(?:\s?(?:-|–|to)\s?{_NUM}|/\d+)?"            # a range ("20-30%", "20 to 30%") or "1/3"
+                     r"(?:\s?%|\s?(?:per ?cent|percent|million|billion|trillion|bn|m|k)\b)?", re.I)
 _YEAR = re.compile(r"(?:19|20)\d\d")
 _ODD = re.compile(r"[#@<>{}\[\]\\|*_~`]")
 _QUOTES = "\"'“”‘’`"
@@ -169,10 +171,13 @@ def _finish(text: str) -> str:
 
 
 def figure(text: str) -> str:
-    """The first figure in a claim as said ("40%", "£3 billion"), or "". A bare year is not a figure."""
+    """The first figure in a claim as said ("40%", "£3 billion", "20-30%", "1/3"), or "". A bare year is not a
+    figure."""
     for m in _FIGURE.finditer(text or ""):
-        f = m.group(0).strip().rstrip(".,")
-        if any(ch.isdigit() for ch in f) and not _YEAR.fullmatch(f):
+        f = re.sub(r"\.?\s*%", "%", m.group(0).strip().rstrip(".,"))   # STT's "6 %" and "6.%" are "6%"
+        years = all(_YEAR.fullmatch(n) for n in _DIGITS.findall(f)) and \
+            not re.search(r"[^\d\s,.–-]", re.sub(r"\bto\b", "", f))
+        if any(ch.isdigit() for ch in f) and not years:                  # nor is a span of years ("2010 to 2019")
             return f
     return ""
 

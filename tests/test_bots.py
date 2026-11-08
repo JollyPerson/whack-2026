@@ -1410,3 +1410,20 @@ async def test_two_claims_queued_behind_a_bubble_with_the_llm_down_get_different
         clock.t += 10
         bots.tick()
     assert sorted((b.claim_id, b.text) for b in said(out)[1:]) == [("c1", "Says who?"), ("c2", "Source, please?")]
+
+
+@pytest.mark.parametrize("text,fig", [
+    ("Unemployment is 6 %.", "6%"),                          # STT spacing: the % is still part of it
+    ("Unemployment is 6.%", "6%"),                           # a stray point before the %
+    ("Prices are up 20-30% this year.", "20-30%"),           # a range is one figure, not its first number
+    ("Between 20 to 30% of firms would close.", "20 to 30%"),
+    ("Roughly 1/3 of workers are affected.", "1/3"),
+    ("From 2010 to 2019 wages fell 5%.", "5%"),              # a span of years is not a figure
+    ("Wages rose in 2019.", ""),
+    ("It costs £3bn a year.", "£3bn"),
+    ("Unemployment is 6% in the UK.", "6%"),
+])
+def test_the_figure_a_template_quotes_survives_stt_spacing_ranges_and_fractions(text, fig):
+    assert lines.figure(text) == fig
+    line = lines.followup(C("c1", text=text))
+    assert line == (f"Source for that {fig}?" if fig else "Source for that number?")
