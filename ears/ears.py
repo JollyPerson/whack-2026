@@ -21,6 +21,9 @@ RING_CHUNKS = 160
 HEAD_MARGIN = 0.4
 # The same word this soon after the previous one is one word heard twice.
 DUPLICATE_GAP = 0.3
+# Words with no sentence end after them, this long before the cutoff, are a
+# sentence anyway: the speaker trailed off or Whisper left out the period.
+TAIL_IDLE = 2.0
 # Ends in a period but rarely ends a sentence: "U.S.", "e.g.", "Dr.".
 ABBREVIATION = re.compile(r"(?:[a-z]\.){2,}|(?:mr|mrs|ms|dr|prof|st|vs|jr|sr)\.", re.IGNORECASE)
 
@@ -165,7 +168,16 @@ class SentenceBuffer:
             "confidence": round(confidence, 3) if confidence is not None else None,
         }
 
+    def _commit(self, count):
+        """Take the first count words out as one sentence."""
+        sentence_words, self.words = self.words[:count], self.words[count:]
+        self.committed_until = sentence_words[-1]["end"]
+        self.last_committed = sentence_words[-1]
+        return self.make_sentence(sentence_words)
+
     def extract_sentences(self, cutoff):
+        """Emit the sentences that end by cutoff, and the words after the
+        last boundary once they end TAIL_IDLE before it."""
         emitted = []
 
         while True:
@@ -186,43 +198,22 @@ class SentenceBuffer:
             if boundary is None:
                 break
 
-            sentence_words = self.words[:boundary + 1]
-            sentence_end = sentence_words[-1]["end"]
-
-            if sentence_end > cutoff:
+            if self.words[boundary]["end"] > cutoff:
                 break
 
-            emitted.append(self.make_sentence(sentence_words))
+            emitted.append(self._commit(boundary + 1))
 
-            self.committed_until = sentence_end
-            self.last_committed = sentence_words[-1]
-            self.words = self.words[boundary + 1:]
+        # Trailing off, cut off, or Whisper left out the period: once the
+        # speaker has been quiet a while it is a sentence of its own, not the
+        # start of their next sentence minutes later.
+        if self.words and self.words[-1]["end"] <= cutoff - TAIL_IDLE:
+            emitted.append(self._commit(len(self.words)))
 
-        return emitted
-
+        return [sentence for sentence in emitted if sentence["text"]]
 
     def flush(self):
         """Emit remaining sentences and any trailing fragment on shutdown."""
-
-        emitted = []
-
-        while self.words:
-            boundary = None
-
-            for i, word in enumerate(self.words):
-                if self.is_sentence_end(word["word"]):
-                    boundary = i
-                    break
-
-            if boundary is None:
-                emitted.append(self.make_sentence(self.words))
-                self.words = []
-            else:
-                sentence_words = self.words[:boundary + 1]
-                emitted.append(self.make_sentence(sentence_words))
-                self.words = self.words[boundary + 1:]
-
-        return emitted
+        return self.extract_sentences(float("inf"))
 
 
 def start_audio_capture(source_name, device, buffer):

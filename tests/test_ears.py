@@ -177,3 +177,32 @@ def test_abbreviations_do_not_end_a_sentence(words, text):
                                        ("so…", False), ("U.S.", False), ("Mr.", False), ("vs.", False)])
 def test_sentence_end(word, end):
     assert ears.SentenceBuffer.is_sentence_end(" " + word) is end
+
+
+def test_an_unfinished_sentence_is_emitted_once_the_speaker_goes_quiet():
+    sb = ears.SentenceBuffer()
+    sb.add_words([w(" and", 10.0, 10.2), w(" so...", 10.2, 10.6)], window_start=7.0)
+    assert texts(sb, 11.0) == []                             # maybe just a breath
+    [tail] = sb.extract_sentences(13.0)
+    assert (tail["text"], tail["start"], tail["end"]) == ("and so", 10.0, 10.6)
+    # ...and not glued onto the same speaker's next sentence a minute later.
+    sb.add_words([w(" Second", 75.0, 75.4), w(" point.", 75.4, 75.9)], window_start=72.0)
+    [nxt] = sb.extract_sentences(100)
+    assert (nxt["text"], nxt["start"]) == ("Second point.", 75.0)
+
+
+def test_a_sentence_ending_in_an_abbreviation_still_comes_out():
+    sb = ears.SentenceBuffer()
+    sb.add_words([w(" Grain", 1.0, 1.3), w(" from", 1.3, 1.5), w(" the", 1.5, 1.6), w(" U.S.", 1.6, 2.0)],
+                 window_start=0.0)
+    assert texts(sb, 2.5) == []
+    assert texts(sb, 4.5) == ["Grain from the U.S."]
+
+
+def test_flush_emits_the_finished_sentences_and_the_fragment_after_them():
+    sb = ears.SentenceBuffer()
+    sb.add_words([w(" One.", 0, .5), w(" Two", 1.0, 1.2), w(" more.", 1.2, 1.5), w(" Three", 2.0, 2.2)],
+                 window_start=0.0)
+    assert texts(sb, 0.0) == []
+    assert [s["text"] for s in sb.flush()] == ["One.", "Two more.", "Three"]
+    assert sb.words == []
