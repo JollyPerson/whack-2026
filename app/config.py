@@ -58,7 +58,18 @@ FLAGS: dict = {
     "deep_check": False,     # C: second, slower check in the background (about 30 s), as a via="deep" Verdict. Off until it beats the fast check on Opus (on Kimi it fixed 0, broke 1)
     "interims": True,        # D: show interim text
     "agent_speaking": False, # set by the browser around TTS playback (echo guard)
+    "bots": True,            # B: side bots may post (only while the bots module runs: BOTS=real)
 }
+
+# --- side bots (app/bots): For/Against seconds shown as Mate Engine speech bubbles. Enable with BOTS=real -------
+BOTS_MIN_GAP_S = _env("BOTS_MIN_GAP_S", 10.0)            # per bot: at most one bubble this often
+BOTS_LINE_TTL_S = _env("BOTS_LINE_TTL_S", 30.0)          # a queued line older than this is dropped
+BOTS_VERDICT_WAIT_S = _env("BOTS_VERDICT_WAIT_S", 10.0)  # wait this long for a sourced Verdict before an unsourced check
+BOTS_CHECK_MIN_CONF = _env("BOTS_CHECK_MIN_CONF", 0.85)  # the AI-knowledge challenge only fires at or above this
+BOTS_BANTER = _env("BOTS_BANTER", True)                  # bot-to-bot replies (dry, guarded, rate-limited)
+BOTS_BANTER_GAP_S = _env("BOTS_BANTER_GAP_S", 45.0)      # at most one banter line this often, across both bots
+BOTS_MODEL = _env("BOTS_MODEL", "claude-haiku-5-5")      # follow-ups and banter: fast
+BOTS_CHECK_MODEL = _env("BOTS_CHECK_MODEL", "claude-opus-5-5")   # the unsourced knowledge check: most accurate
 
 # --- brain: claim extraction ----------------------------------------------------------------
 LLM_PROVIDER = _env("LLM_PROVIDER", "auto")               # auto | anthropic (claude) | openai (chatgpt) | heuristic

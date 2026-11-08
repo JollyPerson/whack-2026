@@ -10,7 +10,7 @@ import pytest
 from app import latency
 from app.bus import Bus, load_jsonl
 from app.mocks import mock_ears
-from app.schemas import (EVENT_TYPES, ArgMapSnapshot, Claim, Control, DirectorDecision, DirectorStatus, Event,
+from app.schemas import (EVENT_TYPES, ArgMapSnapshot, BotLine, BotTalk, Claim, Control, DirectorDecision, DirectorStatus, Event,
                          Evidence, Interjection, Link, MapEdge, MapNode, ModuleStatus, Numeric, Pause,
                          ResearchProgress, ResearchRequest, FactSheet, Fact, Score, SessionStart, SourceCard, SpeakerInfo, TTSState, Utterance,
                          ValidationError, Verdict, parse_event)
@@ -73,6 +73,12 @@ def producer_samples() -> dict[str, Event]:
                                                speakers={"Gov": SpeakerInfo(name="Priya", side="prop"),
                                                          "spk2": {"name": "Tom", "side": "opp"}}),
         "main/ModuleStatus": ModuleStatus(module="brain", state="degraded", detail="fallback 3/41"),
+        "bots/BotLine(rebut)": BotLine(persona="for", text="ONS puts it at 4.2%, not 6%. Try again.", kind="rebut",
+                                       target="B", claim_id="c3", sourced=True, src="bots",
+                                       evidence=[Evidence(url="https://www.ons.gov.uk/x", title="ONS", quote="4.2%")]),
+        "bots/BotLine(banter)": BotLine(persona="against", text="Bold of you to cite a source.", kind="banter",
+                                        reply_to="b-0001", hold_s=6.0, src="bots"),
+        "bots/BotTalk": BotTalk(persona="for", line_id="b-0001", on=False, src="bots"),
     }
 
 
@@ -317,3 +323,19 @@ async def test_mock_ears_cuts_idle_gaps(tmp_path, monkeypatch):
     got = [s.q.get_nowait() for _ in range(s.q.qsize())]
     assert [e.event for e in got] == ["SessionStart", "Utterance", "Pause"]
     assert got[2].ts - got[0].ts == pytest.approx(0.1, abs=0.04)
+
+
+def test_bot_line_and_bot_talk_round_trip_with_defaults():
+    from app.schemas import BotLine, BotTalk
+    line = parse_event({"event": "BotLine", "persona": "for", "text": "Source for that 40%?"})
+    assert isinstance(line, BotLine) and line.kind == "followup" and line.sourced is False and line.id.startswith("b-")
+    assert line.hold_s == 8.0 and line.target is None and line.evidence == []
+    assert parse_event(line.model_dump_json()).model_dump() == line.model_dump()
+    talk = parse_event({"event": "BotTalk", "persona": "against", "line_id": line.id})
+    assert isinstance(talk, BotTalk) and talk.on is False
+
+
+def test_bots_control_flag_is_a_bool_flag():
+    from app.schemas import Control
+    assert Control(flag="bots", value="off").value is False and Control(flag="bots", value="1").value is True
+

@@ -410,7 +410,7 @@ class Control(Event):
         return self
 
 
-BOOL_FLAGS = {"tts", "director", "web_fallback", "interims", "agent_speaking", "mute"}
+BOOL_FLAGS = {"tts", "director", "web_fallback", "interims", "agent_speaking", "mute", "bots"}
 _TRUE, _FALSE = {"1", "true", "yes", "on", "t", "y"}, {"0", "false", "no", "off", "f", "n", ""}
 
 
@@ -430,8 +430,33 @@ class TTSState(Event):
     interjection_id: Optional[str] = None
 
 
+class BotLine(Event):
+    """A side bot's speech-bubble line: text only, never spoken. Owner: B (app/bots). The For bot is Prop's second
+    and only ever addresses the Opp side; the Against bot mirrors it. D shows it on that bot's Mate Engine channel."""
+    event: Literal["BotLine"] = "BotLine"
+    id: str = Field(default_factory=lambda: f"b-{next(_uid):04d}")
+    persona: str                   # for (Prop's second) | against (Opp's second)
+    text: str                      # exactly what the bubble shows
+    kind: str = "followup"         # rebut (sourced) | challenge (AI knowledge, unsourced) | nudge | followup | banter
+    target: Optional[str] = None   # speaker id addressed (the opponent); None for banter
+    claim_id: Optional[str] = None
+    sourced: bool = False          # True only when backed by an evidence Verdict that quotes its source
+    evidence: EvidenceList = Field(default_factory=list)   # that Verdict's source(s) when sourced
+    reply_to: Optional[str] = None  # banter: the BotLine id it answers
+    hold_s: float = 8.0            # how long the bubble types/stays up before BotTalk(on=false)
+
+
+class BotTalk(Event):
+    """A side bot's mouth. BotLine itself opens it (the bubble starts typing); on=false closes it after the line's
+    hold_s, and the bubble then lingers. Never a TTSState: that means the referee is audible."""
+    event: Literal["BotTalk"] = "BotTalk"
+    persona: str                   # for | against
+    line_id: str = ""
+    on: bool = False
+
+
 KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress, ResearchRequest, FactSheet,
-         ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState)
+         ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState, BotLine, BotTalk)
 EVENT_TYPES = {m.model_fields["event"].default: m for m in KNOWN}
 
 AnyEvent = Annotated[Union[KNOWN], Field(discriminator="event")]   # type: ignore[valid-type]
