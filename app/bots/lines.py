@@ -1,0 +1,276 @@
+"""Side-bot wording and guards. Owner: B. Pure: no clock, no I/O, no LLM.
+
+Two bots heckle the opposing debater in speech bubbles: the For bot is Prop's second and answers Opp's claims, the
+Against bot is Opp's second and answers Prop's. Every line, templated or written by the LLM, goes through guard():
+- at most MAX_WORDS words (a rebut, which names its source, REBUT_MAX_WORDS);
+- no judgement or insult words (voice.BANNED and its stems, INSULTS, PUT_DOWNS), no URLs, no emojis or hashtags;
+- figures only if the `allowed` text has them (the claim, the Verdict, the line a banter replies to), in digits
+  or in words ("two", "half", "forty"); a challenge may carry Claude's own figure because it ends with UNSOURCED;
+- LLM-written lines (strict=True) also may not mention people (PERSONAL) or the debaters' names; banter, which is
+  between the two bots, may not mention the debaters at all (DEBATERS) or cite sources.
+A line that fails is dropped (or the next template is tried), never trimmed into shape.
+"""
+from __future__ import annotations
+
+import re
+from typing import Any, Iterable, Optional
+
+from app.brain import voice
+
+PERSONAS = ("for", "against")
+ANSWERS = {"opp": "for", "prop": "against"}     # claim side -> the bot that answers it (never that side's own second)
+OWN_SIDE = {"for": "prop", "against": "opp"}    # the side each bot seconds
+SECOND = {"prop": "for", "opp": "against"}      # side -> its own second (only for nudges about that side's points)
+OTHER = {"for": "against", "against": "for"}
+PRIORITY = {"rebut": 5, "challenge": 4, "nudge": 3, "followup": 2, "banter": 1}
+FACT_KINDS = ("rebut", "challenge")             # at most one of these per claim
+MAX_WORDS = voice.MAX_WORDS
+REBUT_MAX_WORDS = 18
+UNSOURCED = "(unsourced)"
+IMPORTANT = 0.5                                 # importance >= this: worth a follow-up or a knowledge check
+NO_CHECK = {"value", "prediction"}              # never checkable, whatever the extractor said (as argmap.NO_CHECK)
+
+INSULTS = frozenset({
+    "idiot", "idiots", "idiotic", "moron", "morons", "moronic", "dumb", "dimwit", "clown", "clowns", "pathetic",
+    "loser", "losers", "ignorant", "clueless", "fool", "fools", "foolish", "silly", "shut", "embarrassing",
+    "hypocrite", "hypocrites", "hypocritical", "coward", "cowards", "cowardly", "incompetent", "laughable",
+    "dishonest", "shameful", "disgrace", "disgraceful", "garbage", "trash", "crap", "hell", "damn", "bloody",
+    "lazy", "weak", "bully", "bullies", "arrogant", "arrogance", "smug", "rude", "desperate", "desperation",
+    "panic", "panicking", "panicked", "rattled", "flailing", "floundering", "sloppy", "lame", "childish", "naive",
+    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing"})
+PUT_DOWNS = re.compile(   # questions about a debater's honesty or wits ("Did you just make that up?")
+    r"\b(?:make|made|making) (?:that|this|it|those|these) up\b|\b(?:do|did|does) you even\b|\bthin air\b|"
+    r"\bout of (?:your|their) depth\b", re.I)
+PERSONAL = frozenset({   # LLM lines never remark on the debaters as people (also drops "he"/"she" gossip)
+    "hair", "haircut", "face", "voice", "accent", "outfit", "clothes", "shirt", "tie", "suit", "shoes", "glasses",
+    "looks", "ugly", "fat", "skinny", "bald", "sweat", "sweating", "sweaty", "nervous", "stutter", "stammer",
+    "mumble", "mumbling", "shouting", "he", "she", "him", "her", "his", "hers", "himself", "herself"})
+DEBATERS = frozenset({   # banter is bot to bot: it never mentions the debaters (or anyone else) at all
+    "debater", "debaters", "speaker", "speakers", "prop", "proposition", "opp", "opposition", "they", "them",
+    "their", "theirs", "themselves", "person", "people", "human", "humans", "champion", "guy", "guys", "man",
+    "woman", "folks"})
+SOURCE_WORDS = frozenset({"according", "study", "studies", "survey", "surveys", "poll", "polls", "census",
+                          "researchers", "report", "reports"})
+NUMBER_WORDS = frozenset({   # not "one": "which one", "no one" (and "one in five" has its "five")
+    "zero", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "half", "halves", "quarter",
+    "quarters", "third", "thirds", "double", "twice", "triple", "dozen", "dozens",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "hundreds", "thousand",
+    "thousands", "million", "millions", "billion", "billions", "trillion", "percent", "cent", "bn"})
+_SOURCE_NAMES = sorted({s.lower() for s in voice.SOURCES.values()}, key=len, reverse=True)
+_URL = re.compile(r"\bhttps?://|\bwww\.|\b[\w-]+\.[a-z]{2,}/|"     # a link: a dot then a slash ("bit.ly/x")
+                  r"\b[\w-]+\.(?:com|org|net|io|ai|ly|co|me|tv|app|dev|uk|gov|edu|int|eu|info)\b", re.I)
+_TAG = re.compile(r"\(?\s*\bunsourced\b\s*\)?\.?", re.I)   # the tag as the LLM may write it: "(Unsourced)."
+_DIGITS = re.compile(r"\d+(?:[.,]\d+)*")
+_WORD = re.compile(r"[a-z]+")
+_FIGURE = re.compile(r"[£$€]?\d[\d,.]*\d?(?:\s?(?:%|per ?cent|percent|million|billion|trillion|bn|m|k)\b|%)?", re.I)
+_YEAR = re.compile(r"(?:19|20)\d\d")
+_ODD = re.compile(r"[#@<>{}\[\]\\|*_~`]")
+_QUOTES = "\"'“”‘’`"
+_OK_HIGH = set("’‘“”—–…€")
+
+
+def answering(side: Any) -> Optional[str]:
+    """The persona that answers a claim from `side` ("prop" | "opp"); None for anything else."""
+    return ANSWERS.get(str(side or "").strip().lower())
+
+
+def hold_s(text: str) -> float:
+    """How long the bubble types and stays up: words / 2.5 + 3 seconds, clamped to 6..12."""
+    return min(max(len(text.split()) / 2.5 + 3.0, 6.0), 12.0)
+
+
+def _get(o: Any, k: str, default: Any = None) -> Any:
+    if o is None:
+        return default
+    return o.get(k, default) if isinstance(o, dict) else getattr(o, k, default)
+
+
+def tidy(text: Any) -> str:
+    """One line: whitespace collapsed, wrapping quotes stripped."""
+    s = " ".join(str(text or "").split()).strip()
+    while len(s) >= 2 and s[0] in _QUOTES and s[-1] in _QUOTES:
+        s = s[1:-1].strip()
+    return s
+
+
+def _figures(text: str) -> set[str]:
+    return {m.replace(",", "").rstrip(".") for m in _DIGITS.findall(text)}
+
+
+def new_figures(text: str, allowed: str) -> bool:
+    """True if `text` has a figure (in digits, or a number word such as "forty", "million") that `allowed` lacks."""
+    if _figures(text) - _figures(allowed):
+        return True
+    have = set(_WORD.findall(allowed.lower()))
+    return any(w in NUMBER_WORDS and w not in have for w in _WORD.findall(text.lower()))
+
+
+def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = False,
+          names: Iterable[str] = ()) -> Optional[str]:
+    """`text` tidied if it is fit for a bubble, else None. `allowed` holds the figures the line may repeat (ignored
+    for a challenge, which must end with UNSOURCED). strict: written by the LLM. `names`: words that must not
+    appear (the debaters' names)."""
+    s = tidy(text)
+    if not s:
+        return None
+    words = s.split()
+    if len(words) > (REBUT_MAX_WORDS if kind == "rebut" else MAX_WORDS):
+        return None
+    low = s.lower()
+    toks = set(_WORD.findall(low))
+    if voice.judgemental(s) or toks & INSULTS or PUT_DOWNS.search(s) or _URL.search(s) or _ODD.search(s):
+        return None
+    if any(ord(ch) >= 0x2000 and ch not in _OK_HIGH for ch in s):   # emojis and other pictographs
+        return None
+    if kind == "challenge":
+        if not s.endswith(UNSOURCED) or s.count(UNSOURCED) != 1:
+            return None
+    elif new_figures(s, allowed):
+        return None
+    if strict and toks & PERSONAL:
+        return None
+    if any(n and n.lower() in toks for n in names):
+        return None
+    if kind == "banter":
+        if toks & SOURCE_WORDS or toks & DEBATERS:
+            return None
+        allowed_low = allowed.lower()
+        if any(re.search(rf"\b{re.escape(n)}\b", low) and n not in allowed_low for n in _SOURCE_NAMES):
+            return None
+    return s
+
+
+def _finish(text: str) -> str:
+    text = " ".join(text.split())
+    return text[:1].upper() + text[1:]
+
+
+def figure(text: str) -> str:
+    """The first figure in a claim as said ("40%", "£3 billion"), or "". A bare year is not a figure."""
+    for m in _FIGURE.finditer(text or ""):
+        f = m.group(0).strip().rstrip(".,")
+        if any(ch.isdigit() for ch in f) and not _YEAR.fullmatch(f):
+            return f
+    return ""
+
+
+# ----------------------------------------------------------------------------- sourced rebut
+def sourced(verdict: Any) -> bool:
+    """A Verdict a bot may quote: contradicted or missing context, with evidence, not capped by C's guards."""
+    return (_get(verdict, "label") in ("contradicted", "missing_context") and bool(_get(verdict, "evidence"))
+            and "capped" not in (_get(verdict, "guard_notes") or ()))
+
+
+def supported(verdict: Any) -> bool:
+    return _get(verdict, "label") == "supported" and bool(_get(verdict, "evidence"))
+
+
+def _fig(x: Any, unit: str) -> str:
+    """A figure for a bubble: (4.2, "%") -> "4.2%", (3e9, "GBP") -> "£3 billion"."""
+    s = voice.say(x, unit)
+    return s.replace(" percent", "%") if s else ""
+
+
+REBUT = {
+    "contradicted":    ["{src} says {actual}, not {claimed}. Try again.", "{src} says {fact}. Try again.",
+                        "{src} has {fact}, actually.", "{src} says otherwise. Try again."],
+    "missing_context": ["{src} says {fact}. Full picture, please.", "Context: {src} says {fact}.",
+                        "{src} tells a fuller story. Check it."],
+}
+
+
+def rebut(claim: Any, verdict: Any, used: Iterable[str] = ()) -> Optional[str]:
+    """The sourced rebut for a Verdict sourced() accepts, e.g. "The ONS says 4.2%, not 6%. Try again." """
+    if not sourced(verdict):
+        return None
+    num = _get(verdict, "numeric")
+    unit = str(_get(num, "unit", "") or "")
+    actual, claimed = _fig(_get(num, "actual"), unit), _fig(_get(num, "claimed"), unit)
+    if actual == claimed or voice.judgemental(unit):
+        actual = claimed = ""
+    f = {"src": voice.source_name(_get(verdict, "evidence") or []) or "the source",
+         "fact": voice.clean(_get(verdict, "short_fact")), "actual": actual, "claimed": claimed}
+    allowed = " ".join([str(_get(claim, "text", "") or ""), str(_get(verdict, "short_fact", "") or ""), actual,
+                        claimed, f["src"]] + [f"{_get(e, 'title', '')} {_get(e, 'quote', '')}"
+                                              for e in _get(verdict, "evidence") or []])
+    used = {u.lower() for u in used}
+    for tpl in REBUT.get(_get(verdict, "label"), []):
+        try:
+            text = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
+        except KeyError:
+            continue
+        if text.lower() not in used and (ok := guard(text, "rebut", allowed)):
+            return ok
+    return None
+
+
+# ----------------------------------------------------------------------------- AI-knowledge challenge
+def challenge(claim: Any, text: Any = "", correction: Any = "", names: Iterable[str] = ()) -> Optional[str]:
+    """Claude's own-knowledge challenge, tagged: its line if fit, else one built from its correction (a phrase that
+    completes "Last I checked, ...", e.g. "it was nearer 4%"). `names`: as for guard()."""
+    body = re.sub(r"\s+([.,;:?!])", r"\1", _TAG.sub(" ", tidy(text))).strip(" ,;:-")   # any tag it wrote itself
+    if body:
+        line = guard(f"{_finish(body)} {UNSOURCED}", "challenge", strict=True, names=names)
+        if line:
+            return line
+    fix = voice.clean(correction)
+    if not fix:
+        return None
+    fig = figure(str(_get(claim, "text", "") or ""))
+    tpls = [f"Last I checked, {{fix}}. {UNSOURCED}"]
+    if fig:
+        tpls.insert(0, f"{{fig}}? Last I checked, {{fix}}. {UNSOURCED}")
+    for tpl in tpls:
+        line = guard(_finish(tpl.format(fig=fig, fix=fix)), "challenge", strict=True, names=names)
+        if line:
+            return line
+    return None
+
+
+# ----------------------------------------------------------------------------- follow-ups and nudges
+FOLLOWUP = {
+    "statistic":   ["Source for that {figure}?", "Where does that {figure} come from?", "Source for that number?",
+                    "Which year is that figure from?"],
+    "comparison":  ["Compared with what, exactly?", "Higher than what, and since when?", "Says who?"],
+    "causal":      ["Cause, or just correlation?", "How do you know one caused the other?", "Evidence for the link?"],
+    "attribution": ["Where exactly did they say that?", "Quote and date, please.", "Says who, exactly?"],
+    "fact":        ["Says who?", "Source, please?", "Can you back that up?"],
+    "prediction":  ["What makes you so sure?", "And if it doesn't happen?", "Evidence, or a hunch?"],
+    "value":       ["Why should anyone accept that?", "Says who, and why?", "And the case for that is?"],
+    "other":       ["Can you back that up?", "Evidence, please?", "Says who?"],
+}
+GRANTED = ["Granted. So what for the motion?", "Fair enough. Why does it matter here?", "True, and the point is?"]
+NUDGE = ["Still waiting on the {topic} point.", "Nothing on {topic}, then?", "Any answer on {topic}?",
+         "Still waiting on our last point.", "Our point still stands unanswered."]
+
+
+def followup(claim: Any, used: Iterable[str] = (), granted: bool = False) -> Optional[str]:
+    """A template follow-up question by claim type (the fallback when the LLM fails or is absent)."""
+    text = str(_get(claim, "text", "") or "")
+    f = {"figure": figure(text)}
+    used = {u.lower() for u in used}
+    tpls = GRANTED if granted else FOLLOWUP.get(_get(claim, "type"), FOLLOWUP["other"])
+    for tpl in tpls:
+        try:
+            line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
+        except KeyError:
+            continue
+        if line.lower() not in used and (ok := guard(line, "followup", text)):
+            return ok
+    return None
+
+
+def nudge(topic: Any = "", text: str = "", used: Iterable[str] = ()) -> Optional[str]:
+    """'Still waiting on the cost point.' `topic` is our own claim's topic; `text` its claim text (its figures)."""
+    t = voice.clean(topic)
+    t = " ".join(t.split()[:4]) if t else ""
+    used = {u.lower() for u in used}
+    for tpl in NUDGE:
+        try:
+            line = _finish(tpl.format(**({"topic": t} if t else {})))
+        except KeyError:
+            continue
+        if line.lower() not in used and (ok := guard(line, "nudge", f"{t} {text}")):
+            return ok
+    return None

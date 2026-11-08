@@ -57,6 +57,25 @@ present Claude wins, unless `OPENAI_MODEL` is set. Any OpenAI-compatible server 
 `LLM_PROVIDER=heuristic` forces the no-LLM path, and with no key it also runs on heuristics.
 Check speed with `.venv/bin/python scripts/bench_llm.py` and quality with `.venv/bin/python -m eval.eval_extract`.
 
+## Side bots
+
+Two seconds heckle the opposing debater in text speech bubbles (two Mate Engine avatars, see
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Channels (side bots)"): **For** is Prop's second and only answers Opp's
+claims, **Against** mirrors it. No profile starts them; add `BOTS=real` to any run:
+
+```bash
+BOTS=real ./run.sh live                    # or drive, mock, ...
+```
+
+- A sourced Verdict becomes a `rebut` that names its source ("The ONS says 4.2%, not 6%. Try again."). Without one,
+  Claude checks the claim from its own knowledge and, only when confident (`BOTS_CHECK_MIN_CONF`), posts a
+  `challenge` ending "(unsourced)". Otherwise a `followup` question. Unanswered points get a `nudge`, and the bots
+  trade the odd dry `banter` line (`BOTS_BANTER=0` turns it off).
+- Each bot posts at most one bubble every `BOTS_MIN_GAP_S` (10 s). The admin flag `bots` pauses both; mute hides
+  everything. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
+- They use the same Anthropic key as the brain (`BOTS_MODEL` for follow-ups and banter, `BOTS_CHECK_MODEL` for the
+  check). With no LLM they still rebut, nudge and ask template follow-ups, but never challenge or banter.
+
 ## Layout and ownership
 
 ```
@@ -65,6 +84,7 @@ app/bus.py       B  pub/sub + JSONL log + replay
 app/main.py      B  module registry, /ws, /publish, /session, /control, /health, /debug
 app/config.py    B  flags + tunables (all env-overridable)
 app/brain/       B  claims.py (+llm.py, prompts.py), argmap.py, director.py (+voice.py), run.py
+app/bots/        B  side bots (BOTS=real): lines.py (wording, guards), pacer.py, writer.py (LLM), run.py
 app/ears/        A  run.py with `run(bus)` (async or plain) and/or routes.py (FastAPI router) — or external
 app/evidence/    C  run.py with `run(bus)` (async or plain) — or external
 app/face/        D  static/index.html (served at /), routes.py, run.py — or any frontend on /ws
