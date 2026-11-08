@@ -24,7 +24,9 @@ COMPACT = {"Utterance": "id", "ArgMapSnapshot": None, "ResearchProgress": None, 
            "Claim": "id", "Verdict": "claim_id", "DirectorStatus": None}
 HISTORY_SKIP: set[str] = set()            # event types kept in the log only, not in the ws snapshot
 SURVIVES_SESSION = {"ModuleStatus"}       # still true after a new SessionStart
-PINNED = SURVIVES_SESSION | {"SessionStart"}   # never trimmed by the history cap (motion, sides, module dots)
+# Never trimmed by the history cap: motion, sides, module dots, and the singletons (one row each, compacted into
+# the slot of their FIRST publish, so they would otherwise be the first latest-state rows to go).
+PINNED = SURVIVES_SESSION | {"SessionStart"} | {name for name, f in COMPACT.items() if f is None}
 HISTORY_MAX = 5000                        # over the cap: drop the oldest unpinned rows down to 80 % in one go
 
 

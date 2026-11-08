@@ -10,8 +10,8 @@ import pytest
 
 from app import bus as busmod
 from app.bus import Bus, load_jsonl, rebase, replay
-from app.schemas import (ArgMapSnapshot, Claim, DirectorDecision, Event, Interjection, ModuleStatus, Pause,
-                         SessionStart, Utterance, Verdict, parse_event)
+from app.schemas import (ArgMapSnapshot, Claim, DirectorDecision, DirectorStatus, Event, Interjection, ModuleStatus,
+                         Pause, ResearchProgress, SessionStart, Utterance, Verdict, parse_event)
 
 EV = [{"url": "https://x.org", "title": "t", "quote": "q"}]
 
@@ -280,3 +280,21 @@ async def test_replay_last_session_cuts_idle_gaps_and_skips_module_status(tmp_pa
     assert [e.event for e in drain(s2)].count("SessionStart") == 2
     with pytest.raises(FileNotFoundError):
         await replay(Bus(), tmp_path / "missing.jsonl")
+
+
+# ----------------------------------------------------------------------------- hardening regressions: core
+def test_history_cap_keeps_the_latest_singletons(monkeypatch):
+    """ArgMapSnapshot/ResearchProgress/DirectorStatus compact into the slot of their FIRST publish, so the cap trimmed
+    the freshest state first: a refreshed dashboard lost the research status and the argument map."""
+    monkeypatch.setattr(busmod, "HISTORY_MAX", 10)
+    b = Bus()
+    b.publish(SessionStart(motion="m"))
+    b.publish(ResearchProgress(stage="ready", done=20, total=20))
+    b.publish(ArgMapSnapshot(version=1))
+    b.publish(DirectorStatus())
+    for i in range(12):
+        b.publish(Pause(speaker=str(i)))
+    b.publish(ArgMapSnapshot(version=2))
+    h = b.history
+    assert {"SessionStart", "ResearchProgress", "DirectorStatus", "ArgMapSnapshot"} <= {e.event for e in h}
+    assert len(h) <= 10 and [e.version for e in h if e.event == "ArgMapSnapshot"] == [2]   # still one slot each
