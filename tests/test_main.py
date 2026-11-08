@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ from app import main as mainmod
 from app.bus import Bus, load_jsonl
 from app.config import FLAGS
 from app.main import build_app, loop_lag, resolve, supervise
-from app.schemas import Claim, Utterance, Verdict, parse_event
+from app.schemas import Claim, Control, Utterance, Verdict, parse_event
 from app.tools import tail
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -362,6 +363,101 @@ def test_replay_missing_file_fails_loudly(tmp_path, monkeypatch, capsys):
         with pytest.raises(SystemExit) as e:
             mainmod.main()
         assert e.value.code == 2 and needle in capsys.readouterr().err
+
+
+def test_replay_missing_file_says_how_to_create_it(tmp_path, monkeypatch, capsys):
+    golden = tmp_path / "golden_run.jsonl"
+    with pytest.raises(FileNotFoundError, match="cp logs/latest.jsonl"):
+        build_app("replay", file=str(golden), log_dir=tmp_path)
+    monkeypatch.setattr(sys, "argv", ["app.main", "replay", "--file", str(golden)])
+    with pytest.raises(SystemExit):
+        mainmod.main()
+    err = capsys.readouterr().err
+    assert "No such file" in err and f"cp logs/latest.jsonl {golden}" in err
+    with pytest.raises(FileNotFoundError, match="No run recorded yet"):   # cp latest -> latest would be nonsense
+        build_app("replay", file=str(tmp_path / "latest.jsonl"), log_dir=tmp_path)
+
+
+# ----------------------------------------------------------------------------- review regressions: flags
+async def test_flags_watcher_persists_state_flags_only():
+    """force_next/veto/time are one-shot commands: they reach the bus untouched but never stick in FLAGS."""
+    saved, b = dict(FLAGS), Bus()
+    seen = b.subscribe("brain", {"Control"})
+    t = asyncio.create_task(mainmod.flags_watcher(b))
+    await asyncio.sleep(0)
+    try:
+        sent = [("force_next", True), ("veto", "c3:correction"), ("time", "A"), ("mute", "on"), ("aggr", "4"),
+                ("tts", False), ("director", False), ("web_fallback", "off"), ("interims", 0), ("agent_speaking", 1)]
+        for flag, value in sent:
+            b.publish(Control(flag=flag, value=value), src="test")
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not {"force_next", "veto", "time"} & set(FLAGS)
+        assert {k: FLAGS[k] for k in ("mute", "aggr", "tts", "director", "web_fallback", "interims", "agent_speaking")} \
+            == {"mute": True, "aggr": 4, "tts": False, "director": False, "web_fallback": False, "interims": False,
+                "agent_speaking": True}
+        got = [seen.q.get_nowait() for _ in range(seen.q.qsize())]
+        assert [(e.flag, e.value) for e in got[:3]] == sent[:3]
+    finally:
+        t.cancel()
+        FLAGS.clear()
+        FLAGS.update(saved)
+
+
+def test_one_shot_controls_not_in_health_or_snapshot_flags(make_client):
+    c = make_client()
+    for flag, value in (("force_next", True), ("veto", "k1"), ("time", "A"), ("aggr", 5)):
+        assert c.post("/control", json={"flag": flag, "value": value}).status_code == 200
+    wait_for(lambda: c.get("/health").json()["flags"].get("aggr") == 5)
+    assert not {"force_next", "veto", "time"} & set(c.get("/health").json()["flags"])
+    with c.websocket_connect("/ws") as ws:
+        snap = recv(ws)
+        assert not {"force_next", "veto", "time"} & set(snap["flags"]) and snap["flags"]["aggr"] == 5
+        assert {"force_next", "veto", "time"} <= {e["flag"] for e in snap["events"] if e["event"] == "Control"}
+
+
+# ----------------------------------------------------------------------------- review regressions: debug page
+def test_director_decisions_survive_a_refresh(make_client):
+    """The bus history keeps DirectorDecision, so a refreshed /debug tab rebuilds its Decisions panel."""
+    c = make_client()
+    c.post("/publish", json=[{"event": "DirectorDecision", "key": f"k{i}", "kind": "correction", "action": "held"}
+                             for i in range(3)])
+    with c.websocket_connect("/ws") as ws:
+        assert [e["key"] for e in recv(ws)["events"] if e["event"] == "DirectorDecision"] == ["k0", "k1", "k2"]
+    page = (ROOT / "app" / "tools" / "ws_debug.html").read_text()
+    assert "live only" not in page and "since this tab connected" not in page
+    assert "S.decisions.splice(0, S.decisions.length - DECISIONS_MAX)" in page and "DECISIONS_MAX = 50" in page
+
+
+@pytest.mark.skipif(not shutil.which("deno"), reason="runs the page's reducer in deno when it is installed")
+def test_debug_reducer_snapshot_decisions_capped_and_silent(tmp_path):
+    """Runs the real reducer block of ws_debug.html: snapshot decisions are applied (last 50 kept), a snapshot
+    Interjection is never spoken, a live one is, and one-shot Controls never land in S.flags."""
+    page = (ROOT / "app" / "tools" / "ws_debug.html").read_text()
+    rule = "// " + "-" * 66
+    consts = page[page.index("const LABEL"):page.index(rule + " state")]
+    block = page[page.index("let S = null"):page.index(rule + " transport")]
+    js = consts + block + """
+const spoken = []; function speak(e) { spoken.push(e.id); } function onControl() {}
+S = null; reset();
+const hist = [];
+for (let i = 0; i < 60; i++) hist.push({event: 'DirectorDecision', seq: i + 1, key: 'k' + i, action: 'held'});
+hist.push({event: 'Interjection', seq: 61, id: 'i-old', text: 'x'});
+hist.push({event: 'Control', seq: 62, flag: 'force_next', value: true});
+hist.push({event: 'Control', seq: 63, flag: 'mute', value: true});
+for (const h of hist) apply(h, false);
+snapSeq = 63;
+const snap = {n: S.decisions.length, first: S.decisions[0].key, spoken: spoken.length, flags: Object.keys(S.flags)};
+apply({event: 'Interjection', seq: 64, id: 'i-new', text: 'y'}, true);
+apply({event: 'Control', seq: 65, flag: 'veto', value: 'k1'}, true);
+console.log(JSON.stringify({...snap, live: spoken, flags2: Object.keys(S.flags)}));
+"""
+    env = {**os.environ, "DENO_DIR": str(tmp_path), "NO_COLOR": "1"}
+    out = subprocess.run(["deno", "eval", js], capture_output=True, text=True, timeout=60, env=env)
+    assert out.returncode == 0, out.stderr
+    r = json.loads(out.stdout.strip().splitlines()[-1])
+    assert (r["n"], r["first"], r["spoken"], r["live"]) == (50, "k10", 0, ["i-new"])
+    assert r["flags"] == ["mute"] and r["flags2"] == ["mute"]
 
 
 # ----------------------------------------------------------------------------- review regressions: supervisor

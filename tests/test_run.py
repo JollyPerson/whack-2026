@@ -68,6 +68,39 @@ def test_echo_guard_drops_our_voice_and_expires_a_lost_speaking_false():
     assert e.speaking_since is None and e.windows == [] and e.said == []
 
 
+def test_echo_guard_while_speaking_drops_only_our_words():
+    """Barge-in: during our TTS (and its tail) only words matching what we're saying are echo; a human talking
+    over the referee passes, a 1-2 word interruption is floor-only."""
+    e = EchoGuard()
+    e.spoke("Point of fact: the ONS says it is 4.1 percent, not 40.", T0 - .5)
+    e.speaking(True, T0)
+    c = lambda text, a, b: e.classify(U("A", text, a, b), b)            # noqa: E731
+    assert c("point of fact the owns says it is for point one percent", T0 + .2, T0 + 3) == "echo"   # garbled STT
+    assert c("point of", T0 + .2, T0 + .8) == "echo"                     # first interim of our echo
+    assert c("it is", T0 + .2, T0 + .8) == "echo"
+    assert c("no the figure is forty percent and falling", T0 + 1, T0 + 3) == "speech"
+    assert c("hold on", T0 + 1, T0 + 1.5) == "floor"
+    assert c("wait that is wrong", T0 + 1, T0 + 2) == "speech"
+    e.speaking(False, T0 + 4)
+    assert c("the owns says it is 4.1 percent", T0 + 4.2, T0 + 5) == "echo"           # tail window
+    assert c("road deaths fell by thirty percent", T0 + 4.2, T0 + 6) == "speech"
+    assert c("hang on", T0 + 4.3, T0 + 5) == "floor"
+    assert c("road deaths fell by thirty percent", T0 + 4.6, T0 + 6) == "speech"      # after the tail
+    assert c("the ONS says it is 4.1 percent", T0 + 5, T0 + 6) == "echo"              # post-hoc overlap still on
+    assert c("the ONS says", T0 + 5, T0 + 6) == "echo" and c("ONS says", T0 + 5, T0 + 6) == "speech"   # >= 3 words
+    assert c("the ONS says it is 4.1 percent", T0 + 15, T0 + 16) == "speech"         # outside window_s
+    e.speaking(True, T0 + 100)                                           # 100 s on: nothing we said is recent
+    assert c("an unrelated human sentence here", T0 + 101, T0 + 102) == "echo"      # unknown TTS text: drop all
+    assert c("an unrelated human sentence here", T0 + 116, T0 + 117) == "speech"    # lost speaking:false expires
+    assert e.speaking_since is None and e.windows[-1] == (T0 + 100, T0 + 115.5)
+    e.spoke("Speaker A, that claim is still unanswered.", T0 + 120)
+    e.speaking(True, T0 + 120.5)
+    assert c("speaker a that claim is still on answered", T0 + 121, T0 + 123) == "echo"
+    assert c("cars are not the problem here", T0 + 121, T0 + 123) == "speech"
+    assert c("cars are not the problem here", T0 + 136, T0 + 137) == "speech"
+    assert e.speaking_since is None                                      # the 15 s cap still applies
+
+
 def test_pause_synth_waits_longer_until_interims_are_seen():
     ps = PauseSynth("auto", gap=1.2)
     ps.on_utterance(U("A", "x", T0, T0 + 3), T0 + 3.3)              # finals only: max(6, 3 + 1.2)
@@ -347,3 +380,49 @@ async def test_late_interim_after_its_final_is_not_new_speech(brain):
     h.pub(U("A", "Air pollution causes", t - 2, t - .5, final=False, uid="u-A-1"))   # the late callback
     await h.step(.3)                                           # 1.3 s after the final
     assert [p.speaker for p in h.of("Pause") if p.src.startswith("brain")] == ["A"]
+
+
+async def test_barge_in_over_our_tts_is_heard_and_closes_the_floor(brain):
+    """Barge-in: EchoGuard dropped every utterance starting while our TTS spoke, so a human talking over the
+    referee was invisible: the floor looked open (a Pause from A let a2 fire over B) and B's claim was lost."""
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    h.claim("a1", "A", t - .2)
+    h.claim("a2", "A", t - .2)
+    h.verdict("a1")
+    h.pub(Pause(speaker="A", t=t))
+    await h.step(.5)
+    assert h.said() == [("a1", "correction")]
+    line = h.of("Interjection")[0].text
+    await h.step(1)                                            # A's ears were still running the first unit
+    own_a = [c.id for c in h.of("Claim") if c.src == "brain" and c.speaker == "A"]
+    t1 = h.now()
+    h.pub(TTSState(speaking=True))
+    await h.step(.5)
+    garbled = " ".join(w for i, w in enumerate(line.lower().replace(".", "").replace(",", "").split()) if i % 5 != 2)
+    h.pub(U("A", garbled, t1 + .2, h.now(), uid="u-A-echo"))  # A's mic hears the referee
+    words = "No road deaths in London fell by 30 percent last year and that is the real story".split()
+    h.pub(U("B", "No road", t1 + 1, t1 + 1.4, final=False, uid="u-B-1"))   # B talks over the referee
+    await h.step(1)
+    h.pub(TTSState(speaking=False))                            # D cuts the TTS
+    h.pub(Control(flag="force_next"))                          # skip cooldowns: only the floor decides
+    h.verdict("a2")
+    for k in range(2, 6):
+        await h.step(1)
+        h.pub(U("B", " ".join(words[:3 * k]), t1 + 1, h.now(), final=False, uid="u-B-1"))
+        if k == 3:
+            h.pub(Pause(speaker="A", t=h.now()))               # A's VAD: A is quiet, but B is not
+    await h.step(.3)
+    assert h.said() == [("a1", "correction")]                  # never over B
+    h.pub(U("B", "No, road deaths in London fell by 30 percent last year.", t1 + 1, h.now(), uid="u-B-1"))
+    await h.step(.5)
+    assert h.said() == [("a1", "correction")]
+    h.pub(Pause(speaker="B", t=h.now()))
+    await h.step(.3)
+    assert h.said() == [("a1", "correction"), ("a2", "correction")]
+    own = [c for c in h.of("Claim") if c.src == "brain"]
+    assert any(c.speaker == "B" and "30 percent" in c.text for c in own)          # B's barge-in was extracted
+    assert [c.id for c in own if c.speaker == "A"] == own_a                       # the echo never was

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from app import config
-from app.brain import voice
+from app.brain import director, voice
 from app.brain.director import Cfg, Director
 from app.brain.types import Notice
 from app.schemas import (Claim, Control, DirectorDecision, DirectorStatus, Event, Evidence, Interjection, Numeric,
@@ -666,3 +666,52 @@ def test_restore_fired_marks_spoken_counts_cooldown_and_keeps_one_line_per_claim
     assert fired(o) == [(19, "correction", "A", "c2")]        # the 12 s hard gap counts from the restored line
     _, o = run([(20, V("c1", "contradicted", .95)), (21, P("A", 21))], d2)
     assert fired(o) == [] and ("correction:c1", "skipped", "duplicate") in logs(o)
+
+
+# ----------------------------------------------------------------------------- aggr 3 reachability of prompt/source_req
+def test_prompt_at_importance_067_fires_at_aggr3_next_pause():
+    # LLM importance 2 (0.67) is the documented floor for voiced prompts; the next pause can be ~10 s after the
+    # argmap notices (it only notices once the next speaker's final arrives)
+    ev = talk("A", 0, 2) + [(2, C("a1", "A", 1, imp=2))] + talk("B", 3, 30) + [(30, N("unanswered", "B", 30, "a1"))]
+    _, o = run(ev + talk("B", 31, 39) + [(40, P("B", 40))])
+    assert fired(o) == [(40, "prompt", "B", "a1")]
+    _, o = run(ev + talk("B", 31, 49) + [(50, P("B", 50))])
+    assert fired(o) == [] and ("prompt:a1", "held", "below_threshold") in logs(o)   # still decays
+    for lv in (1, 2):                                          # quieter levels still suppress weak prompts
+        _, o = run(ev + [(31, P("B", 31))], Director(aggr=lv))
+        assert fired(o) == [] and ("prompt:a1", "held", "below_threshold") in logs(o)
+
+
+def test_stronger_prompt_outranks_weaker_one():
+    ev = talk("A", 0, 2) + [(2, C("a1", "A", 1, imp=2)), (2, C("a2", "A", 1.5, imp=3))] + talk("B", 3, 30) + \
+        [(30, N("unanswered", "B", 30, "a1")), (30, N("unanswered", "B", 30, "a2")), (31, P("B", 31))]
+    _, o = run(ev)
+    assert fired(o) == [(31, "prompt", "B", "a2")]
+
+
+def test_source_request_fires_when_verdict_lands_seconds_after_claim():
+    ev = talk("A", 0, 12) + [(5.5, C("c1", "A", 5, imp=.8)), (8.5, V("c1", "unverifiable", .2))]
+    _, o = run(ev + [(13, P("A", 13))])                        # verdict 3.5 s after the claim, pause 8 s after
+    assert fired(o) == [(13, "source_req", "A", "c1")]
+    assert lines(o)[0].text.startswith("Proposition, what's your source")
+
+
+def test_prompt_and_source_request_still_respect_cooldown_and_rank_under_confident_verdicts():
+    ev = (talk("A", 0, 2) + [(2, C("a1", "A", 1, imp=.8))] + talk("B", 3, 30)
+          + [(29, C(c, "B", 29, imp=.8, canon=c)) for c in ("c1", "c2", "c3")]
+          + [(30, V("c1", "contradicted", .9)), (30, V("c2", "missing_context", .9)), (30, V("c3", "unverifiable", .2)),
+             (30, N("unanswered", "B", 30, "a1"))])
+    d, _ = run(ev)
+    st = d.st
+    ranked = sorted(st.pending.values(), key=lambda cd: director._rank(st, cd, director._score(st, cd, 30)))
+    assert [cd.kind for cd in ranked] == ["correction", "context", "prompt", "source_req"]
+    strong = [director._score(st, replace(cd, imp=1.0, t0=30), 30) for cd in ranked if cd.kind in ("prompt", "source_req")]
+    assert max(strong) < min(st.cfg.override_score, st.cfg.streak_override)   # can't jump cooldown or balance
+    # a prompt detected just after a correction waits out the 30 s cooldown, then still fires
+    ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
+          + [(5, C("a1", "A", 4, imp=1.0, canon="x"))] + talk("B", 7, 10) + [(10, N("unanswered", "B", 10, "a1")),
+                                                                             (11, P("B", 11))]
+          + talk("B", 12, 36) + [(37, P("B", 37))])
+    _, o = run(ev)
+    assert fired(o) == [(6, "correction", "A", "c1"), (37, "prompt", "B", "a1")]
+    assert ("prompt:a1", "held", "cooldown") in logs(o)

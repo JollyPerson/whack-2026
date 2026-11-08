@@ -78,7 +78,9 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : null;
 const LABEL = {supported: 'ok', contradicted: 'bad', missing_context: 'warn', unverifiable: 'unk'};
-const RAW_MAX = 200;
+const RAW_MAX = 200, DECISIONS_MAX = 50;
+// state flags (kept, shown); one-shot commands (force_next, veto, time) are acted on by the brain, never stored
+const STATE_FLAGS = new Set(['tts', 'director', 'web_fallback', 'interims', 'agent_speaking', 'mute', 'aggr']);
 
 // ------------------------------------------------------------------ state + the ONE reducer
 let S = null, MODULES = {}, ws = null, lastSeq = 0, snapSeq = 0, backoff = 500;
@@ -113,10 +115,11 @@ function apply(e, live) {
     case 'ArgMapSnapshot': S.map = e; break;                            // full map, not a diff
     case 'ResearchProgress': S.research = e; break;
     case 'ModuleStatus': S.status[e.module] = e; break;
-    case 'DirectorDecision': S.decisions.push(e); S.decisions.splice(0, S.decisions.length - 50); break;  // live only (not in history)
+    case 'DirectorDecision':                                            // in the bus history too: survives a refresh
+      S.decisions.push(e); S.decisions.splice(0, S.decisions.length - DECISIONS_MAX); break;
     case 'DirectorStatus': S.dstatus = e; break;
     case 'TTSState': S.tts = e; break;
-    case 'Control': S.flags[e.flag] = e.value; if (live) onControl(e); break;
+    case 'Control': if (STATE_FLAGS.has(e.flag)) S.flags[e.flag] = e.value; if (live) onControl(e); break;
     case 'Interjection':
       S.interjections.push(e);
       if (live && e.seq > snapSeq) speak(e);   // NEVER speak history: a refresh mid-debate must stay silent
@@ -258,7 +261,7 @@ function directorHtml() {
   const lines = S.decisions.slice(-8).reverse().map(x => `<div class="dec ${esc(x.action)}">${esc(x.action)} <b>${esc(x.kind)}</b> ${esc(x.key)}`
     + ` <span class="mute">${esc(x.reason)} ${(+x.score || 0).toFixed(2)}</span>`
     + (ADMIN && ['candidate', 'held'].includes(x.action) ? ` <button data-veto="${esc(x.key)}">veto</button>` : '') + '</div>').join('');
-  return directorChip() + caption + pending + (lines || '<div class="mute">no decisions since this tab connected</div>');
+  return directorChip() + caption + pending + (lines || '<div class="mute">no decisions yet this session</div>');
 }
 function rawText() {
   const hide = $('hidehb').checked;

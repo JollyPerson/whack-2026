@@ -20,7 +20,10 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
     - `unverifiable`: Unproven, Unverified, No evidence, Not enough info.
     - Any other word becomes `unverifiable`, with a one-time warning in the server log.
   - Confidence: `85`, `"85"` and `"85%"` all become `0.85`.
-  - Importance: the LLM's 1–3 score is scaled to 0–1 (`2` or `"2"` becomes `0.67`; `"low"`/`"medium"`/`"high"` work too).
+  - Importance: a whole number `1`, `2` or `3` (or the string `"1"`/`"2"`/`"3"`) is the 1–3 scale and becomes
+    `0.33`/`0.67`/`1.0`, so `1` means *low*. `"low"`/`"medium"`/`"high"` work too. A decimal from 0 to 1 is already
+    0–1, so `1.0` means *max*: in JSON `1` is an int and `1.0` is a float, so send `0.33` (not `1.0`) for low.
+    Other numbers above 1 are divided by 3 and capped at `1.0`, so `2.5` becomes `0.83` and anything above 3 becomes `1.0`.
   - Timestamps: milliseconds (JS `Date.now()`) become seconds, and numeric strings work.
   - Types and nulls: numbers become strings where a string is expected (e.g. `speaker: 0` becomes `"0"`). `null`
     means "use the default" (for fields that can't be null). `is_final`/`isFinal` mean `final`.
