@@ -19,8 +19,8 @@ from app.bots.run import Bots
 from app.bots.writer import Writer
 from app.brain.llm import AnthropicLLM, LLMTimeout
 from app.bus import Bus
-from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, MapNode, Numeric,
-                         SessionStart, SpeakerInfo, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, Link, MapNode,
+                         Numeric, SessionStart, SpeakerInfo, Verdict)
 
 T0 = 1_762_600_000.0
 ONS = [Evidence(url="https://www.ons.gov.uk/x", title="Labour market overview", quote="the rate was 4.2%")]
@@ -1338,3 +1338,141 @@ def test_tunable_defaults():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env,
                          cwd=Path(__file__).resolve().parent.parent, check=True).stdout
     assert out.split() == ["0.8", "0.6", "20.0", "10.0"]
+
+
+# ----------------------------------------------------------------------------- live speech (debug/bots regressions)
+@pytest.mark.parametrize("deep,kind", [(dict(), "rebut"), (dict(label="supported"), "followup")])
+async def test_a_deep_verdict_that_replaces_an_unverifiable_one_while_the_check_runs_still_wins(deep, kind):
+    """Evidence publishes a second, better Verdict for the same claim when its deep check does better (a timeout
+    or no source first): the bot must use it, not the first one."""
+    bots, out, clock = make(check=FakeLLM(check=false_check(), delay=0.3))
+    bots.handle(C("c1"))
+    bots.handle(V("c1", label="unverifiable", evidence=[]))     # the fast check found nothing (or ran out of time)
+    await asyncio.sleep(0.1)
+    bots.handle(V("c1", **deep))                                # the deep check, while Claude's check still runs
+    await settle(bots, 1.0)
+    [b] = said(out)
+    assert b.kind == kind and b.sourced == (kind == "rebut")
+    if kind == "followup":
+        assert b.text in lines.GRANTED
+
+
+@pytest.mark.parametrize("name,question", [
+    ("Anne-Marie Duval", "Anne-Marie, which baseline year?"),
+    ("Siobhán Kelly", "Siobhán, which baseline year?"),
+    ("Dara O'Neill", "O'Neill, which baseline year?"),
+    ("Zoë Kent", "Zoë, which baseline year?"),
+])
+async def test_a_hyphenated_accented_or_apostrophe_name_never_reaches_a_bubble(name, question):
+    bots, out, clock = make(fast=FakeLLM(question=question))
+    bots.handle(SessionStart(motion="M", speakers={"A": SpeakerInfo(name="Alice Archer", side="prop"),
+                                                   "B": SpeakerInfo(name=name, side="opp")}))
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)
+    [b] = said(out)
+    assert b.text == "Why should anyone accept that?"                       # the template, not the named question
+
+
+def test_a_two_letter_part_of_a_name_does_not_block_a_common_word():
+    """'Al' of 'Al-Amin' is a word too ('et al.'); as reset() does for whole names, a part needs 3 letters."""
+    assert not lines.named("As Card et al. found, the effect was small.", ["Al-Amin"])
+    assert lines.named("Amin, which study?", ["Al-Amin"])
+    assert lines.named("O'Neill, which year?", ["O'Neill"])
+
+
+async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides():
+    """Mic bleed the brain's guard missed (the phone's Wi-Fi lag, a different segment): Prop's words come back as an
+    Opp claim. Heckling Opp for them is heckling the wrong debater."""
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", "Raising wages always destroys small businesses.", typ="causal", checkable=False,
+                  t_end=T0 - 3))
+    clock.t += 2
+    bots.handle(C("c2", "B", "opp", "raising wages always destroys small businesses", typ="causal", checkable=False,
+                  t_end=T0 - 2))                                        # the same speech, its segment ends 1 s later
+    bots.handle(C("c3", "B", "opp", "Higher wages pay for themselves in productivity.", typ="causal",
+                  checkable=False, t_end=T0 - 2))                       # a real Opp claim at the same moment
+    await settle(bots)
+    clock.t += 10
+    bots.tick()
+    assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c3")]
+
+
+@pytest.mark.parametrize("first,reply,gap,kw", [
+    ("Raising the minimum wage costs 400,000 jobs.", "Raising the minimum wage does not cost 400,000 jobs.", 5, {}),
+    ("Immigration raises wages for local workers.", "Immigration lowers wages for local workers.", 6, {}),
+    ("Raising the minimum wage costs 400,000 jobs.", "Raising the minimum wage costs no jobs.", 1, {}),
+    ("Immigration raises wages for local workers.", "Immigration lowers wages for local workers.", 1,
+     {"links": [Link(claim_id="c1", relation="attacks")]}),
+], ids=["denial", "antonym", "interrupting-denial", "linked-rebuttal"])
+async def test_a_reply_in_the_other_sides_words_is_still_answered(first, reply, gap, kw):
+    """The commonest debate move is to deny the opponent's claim at once, mostly in their words (the brain's LLM
+    words both sides' claims alike). That is a new claim, not mic bleed: the bot answers it."""
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", first, typ="causal", checkable=False, t_end=T0))
+    clock.t += gap + 2
+    bots.handle(C("c2", "B", "opp", reply, typ="causal", checkable=False, t_end=T0 + gap, **kw))
+    await settle(bots)
+    clock.t += 10
+    bots.tick()
+    assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c2")]
+
+
+def test_a_nudge_topic_that_starts_with_an_article_is_not_doubled():
+    assert lines.nudge("the minimum wage") == "Still waiting on the minimum wage point."
+    assert lines.nudge("The cost of living") == "Still waiting on the cost of living point."
+
+
+def test_a_template_that_differs_from_a_said_line_only_in_punctuation_gives_way_to_the_next():
+    assert lines.followup(C("c1"), ["source for that 6%."]) == "Where does that 6% come from?"
+    assert lines.nudge("graduate debt", used=["Still waiting on the graduate debt point?"]) == \
+        "Nothing on graduate debt, then?"
+
+
+async def test_two_claims_queued_behind_a_bubble_with_the_llm_down_get_different_templates():
+    bots, out, clock = make()                                                  # no LLM: templates only
+    bots.handle(C("c0", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)                                                         # the For bot's bubble is up
+    bots.handle(C("c1", typ="fact", checkable=False, text="Nobody ever lost a job to a pay rise."))
+    bots.handle(C("c2", typ="fact", checkable=False, text="Small firms all back the rise."))
+    await settle(bots)
+    for _ in range(2):
+        clock.t += 10
+        bots.tick()
+    assert sorted((b.claim_id, b.text) for b in said(out)[1:]) == [("c1", "Says who?"), ("c2", "Source, please?")]
+
+
+@pytest.mark.parametrize("text,fig", [
+    ("Unemployment is 6 %.", "6%"),                          # STT spacing: the % is still part of it
+    ("Unemployment is 6.%", "6%"),                           # a stray point before the %
+    ("Prices are up 20-30% this year.", "20-30%"),           # a range is one figure, not its first number
+    ("Between 20 to 30% of firms would close.", "20 to 30%"),
+    ("Roughly 1/3 of workers are affected.", "1/3"),
+    ("From 2010 to 2019 wages fell 5%.", "5%"),              # a span of years is not a figure
+    ("Wages rose in 2019.", ""),
+    ("It costs £3bn a year.", "£3bn"),
+    ("Unemployment is 6% in the UK.", "6%"),
+    ("Two thirds, 2/3 of firms, would close.", "2/3"),
+    ("Shops open 24/7 now charge 5% more.", "5%"),          # not a fraction
+    ("On 8/11/2026 prices rose 5%.", "5%"),                 # a date is not a figure
+    ("Since 2026-11-08 prices rose 5%.", "5%"),
+    ("The 2026-11 data show 5%.", "5%"),                    # nor a year and a month
+])
+def test_the_figure_a_template_quotes_survives_stt_spacing_ranges_and_fractions(text, fig):
+    assert lines.figure(text) == fig
+    line = lines.followup(C("c1", text=text))
+    assert line == (f"Source for that {fig}?" if fig else "Source for that number?")
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("Your team is running out of road.", "banter"),          # the sides, by another name
+    ("Your side needs a better second.", "banter"),
+    ("Your opponent seems unconvinced.", "banter"),
+    ("Your client is not buying it.", "banter"),
+    ("Pure drivel, delivered with confidence.", "banter"),     # "nonsense", by another name
+    ("Baloney, but nicely phrased.", "banter"),
+    ("Spare us the claptrap.", "banter"),
+    ("That was hogwash with a bow on it.", "banter"),
+    ("Is that drivel or a policy?", "followup"),
+])
+def test_the_guards_catch_the_synonyms_an_llm_reaches_for(text, kind):
+    assert lines.guard(text, kind, "Source for that 40%?", strict=True) is None

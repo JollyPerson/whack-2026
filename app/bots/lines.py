@@ -44,7 +44,8 @@ INSULTS = frozenset({
     "dishonest", "shameful", "disgrace", "disgraceful", "garbage", "trash", "crap", "hell", "damn", "bloody",
     "lazy", "weak", "bully", "bullies", "arrogant", "arrogance", "smug", "rude", "desperate", "desperation",
     "panic", "panicking", "panicked", "rattled", "flailing", "floundering", "sloppy", "lame", "childish", "naive",
-    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing"})
+    "deluded", "delusional", "hysterical", "whining", "whiny", "rambling", "waffling", "bluff", "bluffing",
+    "drivel", "hogwash", "baloney", "balderdash", "claptrap", "twaddle", "tosh", "codswallop", "poppycock"})
 PUT_DOWNS = re.compile(   # questions about a debater's honesty or wits ("Did you just make that up?")
     r"\b(?:make|made|making) (?:that|this|it|those|these) up\b|\b(?:do|did|does) you even\b|\bthin air\b|"
     r"\bout of (?:your|their) depth\b", re.I)
@@ -55,7 +56,7 @@ PERSONAL = frozenset({   # LLM lines never remark on the debaters as people (als
 DEBATERS = frozenset({   # banter is bot to bot: it never mentions the debaters (or anyone else) at all
     "debater", "debaters", "speaker", "speakers", "prop", "proposition", "opp", "opposition", "they", "them",
     "their", "theirs", "themselves", "person", "people", "human", "humans", "champion", "guy", "guys", "man",
-    "woman", "folks"})
+    "woman", "folks", "side", "sides", "team", "teams", "opponent", "opponents", "client", "clients"})
 SOURCE_WORDS = frozenset({"according", "study", "studies", "survey", "surveys", "poll", "polls", "census",
                           "researchers", "report", "reports"})
 NUMBER_WORDS = frozenset({   # not "one": "which one", "no one" (and "one in five" has its "five")
@@ -70,11 +71,23 @@ _URL = re.compile(r"\bhttps?://|\bwww\.|\b[\w-]+\.[a-z]{2,}/|"     # a link: a d
 _TAG = re.compile(r"\(?\s*\bunsourced\b\s*\)?\.?", re.I)   # the tag as the LLM may write it: "(Unsourced)."
 _DIGITS = re.compile(r"\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[a-z]+")
-_FIGURE = re.compile(r"[£$€]?\d[\d,.]*\d?(?:\s?(?:%|per ?cent|percent|million|billion|trillion|bn|m|k)\b|%)?", re.I)
+_LETTERS = re.compile(r"[^\W\d_]+")             # words in any script: a name's "Siobhán", "Anne-Marie", "O'Neill"
+_NUM = r"[£$€]?\d[\d,.]*\d?"
+_FIGURE = re.compile(rf"{_NUM}(?:\s?(?:-|–|to)\s?{_NUM}|/\d+)?"            # a range ("20-30%", "20 to 30%") or "1/3"
+                     r"(?:\s?%|\s?(?:per ?cent|percent|million|billion|trillion|bn|m|k)\b)?", re.I)
 _YEAR = re.compile(r"(?:19|20)\d\d")
+_DATE = re.compile(r"\b\d{1,4}([/-])\d{1,2}\1\d{1,4}\b|\b(?:19|20)\d\d-(?:0[1-9]|1[0-2])\b")   # 8/11/2026, 2026-11
 _ODD = re.compile(r"[#@<>{}\[\]\\|*_~`]")
 _QUOTES = "\"'“”‘’`"
 _OK_HIGH = set("’‘“”—–…€")
+
+
+_KEY = re.compile(r"[^a-z0-9%£$€.]+")
+
+
+def text_key(text: str) -> str:
+    """Duplicate test: "Source for that 40%?" and "source for that 40%." are the same line."""
+    return _KEY.sub(" ", str(text or "").lower()).strip(" .")
 
 
 def answering(side: Any) -> Optional[str]:
@@ -136,7 +149,7 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
         return None
     if strict and toks & PERSONAL:
         return None
-    if any(n and n.lower() in toks for n in names):
+    if named(low, names):
         return None
     if kind == "banter":
         if toks & SOURCE_WORDS or toks & DEBATERS:
@@ -147,18 +160,40 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
     return s
 
 
+def named(text: str, names: Iterable[str]) -> bool:
+    """True if `text` has one of `names` (the debaters' names), or any part of a hyphenated or apostrophe name,
+    accents and all ("Zoë", "Anne-Marie" or "Marie", "O'Neill" or "Neill"). A part needs 3 letters, as a whole name
+    does: the "Al" of "Al-Amin" is also "et al."."""
+    words = set(_LETTERS.findall(text.lower()))
+    return any(p in words for n in names for p in _LETTERS.findall(str(n or "").lower()) if len(p) > 2)
+
+
 def _finish(text: str) -> str:
     text = " ".join(text.split())
     return text[:1].upper() + text[1:]
 
 
 def figure(text: str) -> str:
-    """The first figure in a claim as said ("40%", "£3 billion"), or "". A bare year is not a figure."""
-    for m in _FIGURE.finditer(text or ""):
-        f = m.group(0).strip().rstrip(".,")
-        if any(ch.isdigit() for ch in f) and not _YEAR.fullmatch(f):
+    """The first figure in a claim as said ("40%", "£3 billion", "20-30%", "1/3"), or "". A bare year is not a
+    figure, nor a date, nor a "fraction" over 1 ("24/7")."""
+    for m in _FIGURE.finditer(_DATE.sub(" ", text or "")):
+        f = re.sub(r"\.?\s*%", "%", m.group(0).strip().rstrip(".,"))   # STT's "6 %" and "6.%" are "6%"
+        if "/" in f and not _fraction(f):
+            continue
+        years = all(_YEAR.fullmatch(n) for n in _DIGITS.findall(f)) and \
+            not re.search(r"[^\d\s,.–-]", re.sub(r"\bto\b", "", f))
+        if any(ch.isdigit() for ch in f) and not years:                  # nor is a span of years ("2010 to 2019")
             return f
     return ""
+
+
+def _fraction(f: str) -> bool:
+    """"1/3" and "2/3" are figures; "24/7" (over 1) and "1/365" (a denominator past 100) are not."""
+    try:
+        a, b = (float(x.replace(",", "")) for x in re.findall(r"\d[\d,.]*", f)[:2])
+    except ValueError:
+        return False
+    return 0 < a < b <= 100
 
 
 # ----------------------------------------------------------------------------- sourced rebut
@@ -200,13 +235,13 @@ def rebut(claim: Any, verdict: Any, used: Iterable[str] = ()) -> Optional[str]:
     allowed = " ".join([str(_get(claim, "text", "") or ""), str(_get(verdict, "short_fact", "") or ""), actual,
                         claimed, f["src"]] + [f"{_get(e, 'title', '')} {_get(e, 'quote', '')}"
                                               for e in _get(verdict, "evidence") or []])
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in REBUT.get(_get(verdict, "label"), []):
         try:
             text = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if text.lower() not in used and (ok := guard(text, "rebut", allowed)):
+        if text_key(text) not in used and (ok := guard(text, "rebut", allowed)):
             return ok
     return None
 
@@ -218,13 +253,13 @@ def _body(text: Any) -> str:
 
 
 def _tagged(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str] = ()):
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in tpls:
         try:
             line = guard(_finish(tpl.format(**{k: v for k, v in f.items() if v})), kind, allowed, True, names)
         except KeyError:
             continue
-        if line and line.lower() not in used:
+        if line and text_key(line) not in used:
             return line
     return None
 
@@ -297,29 +332,29 @@ def followup(claim: Any, used: Iterable[str] = (), granted: bool = False) -> Opt
     """A template follow-up question by claim type (the fallback when the LLM fails or is absent)."""
     text = str(_get(claim, "text", "") or "")
     f = {"figure": figure(text)}
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     tpls = GRANTED if granted else FOLLOWUP.get(_get(claim, "type"), FOLLOWUP["other"])
     for tpl in tpls:
         try:
             line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, "followup", text)):
+        if text_key(line) not in used and (ok := guard(line, "followup", text)):
             return ok
     return None
 
 
 def nudge(topic: Any = "", text: str = "", used: Iterable[str] = ()) -> Optional[str]:
     """'Still waiting on the cost point.' `topic` is our own claim's topic; `text` its claim text (its figures)."""
-    t = voice.clean(topic)
+    t = _ARTICLE.sub("", voice.clean(topic))       # "the cost" -> "the cost point", not "the the cost point"
     t = " ".join(t.split()[:4]) if t else ""
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in NUDGE:
         try:
             line = _finish(tpl.format(**({"topic": t} if t else {})))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, "nudge", f"{t} {text}")):
+        if text_key(line) not in used and (ok := guard(line, "nudge", f"{t} {text}")):
             return ok
     return None
 
@@ -350,13 +385,13 @@ def excerpt(text: Any, n: int) -> str:
 
 def _pick(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str]):
     """The first template that fills (every field it names is non-empty), is new and passes guard()."""
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in tpls:
         try:
             line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, kind, allowed, names=names)):
+        if text_key(line) not in used and (ok := guard(line, kind, allowed, names=names)):
             return ok
     return None
 

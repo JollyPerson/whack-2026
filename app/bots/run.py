@@ -4,14 +4,18 @@ Consumes: SessionStart, Claim, Verdict, ArgMapSnapshot, Consistency, Control, Bo
 Produces: BotLine, BotTalk (src="bots"), ModuleStatus(bots)
 
 The For bot is Prop's second and answers Opp's claims; the Against bot mirrors it (Claim.side, set by the brain).
-A claim with no side is ignored, and a bot never answers its own side. Per opponent claim:
+A claim with no side is ignored, and a bot never answers its own side, nor a claim that is mostly the words of an
+other-side claim whose speech ended within BLEED_SLACK_S of its own (mic bleed the brain's guard missed: it would
+heckle the wrong debater); a claim that links to that one, or differs from it in negation, is a reply, not bleed.
+Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
   Supported -> no fact line. Otherwise the check's assessment decides, every line tagged "(unsourced)":
   likely_false -> "challenge" with Claude's correction; surprising_true (a well-known misconception) -> a grudging
   "concede", both only with confidence >= BOTS_CHECK_MIN_CONF; misleading (true figure, misrepresented) -> a
   "True, but ..." "challenge" from BOTS_MISLEADING_MIN_CONF, its own bar. A check that disagrees with the claim's
-  Verdict label is dropped. At most one fact line per claim.
+  Verdict label is dropped. At most one fact line per claim. A later Verdict for the same claim (Evidence's deep
+  check, published only when it does better) replaces the earlier one, so it still counts while the bot is busy.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 
@@ -58,6 +63,11 @@ TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
 BANTER_FRESH_S = 8.0      # banter answers a line at most this old (it waits for the bots to be quiet)
+BLEED_SLACK_S = 1.5       # an other-side claim whose speech ended this close with mostly its words is mic bleed
+BLEED_OVERLAP = 0.7       # (as the brain's BleedGuard: the share of its words in the other side's claim)
+BLEED_KEEP_S = 30.0       # how long a claim is kept to compare (claims reach the bus seconds after the speech)
+_TOKEN = re.compile(r"[a-z0-9%£$€]+")
+_NEGATION = re.compile(r"\b(?:not|no|never|none|nobody|nothing|neither|nor|cannot|without)\b|n't\b")
 
 
 class Bots:
@@ -91,6 +101,7 @@ class Bots:
             self.names += [w for w in info.name.split() if len(w) > 2]
         self.last_speaker: dict[str, str] = {}        # side -> who spoke for it last
         self.claims: dict[str, Claim] = {}
+        self.heard: list[tuple[float, str, str, float, set, bool]] = []   # (when, side, id, t_end, words, negated)
         self.verdicts: dict[str, Verdict] = {}
         self.waiting: dict[str, asyncio.Event] = {}
         self.statuses: dict[str, str] = {}            # claim id -> node status in the last ArgMapSnapshot
@@ -125,7 +136,7 @@ class Bots:
         elif name == "Control":
             self.on_control(ev)
         elif name == "Verdict":
-            self.verdicts.setdefault(ev.claim_id, ev)    # the first verdict decides: one fact line per claim
+            self.verdicts[ev.claim_id] = ev             # a later one (Evidence's deep check) is the better one
             if (w := self.waiting.get(ev.claim_id)) is not None:
                 w.set()
         elif name == "Claim":
@@ -165,9 +176,29 @@ class Bots:
         self.claims[c.id] = c
         return lines.answering(side) if first else None
 
+    def bleed(self, c: Claim) -> bool:
+        """True if `c` is mostly the words of an other-side claim whose speech ended within BLEED_SLACK_S of its own:
+        the other debater's mic heard it too (the brain's bleed guard compares utterances; a different segment can
+        slip past it). Narrow on purpose, as the commonest reply denies the claim in its own words: a claim that
+        links to it, differs from it in negation, or has no speech time (t_end 0) is never bleed."""
+        now, side, text = self.clock(), str(c.side or "").lower(), c.text.lower()
+        words, neg = set(_TOKEN.findall(text)), bool(_NEGATION.search(text))
+        linked = {ln.claim_id for ln in c.links}
+        self.heard = [h for h in self.heard if now - h[0] <= BLEED_KEEP_S]
+        hit = len(words) >= 4 and bool(c.t_end) and any(
+            s != side and cid not in linked and t and abs(c.t_end - t) <= BLEED_SLACK_S and n == neg
+            and len(words & w) / len(words) >= BLEED_OVERLAP for _, s, cid, t, w, n in self.heard)
+        self.heard.append((now, side, c.id, c.t_end, words, neg))
+        return hit
+
     def on_claim(self, c: Claim) -> None:
         persona = self.remember(c)
-        if persona is None or self.paused:
+        if persona is None:
+            return
+        if self.bleed(c):
+            log.info("bots: %s not answered: the other side's claim heard again (mic bleed?)", c.id)
+            return
+        if self.paused:
             return
         dup = c.canonical_key and any(o.canonical_key == c.canonical_key and o.id != c.id and o.side == c.side
                                       for o in self.claims.values())
@@ -235,15 +266,16 @@ class Bots:
         text = lines.guard(raw, "followup", c.text, strict=True, names=self.names) if raw else None
         if raw and not text:
             log.info("bots: follow-up dropped by the guards: %r", raw)
-        if not text or self.pacer.has_said(text):
-            text = lines.followup(c, self.said, granted)
+        used = self.used()
+        if not text or lines.text_key(text) in {lines.text_key(u) for u in used}:
+            text = lines.followup(c, used, granted)
         if text:
             self.queue(session, text=text, kind="followup", **to)
 
     def rebutted(self, c: Claim, verdict: Optional[Verdict], check: Optional[asyncio.Task], session: int,
                  to: dict) -> bool:
         """Queue the rebut a sourced Verdict allows; it beats Claude's check (cancelled, logged). True if it did."""
-        text = lines.rebut(c, verdict, self.said) if verdict is not None else None
+        text = lines.rebut(c, verdict, self.used()) if verdict is not None else None
         if not text:
             return False
         if check is not None:
@@ -268,8 +300,13 @@ class Bots:
         elif res.assessment == "misleading":
             text = lines.misleading(c, res.line, res.context, names=self.names)
         else:
-            text = lines.concede(c, res.line, names=self.names, used=self.said)
+            text = lines.concede(c, res.line, names=self.names, used=self.used())
         return kind, text, "" if text else "dropped by the guards"
+
+    def used(self) -> list[str]:
+        """Lines a template must not repeat: posted this session, or queued (a twin queued behind a bubble would be
+        dropped when the first one posts, leaving its claim unanswered)."""
+        return self.said + [ln.text for p in lines.PERSONAS for ln in self.pacer.queued(p)]
 
     def queue(self, session: int, **kw) -> bool:
         """Hand a line to the pacer (and post it now if its bot is free). False if dropped."""
@@ -313,7 +350,7 @@ class Bots:
         for persona, (_, n, target) in due.items():
             self.nudged.add(n.claim_id)
             topic = getattr(n, "topic", "") or getattr(self.claims.get(n.claim_id), "topic", "")
-            text = lines.nudge(topic, n.text, self.said)
+            text = lines.nudge(topic, n.text, self.used())
             if text:
                 self.queue(self.session, persona=persona, text=text, kind="nudge", target=target, claim_id=n.claim_id)
 
@@ -340,10 +377,10 @@ class Bots:
         if persona is None or (before in lines.SECOND and (before == side) != (kind == "uturn")):
             return                                    # a U-turn is your own; a concession is to the other side
         if kind == "uturn":
-            text = lines.uturn(k.then, k.now, self.names, self.said)
+            text = lines.uturn(k.then, k.now, self.names, self.used())
         else:
             text = lines.conceded(k.topic or getattr(earlier, "topic", ""),
-                                  f"{k.then} {k.now} {getattr(earlier, 'text', '')}", self.names, self.said)
+                                  f"{k.then} {k.now} {getattr(earlier, 'text', '')}", self.names, self.used())
         target = k.speaker or getattr(claim, "speaker", None)
         fired = bool(text) and self.queue(self.session, persona=persona, text=text, kind=kind, target=target,
                                           claim_id=k.claim_id)
@@ -437,7 +474,7 @@ class Bots:
                 elif ev.event == "Claim":
                     self.remember(ev)
                 elif ev.event == "Verdict":
-                    self.verdicts.setdefault(ev.claim_id, ev)
+                    self.verdicts[ev.claim_id] = ev
                 elif ev.event == "ArgMapSnapshot" and ev.version > self.map_version:
                     self.map_version, self.statuses = ev.version, {n.claim_id: n.status for n in ev.nodes}
                     self.nudged.update(c for nr in final_nr(ev) for c in nr.get("ignored") or [])
