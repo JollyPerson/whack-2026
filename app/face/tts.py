@@ -269,14 +269,18 @@ class TTS:
         for p in self.providers:
             try:
                 pcm = await p.synth(say)
-                path = self._path(p, say)
+            except Exception as e:
+                log.warning("tts %s failed: %s", p.name, self._scrub(f"{type(e).__name__}: {e}"))
+                continue
+            path = self._path(p, say)
+            try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_suffix(".part")
                 tmp.write_bytes(wav_bytes(pcm))
                 tmp.replace(path)                # atomic: a reader never sees half a file
-            except Exception as e:
-                log.warning("tts %s failed: %s", p.name, self._scrub(f"{type(e).__name__}: {e}"))
-                continue
+            except OSError as e:                 # not the provider's fault: paying the next one again can't help
+                log.error("tts cache write failed: %s", self._scrub(f"{type(e).__name__}: {e}"))
+                return None
             log.info("tts %s: %.1f s of audio for %r", p.name, len(pcm) / (2 * RATE), say[:60])
             return path
         return None

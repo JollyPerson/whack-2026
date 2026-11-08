@@ -6,8 +6,10 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -93,6 +95,23 @@ async def test_chain_falls_through_and_fails_loudly(tmp_path):
     assert path and bad.calls == good.calls == ["Hello."]
     with pytest.raises(TTSError):
         await TTS([Fake("bad", fail=True)], cache_dir=tmp_path).wav("Other.")
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root writes anywhere")
+async def test_a_cache_write_failure_is_not_a_provider_failure(tmp_path, caplog):
+    """cache/tts not writable (root-owned after a sudo run, disk full): the line was synthesised fine, so paying the
+    next provider for it again can't help, and the log must name the real cause."""
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    first, second = Fake("first"), Fake("second")
+    try:
+        with pytest.raises(TTSError):
+            await TTS([first, second], cache_dir=ro / "tts").wav("Hello.")
+    finally:
+        ro.chmod(0o700)
+    assert first.calls == ["Hello."] and second.calls == []
+    assert "tts cache write failed: PermissionError" in caplog.text and "tts first failed" not in caplog.text
 
 
 def test_speakable_rewrites_symbols_for_the_ear():
