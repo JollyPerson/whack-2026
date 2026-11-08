@@ -12,6 +12,9 @@ so the same events with the same `now`s always give the same decisions (interjec
 Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause,
 G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips G4-G7 only: the
 referee never talks over a human or itself, and never twice without a human pause in between.
+Dry spell: once the debate has run dry_first_s (25 s) from its first Utterance with no Interjection, and after
+that every min_gap_s since the last one, a canned "dry" line to the room becomes a candidate. It skips only G4,
+is held once nobody has spoken for dry_quiet_s, ranks below any real candidate, has no claim_id, and its wording depends on whether a figure was heard yet.
 Balance reorders or defers real candidates; it never invents one or holds back a strong correction.
 Speaker ids are opaque. Sides come from SessionStart, else first speaker heard = prop, second = opp, ...
 Producer times (t_start/t_end/t) far from the envelope ts (stream-relative STT seconds, another clock) are
@@ -31,14 +34,14 @@ from app.brain.types import Notice
 from app.schemas import (Claim, Control, DirectorDecision, DirectorStatus, Event, Interjection, Pause, SessionStart,
                          TTSState, Utterance, Verdict, parse_event)
 
-KINDS = ("time", "correction", "context", "prompt", "source_req", "confirm")   # order = tie-break rank
-KIND_W = {"time": .9, "correction": 1.0, "context": .7, "prompt": .6, "source_req": .55, "confirm": .35}
+KINDS = ("time", "correction", "context", "prompt", "source_req", "confirm", "dry")   # order = tie-break rank
+KIND_W = {"time": .9, "correction": 1.0, "context": .7, "prompt": .6, "source_req": .55, "confirm": .35, "dry": .15}
 # prompt/source_req carry no model confidence (conf 1.0): KIND_W alone ranks them under a confident context
 # of equal importance. At aggr 3 an importance-0.67 prompt stays >= .35 for ~12 s after detection (2x half-life:
 # the argmap only notices once the next speaker is already talking), an importance-0.8 source request ~10 s
 # after the claim. Both stay under override_score/streak_override, so cooldown and balance still bind them.
 HL_MULT = {"prompt": 2.0}
-TTL_S = {"time": 15, "correction": 45, "context": 40, "prompt": 90, "source_req": 30, "confirm": 25}
+TTL_S = {"time": 15, "correction": 45, "context": 40, "prompt": 90, "source_req": 30, "confirm": 25, "dry": 3600}
 PRESSURE = {"time", "correction", "context", "prompt", "source_req"}   # kinds that put a speaker on the spot
 LABEL2KIND = {"contradicted": "correction", "missing_context": "context", "supported": "confirm"}
 AGGR = {1: dict(min_conf=.85, fire_threshold=.55, min_gap_s=60.0), 2: dict(min_conf=.80, fire_threshold=.45, min_gap_s=45.0),
@@ -68,13 +71,15 @@ class Cfg:
     # Finals-only ears (no interim seen yet): the next final may be a whole sentence/chunk away, so wait
     # max(finals_timeout_s, last final's length + floor_timeout_s), capped. A real Pause still opens at once.
     finals_timeout_s: float = 6.0; finals_timeout_max_s: float = 15.0
+    dry_first_s: float = 25.0              # canned dry-spell line: first due this long into the debate; 0 = off
+    dry_quiet_s: float = 10.0              # ...and held once nobody has spoken this long (the debate is over)
 
 
 @dataclass
 class Cand:
     key: str                               # dedupe key "<kind>:<canonical_key or claim id>"
     kind: str
-    target: str                            # speaker id addressed
+    target: Optional[str]                  # speaker id addressed (None = the room)
     side: str
     conf: float
     imp: float
@@ -107,6 +112,8 @@ class State:
     last_pause: dict = field(default_factory=dict)    # speaker -> latest Pause.t
     final_dur: dict = field(default_factory=dict)     # speaker -> length of their latest final Utterance
     interims_seen: bool = False
+    debate_t0: Optional[float] = None                 # arrival of the first Utterance this session
+    figure_heard: bool = False                        # a statistic Claim has been made (picks the dry wording)
     tts_until: float = NEG
     force_until: float = NEG
     last_log: dict = field(default_factory=dict)      # key -> (action, reason): log transitions only
@@ -133,6 +140,7 @@ def level_cfg(aggr: int, base: Optional[Cfg] = None) -> Cfg:
         lv["min_gap_s"] = float(getattr(config, "DIRECTOR_MIN_GAP_S", lv["min_gap_s"]))
     lv["min_conf"] = max(MIN_CONF_FLOOR, lv["min_conf"])
     lv["finals_timeout_s"] = float(getattr(config, "FINALS_ONLY_WAIT_S", Cfg.finals_timeout_s))
+    lv["dry_first_s"] = float(getattr(config, "DIRECTOR_DRY_FIRST_S", Cfg.dry_first_s))
     return replace(base or Cfg(), **lv)
 
 
@@ -201,6 +209,7 @@ def on_event(st: State, ev: Event, now: float) -> list[Event]:
     out: list[Event] = []
     if isinstance(ev, Claim):
         side_of(st, ev.speaker, ev.side)
+        st.figure_heard |= ev.type == "statistic"
         if ev.t_end and on_clock(ev.t_end, ev.ts or now) != ev.t_end:
             ev = ev.model_copy(update={"t_end": ev.ts or now})
         old, st.claims[ev.id] = st.claims.get(ev.id), ev
@@ -214,6 +223,8 @@ def on_event(st: State, ev: Event, now: float) -> list[Event]:
         st.last_speech[ev.speaker] = max(st.last_speech.get(ev.speaker, NEG), t)
         st.last_heard[ev.speaker] = max(st.last_heard.get(ev.speaker, NEG), now)
         st.interims_seen |= not ev.final
+        if st.debate_t0 is None:
+            st.debate_t0 = now
         if ev.final and ev.t_start and ev.t_end:
             st.final_dur[ev.speaker] = max(0.0, ev.t_end - ev.t_start)
     elif isinstance(ev, Pause):
@@ -366,8 +377,23 @@ def _resolve_speaker(st: State, v: Any) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------------- firing
+def _dry(st: State, out: list, now: float) -> None:
+    """Offer the canned dry-spell line once it is due (see module docstring). One standing offer at a time."""
+    c = st.cfg
+    if not c.dry_first_s or st.debate_t0 is None:
+        return
+    since, wait = (st.fires[-1][0], c.min_gap_s) if st.fires else (st.debate_t0, c.dry_first_s)
+    key = f"dry:{len(st.fires)}"
+    if now - since < wait or key in st.pending or key in st.spoken or key in st.vetoed:
+        return
+    for k in [k for k, cd in st.pending.items() if cd.kind == "dry"]:
+        del st.pending[k]                         # an older offer, overtaken by a real line
+    _add(st, Cand(key, "dry", None, "", 1.0, 1.0, now), out, now)
+
+
 def try_fire(st: State, now: float) -> list[Event]:
     out: list[Event] = []
+    _dry(st, out, now)
     for k, cd in list(st.pending.items()):                                   # G0
         if now - cd.t0 > TTL_S[cd.kind]:
             _log(st, out, st.pending.pop(k), "dropped", "stale_ttl")         # dashboard-only from now on
@@ -395,8 +421,10 @@ def try_fire(st: State, now: float) -> list[Event]:
 
 def _gate(st: State, cd: Cand, now: float, last: float) -> Optional[str]:
     c, gap = st.cfg, now - last
-    if cd.score < c.fire_threshold:                                          # G4
+    if cd.kind != "dry" and cd.score < c.fire_threshold:                     # G4
         return "below_threshold"
+    if cd.kind == "dry" and now - max(st.last_heard.values(), default=NEG) > c.dry_quiet_s:
+        return "room_quiet"
     if gap < c.hard_gap_s or (gap < c.min_gap_s and cd.score < c.override_score):   # G5
         return "cooldown"
     if sum(now - t < c.budget_window_s for t, *_ in st.fires) >= c.budget_n:      # G6
@@ -434,6 +462,8 @@ def _streak(st: State, side: str) -> int:
 
 
 def _text(st: State, cd: Cand, now: float) -> str:
+    if cd.kind == "dry":
+        return voice.render("dry_again" if st.figure_heard else "dry")
     return voice.render(cd.kind, claim=cd.claim, verdict=cd.verdict, side=spoken_name(st, cd.target),
                         age_s=now - cd.t0)
 

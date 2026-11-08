@@ -265,7 +265,7 @@ class Interjection(Event):
     priority: float = 0.5          # higher = more urgent
     claim_id: Optional[str] = None   # None for moderator prompts ("Opposition, you haven't answered...")
     # additions (optional) -----------------------------------------------------------------
-    kind: str = "correction"       # correction | context | confirm | source_req | prompt | time
+    kind: str = "correction"       # correction | context | confirm | source_req | prompt | time | dry
     target: Optional[str] = None   # speaker id addressed
     evidence: EvidenceList = Field(default_factory=list)     # source card to show while speaking
     marks: Marks = Field(default_factory=dict)

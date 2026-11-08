@@ -62,6 +62,7 @@ DIRECTOR_MIN_GAP_S = _env("DIRECTOR_MIN_GAP_S", 30.0)
 DIRECTOR_MIN_CONF = _env("DIRECTOR_MIN_CONF", 0.75)
 DIRECTOR_AGGR = _env("DIRECTOR_AGGR", 3)                   # 1 (quiet) .. 5 (chatty)
 DIRECTOR_VOICE_NONRESPONSIVE = _env("DIRECTOR_VOICE_NONRESPONSIVE", False)   # default: dashboard only
+DIRECTOR_DRY_FIRST_S = _env("DIRECTOR_DRY_FIRST_S", 25.0)  # canned dry-spell line; 0 = off
 
 # --- evidence (C) defaults the mocks also honour ----------------------------------------------
 STALE_CLAIM_S = _env("STALE_CLAIM_S", 12.0)

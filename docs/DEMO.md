@@ -36,7 +36,7 @@ Point at the picker on the projector. The judge picks. Presenter clicks it and s
 
 - One claim per sentence. Say the number and the unit ("29 per cent", "£11.5 billion").
 - **Never talk over the Moderator.** When it speaks, stop. When it finishes, the next speaker reacts to it by name: "The referee says it's 65, not 90, so let me take that…". This reaction is the agent's effect on the debate, so make it visible.
-- **Dry spell:** at the first Pause after 25 s of debate, if nobody has given a figure, the Moderator says a canned line like *"Neither side has offered a figure yet. Care to name one?"* After that it waits for the Director's 30-second gap. **(check): not found in `app/brain/` at 21:15 Sat.** If you hear it, answer with a figure from your card straight away.
+- **Dry spell:** at the first Pause after 25 s of debate with no Interjection yet, the Moderator says *"Neither side has offered a figure yet. Care to name one?"* (or *"Either side, a figure I can check?"* once a figure has been said). After that it comes back only after 30 s with no Interjection, and never once the room has been quiet for 10 s. Real corrections always go first. `DIRECTOR_DRY_FIRST_S=0` turns it off. If you hear it, answer with a figure from your card straight away.
 
 ### 2:15–3:00: final screen and close
 

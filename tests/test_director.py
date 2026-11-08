@@ -29,6 +29,7 @@ WORD = re.compile(r"[a-z]+")
 def _default_flags(monkeypatch):
     """Director() reads the operator's mute from config.FLAGS; never inherit another test's flags."""
     monkeypatch.setattr(config, "FLAGS", {"director": True})
+    monkeypatch.setattr(config, "DIRECTOR_DRY_FIRST_S", 0.0)   # the scenarios predate the dry line: see test_dry_*
 
 
 # ----------------------------------------------------------------------------- builders
@@ -513,6 +514,47 @@ def test_fake_debate_fixture_end_to_end():
     assert fired(o) == [(18.73, "context", "A", "c1")]          # at A's Pause, before B starts
     assert lines(o)[0].text == "Some context: GOV.UK notes the figure is a modelled estimate."
     assert d.name("B") == "Opposition"
+
+
+# ----------------------------------------------------------------------------- dry-spell canned line
+@pytest.fixture
+def dry_on(monkeypatch):
+    monkeypatch.setattr(config, "DIRECTOR_DRY_FIRST_S", 25.0)
+
+
+def test_dry_first_line_at_first_pause_after_25s(dry_on):
+    ev = talk("A", 0, 20) + [(21, P("A", 21))] + talk("A", 22, 29) + [(30, P("A", 30))] + ticks(30, 40)
+    _, o = run(ev)
+    assert fired(o) == [(30, "dry", None, None)]
+    assert lines(o)[0].text == "Neither side has offered a figure yet. Care to name one?"
+
+
+def test_dry_then_waits_for_the_gap_and_rewords_once_a_figure_is_heard(dry_on):
+    ev = (talk("A", 0, 25) + [(26, P("A", 26))]                       # dry #1 at 26
+          + talk("B", 31, 45) + [(40, C("b1", "B", 39)), (46, P("B", 46))]   # 20 s after: still cooling down
+          + talk("B", 47, 56) + [(57, P("B", 57))] + ticks(57, 70))     # 31 s after: dry #2
+    _, o = run(ev)
+    assert fired(o) == [(26, "dry", None, None), (57, "dry", None, None)]
+    assert lines(o)[1].text == "Either side, a figure I can check?"
+
+
+def test_dry_ranks_below_a_real_line_and_resets_the_clock(dry_on):
+    ev = talk("A", 0, 27) + [(20, C("c1", "A", 19)), (27, V("c1", "contradicted", .9)), (28, P("A", 28))] \
+        + talk("B", 33, 50) + [(51, P("B", 51))] + ticks(51, 60)
+    _, o = run(ev)
+    # the dry line (due at 25) never jumps a real one, and the next is due 30 s after the correction
+    assert fired(o) == [(28, "correction", "A", "c1"), (58, "dry", None, None)]
+
+
+def test_dry_never_speaks_into_silence_or_when_muted(dry_on):
+    _, o = run(talk("A", 0, 26) + [(27, P("A", 27))] + ticks(27, 200))
+    assert fired(o) == [(27, "dry", None, None)]                     # no human pause after it: one line only
+    ev = talk("A", 0, 26) + [(27, P("A", 27))] + talk("B", 32, 40) + [(41, P("B", 41))] + ticks(41, 120)
+    _, o = run(ev)
+    assert fired(o) == [(27, "dry", None, None)]                     # due at 57, but the room went quiet at 40
+    assert ("dry:1", "held", "room_quiet") in logs(o)
+    _, o = run([(0, Control(flag="mute", value=True))] + talk("A", 0, 26) + [(27, P("A", 27))])
+    assert fired(o) == [] and ("dry:0", "held", "muted_would_fire") in logs(o)
 
 
 # ----------------------------------------------------------------------------- voice
