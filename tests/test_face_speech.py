@@ -488,7 +488,8 @@ def test_app_js_page_rules():
     Enable audio are never rebuilt under the pointer (tests/js/face_page.js)."""
     root = Path(__file__).resolve().parent.parent
     r = subprocess.run(["deno", "run", "--allow-read", str(root / "tests/js/face_page.js"),
-                        str(root / "app/face/static/app.js")], capture_output=True, text=True, timeout=60)
+                        str(root / "app/face/static/botcard.js"), str(root / "app/face/static/app.js")],
+                       capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
 
 

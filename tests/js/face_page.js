@@ -1,7 +1,8 @@
 // The whole dashboard (app.js) against a fake DOM, WebSocket, audio and clock: the transport, reducer and drawing
 // rules that tests/js/face_voice.js (the voice section alone) can't reach.
-// Run by tests/test_face_speech.py when deno is installed: deno run --allow-read tests/js/face_page.js app/face/static/app.js
-const src = Deno.readTextFileSync(Deno.args[0]);
+// Run by tests/test_face_speech.py when deno is installed, with index.html's scripts in their load order:
+// deno run --allow-read tests/js/face_page.js app/face/static/botcard.js app/face/static/app.js  (app.js last)
+const src = Deno.args.map(f => Deno.readTextFileSync(f)).join('\n');
 let failures = 0;
 function check(name, cond, info) { if (!cond) { failures++; console.log('FAIL', name, JSON.stringify(info)); } else console.log('ok  ', name); }
 const flush = () => new Promise(r => setTimeout(r, 0));
@@ -101,6 +102,11 @@ const botBox = (p, persona) => {
   const n = p.el(`bot-${persona}`).children[0];
   return n ? {node: n, cls: n.className, parts: n.children.map(x => [x.className, x.textContent])} : {parts: []};
 };
+// [class, text] of each part of that box's source card (a sourced line), [] without one.
+const srcCard = (p, persona) => {
+  const n = p.el(`bot-${persona}`).children[0], c = n && n.children.find(x => x.className === 'srccard');
+  return c ? c.children.map(x => [x.className, x.textContent]) : [];
+};
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 { // 1. the line ends while the socket is down: its TTSState false is sent once the page reconnects, and only once
@@ -179,17 +185,19 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     evidence: [{url: 'https://www.ons.gov.uk/x', title: 'ONS Labour market', quote: '4.2%'}]}));
   p.draw();
   check('bots: one bot spoke, the strip shows', !p.el('bots').hidden);
-  check('bots: sourced rebut names its source, no tag', same(botBox(p, 'for').parts,
-    [['who', 'For'], ['text', 'ONS says 4.2%, not 6%. Try again.'], ['src', 'Source: ONS Labour market']]), botBox(p, 'for'));
-  check('bots: the other box waits', same(botBox(p, 'against').parts, [['who', 'Against'], ['text empty', 'Nothing yet']]),
+  check('bots: sourced rebut shows its source card, no tag', same(botBox(p, 'for').parts,
+    [['who', 'For bot'], ['text', 'ONS says 4.2%, not 6%. Try again.'], ['srccard', '']]), botBox(p, 'for'));
+  check('bots: the source card has title, domain and quote', same(srcCard(p, 'for'),
+    [['src-title', 'ONS Labour market'], ['src-domain', 'ons.gov.uk'], ['src-quote', '4.2%']]), srcCard(p, 'for'));
+  check('bots: the other box waits', same(botBox(p, 'against').parts, [['who', 'Against bot'], ['text empty', 'Nothing yet']]),
     botBox(p, 'against'));
   check('bots: a live line animates in', botBox(p, 'for').cls === 'line enter', botBox(p, 'for').cls);
   p.live(BOT('against', 'b-2', 'It was 3%, not 30%. (unsourced)', {kind: 'challenge'})); p.draw();
   check('bots: an unsourced challenge is tagged AI knowledge', same(botBox(p, 'against').parts,
-    [['who', 'Against'], ['tag', 'AI knowledge'], ['text', 'It was 3%, not 30%. (unsourced)']]), botBox(p, 'against'));
+    [['who', 'Against bot'], ['tag', 'AI knowledge'], ['text', 'It was 3%, not 30%. (unsourced)']]), botBox(p, 'against'));
   p.live(BOT('against', 'b-2c', 'Annoyingly, that one checks out. (unsourced)', {kind: 'concede'})); p.draw();
   check('bots: an unsourced concede is tagged AI knowledge', same(botBox(p, 'against').parts,
-    [['who', 'Against'], ['tag', 'AI knowledge'], ['text', 'Annoyingly, that one checks out. (unsourced)']]),
+    [['who', 'Against bot'], ['tag', 'AI knowledge'], ['text', 'Annoyingly, that one checks out. (unsourced)']]),
     botBox(p, 'against').parts);
   const kept = botBox(p, 'for').node;
   p.live({event: 'BotTalk', persona: 'for', line_id: 'b-1', on: false}); p.draw();
@@ -198,18 +206,29 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   p.live(BOT('for', 'b-3', evil, {kind: 'challenge', sourced: true}));
   p.live(BOT('against', 'b-4', 'And the cost?', {kind: 'rebut', evidence: [{url: 'https://x.org', title: 'X'}]}));
   p.draw();
-  check('bots: model text stays text', same(botBox(p, 'for').parts, [['who', 'For'], ['text', evil]])
+  check('bots: model text stays text', same(botBox(p, 'for').parts, [['who', 'For bot'], ['text', evil]])
     && ![...p.els.values(), ...p.made].some(n => n.innerHTML.includes('<img')), botBox(p, 'for'));
   check('bots: no tag on a sourced challenge, no source on an unsourced rebut',
-    same(botBox(p, 'against').parts, [['who', 'Against'], ['text', 'And the cost?']]), botBox(p, 'against'));
+    same(botBox(p, 'against').parts, [['who', 'Against bot'], ['text', 'And the cost?']]), botBox(p, 'against'));
   p.live(BOT('for', 'b-5', 'Fine, that checks out.', {kind: 'concede', sourced: true}));
   p.live(BOT('against', 'b-6', 'Still waiting on the cost point.', {kind: 'nudge'})); p.draw();
   check('bots: no tag on a sourced concede or an unsourced nudge',
-    same(botBox(p, 'for').parts, [['who', 'For'], ['text', 'Fine, that checks out.']])
-    && same(botBox(p, 'against').parts, [['who', 'Against'], ['text', 'Still waiting on the cost point.']]),
+    same(botBox(p, 'for').parts, [['who', 'For bot'], ['text', 'Fine, that checks out.']])
+    && same(botBox(p, 'against').parts, [['who', 'Against bot'], ['text', 'Still waiting on the cost point.']]),
     [botBox(p, 'for').parts, botBox(p, 'against').parts]);
   p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
   check('bots: not on the final screen', p.el('bots').hidden);
+}
+{ // 8b. the source card: model text stays text; a link that is not http(s) gives no domain; an unsourced line has none
+  const p = page(''); p.connect([p.snap({event: 'SessionStart', motion: 'm'})]);
+  const evil = '<img src=x onerror=alert(1)>';
+  p.live(BOT('for', 'b-1', 'Try again.', {kind: 'rebut', sourced: true,
+    evidence: [{url: 'javascript:alert(1)', title: evil, quote: evil}]}));
+  p.live(BOT('against', 'b-2', 'It was 3%. (unsourced)', {kind: 'challenge', evidence: [{url: 'https://x.org', title: 'X'}]}));
+  p.draw();
+  check('source card: title and quote as text', same(srcCard(p, 'for'), [['src-title', evil], ['src-quote', evil]])
+    && ![...p.els.values(), ...p.made].some(n => n.innerHTML.includes('<img')), srcCard(p, 'for'));
+  check('source card: none on an unsourced challenge', same(srcCard(p, 'against'), []), botBox(p, 'against').parts);
 }
 { // 9. a refresh shows each bot's latest line at once, without the animation; a new debate hides the strip
   const p = page('');
@@ -217,8 +236,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
              p.snap(BOT('for', 'b-2', 'Source for that 40%?')), p.snap(BOT('against', 'b-3', 'Who said so?'))]);
   p.draw();
   check('bots: snapshot shows the latest lines', !p.el('bots').hidden
-    && same(botBox(p, 'for').parts, [['who', 'For'], ['text', 'Source for that 40%?']])
-    && same(botBox(p, 'against').parts, [['who', 'Against'], ['text', 'Who said so?']]), [botBox(p, 'for'), botBox(p, 'against')]);
+    && same(botBox(p, 'for').parts, [['who', 'For bot'], ['text', 'Source for that 40%?']])
+    && same(botBox(p, 'against').parts, [['who', 'Against bot'], ['text', 'Who said so?']]), [botBox(p, 'for'), botBox(p, 'against')]);
   check('bots: snapshot lines do not animate', botBox(p, 'for').cls === 'line' && botBox(p, 'against').cls === 'line');
   p.live({event: 'SessionStart', motion: 'Next motion'}); p.draw();
   check('bots: a new debate hides the strip', p.el('bots').hidden);
@@ -316,7 +335,7 @@ const SESSION = {event: 'SessionStart', motion: 'Ban cars', speakers: {A: {name:
     verdict(p));
 }
 { // 13. a refreshed tab (Snapshot) of a real recorded debate shows the verdict at once, without the reveal animation
-  const golden = Deno.readTextFileSync(Deno.args[0].replace(/app\/face\/static\/app\.js$/, 'fixtures/golden_run.jsonl'))
+  const golden = Deno.readTextFileSync(Deno.args[Deno.args.length - 1].replace(/app\/face\/static\/app\.js$/, 'fixtures/golden_run.jsonl'))
     .split('\n').filter(Boolean).map(l => JSON.parse(l));
   const p = page('');
   p.connect([...golden.map(e => p.snap(e)), p.snap({event: 'Control', flag: 'screen', value: 'final'}),
