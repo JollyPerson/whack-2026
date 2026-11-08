@@ -714,3 +714,34 @@ async def test_supervisor_backoff_resets_after_a_healthy_run(monkeypatch):
     FLAKY.clear()
     await asyncio.wait_for(supervise(Bus(), "brain", "tests.test_main:flaky"), 5)
     assert len(FLAKY) == 6 and slept == [1.0, 2.0, 4.0, 8.0, 1.0]
+
+
+async def test_ws_handler_and_its_subscriber_end_when_the_client_leaves_in_a_quiet_period(tmp_path, monkeypatch):
+    """Under real uvicorn the writer sat in `async for ev in sub` after a disconnect until the next event arrived:
+    every refresh in a quiet period left a zombie handler and a 2000-slot Sub (TestClient cancels it, hiding this)."""
+    for k in ROLES:
+        monkeypatch.setenv(k, "off")
+    app = build_app("mock", log_dir=tmp_path)
+    bus = app.state.bus
+    inbox, sent = asyncio.Queue(), []
+    inbox.put_nowait({"type": "websocket.connect"})
+
+    async def send(m):
+        sent.append(m)
+
+    scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws", "http_version": "1.1", "path": "/ws",
+             "raw_path": b"/ws", "root_path": "", "query_string": b"", "headers": [(b"host", b"test")],
+             "client": ("127.0.0.1", 1), "server": ("test", 80), "subprotocols": [], "state": {}}
+    task = asyncio.create_task(app(scope, inbox.get, send))
+    try:
+        for _ in range(200):
+            if any(m["type"] == "websocket.send" for m in sent):
+                break
+            await asyncio.sleep(0.01)
+        assert [s for s in bus.subs if s.name.startswith("ws-")]
+        inbox.put_nowait({"type": "websocket.disconnect", "code": 1000})
+        await asyncio.wait_for(asyncio.shield(task), 1)
+        assert not [s for s in bus.subs if s.name.startswith("ws-")]
+    finally:
+        task.cancel()
+        bus.close()

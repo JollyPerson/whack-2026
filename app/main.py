@@ -287,20 +287,29 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
                     op = m.get("op", "publish") if isinstance(m, dict) else "publish" if isinstance(m, list) else None
                     await sock.send_json({"event": "Error", "detail": str(e)[:300], "op": op})
 
-        rt = asyncio.create_task(reader())
-        try:
+        async def writer():                                   # bus -> client: the snapshot, then live events
             await sock.send_json({"event": "Snapshot", "schema": SCHEMA_VERSION, "last_seq": snap_seq,
                                   "flags": FLAGS, "modules": choice, "events": hist})
             async for ev in sub:
                 if sub.dropped:
                     await sock.close(code=1013)               # too slow: client reconnects + resyncs
-                    break
+                    return
                 await sock.send_text(ev.model_dump_json())
-        except (WebSocketDisconnect, RuntimeError):
-            pass
+
+        # Whichever side ends first ends both: a client that left in a quiet period must not leave the writer
+        # (and its 2000-slot Sub) parked until the next event.
+        tasks = [asyncio.create_task(writer()), asyncio.create_task(reader())]   # writer first: Snapshot first
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                try:
+                    t.result()
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
         finally:
             sub.close()
-            rt.cancel()
+            for t in tasks:
+                t.cancel()
 
     @app.post("/publish")
     async def publish(req: Request):
