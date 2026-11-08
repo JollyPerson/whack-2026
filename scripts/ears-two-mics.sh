@@ -9,6 +9,7 @@
 # ears/uv.lock and downloads the Whisper model; after that it works offline.
 # Optional: MODEL (default base.en), SERVER (default http://127.0.0.1:8000), WINDOW / HOP / HOLDBACK (default 6 / 1.5 /
 # 2: the cleanest settings measured on an i5-10310U laptop; small.en is more accurate but ~4x slower per window).
+# One launcher runs at a time (logs/ears.lock): a second one would send every sentence twice.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
 SPEAKERS='^(alsa|bluez)_output[.].*[.]monitor$'
@@ -49,6 +50,10 @@ command -v uv > /dev/null || { echo "uv is not installed: https://docs.astral.sh
 MODEL=${MODEL:-base.en}
 SERVER=${SERVER:-http://127.0.0.1:8000}
 mkdir -p "$ROOT/logs"
+if command -v flock > /dev/null; then
+    exec 9> "$ROOT/logs/ears.lock"
+    flock -n 9 || { echo "ears is already running (scripts/ears-two-mics.sh holds logs/ears.lock): stop that one first" >&2; exit 1; }
+fi
 cd "$ROOT/ears"
 uv run --frozen python ears.py --source mic1="$MIC1" --source mic2="$MIC2" --model "$MODEL" \
     --window "${WINDOW:-6}" --hop "${HOP:-1.5}" --holdback "${HOLDBACK:-2}" \

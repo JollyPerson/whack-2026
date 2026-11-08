@@ -577,3 +577,21 @@ def test_launcher_warns_when_the_laptop_plays_into_the_phone_mics_sink(tmp_path)
     assert r.returncode == 0, r.stderr
     assert "set-default-sink" in r.stderr
 
+
+def test_launcher_runs_once(tmp_path):
+    # A forgotten second launcher would send every sentence twice.
+    import os
+    import signal
+    import subprocess
+    tree = launcher_tree(tmp_path, ears_body="sleep 30")
+    env = {**os.environ, "PATH": f"{tree / 'bin'}:{os.environ['PATH']}", "FAKE_SOURCES": SOURCES,
+           "MIC1": "MicYouVirtualSink.monitor", "MIC2": USB}
+    first = subprocess.Popen([str(tree / "scripts" / "ears-two-mics.sh")], env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert wait_until(lambda: (tree / "bridge.in").exists(), timeout=10)
+        r = run_launcher(tree, timeout=8, MIC1="MicYouVirtualSink.monitor", MIC2=USB)
+        assert r.returncode != 0 and "already running" in r.stderr
+    finally:
+        os.killpg(first.pid, signal.SIGTERM)
+        first.wait(10)
