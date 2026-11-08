@@ -217,6 +217,8 @@ async def test_the_llm_judges_with_the_scorecard_fact_checks_and_transcript():
     assert "FACT CHECKS, sourced" in user and "FACT CHECKS, AI knowledge (unsourced" in user
     assert "c4 Opposition (Bob Baker)" in user and "counted as unverifiable" in user
     assert "Alice Archer (Proposition): Wages rose by six percent last year" in user and "rehearsal" not in user
+    assert '- referee prompt -> Opposition: "Opposition, you haven\'t answered the wage point."' in user
+    assert '- AGAINST bot banter -> nobody in particular: "Bold of you."' in user
     assert set(schema["properties"]["scores"]["properties"]["prop"]["required"]) == {*writer.CRITERIA, "overall"}
 
 

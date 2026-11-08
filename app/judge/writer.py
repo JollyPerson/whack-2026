@@ -4,7 +4,8 @@ Owner: B.
 decide(llm, record, card) -> Judgement, and never raises:
 - Claude (config.JUDGE_MODEL, built on Brain's client the way app/evidence/llm.py builds its verdict model; bounded by
   config.JUDGE_TIMEOUT_S) gets the motion, the sides and speakers, the scorecard JSON, the fact checks (sourced and AI
-  knowledge kept apart) and the speaker-labelled transcript (at most TRANSCRIPT_CHARS: the middle is cut, and marked).
+  knowledge kept apart), what the referee and the side bots said to which side, and the speaker-labelled transcript
+  (at most TRANSCRIPT_CHARS: the middle is cut, and marked).
   It returns JSON: per side and criterion (CRITERIA) a 0-10 score with a one-line justification plus an overall, a
   bias conclusion (each side, and whether the system's interventions were even), a factuality conclusion, other
   observations, the winner, the margin, a headline of at most HEADLINE_WORDS words and a reasoning paragraph that
@@ -39,6 +40,7 @@ MAX_TOKENS = 8000         # thinking counts toward it; the JSON itself is ~1.5k 
 TRANSCRIPT_CHARS = 60_000   # ~15k tokens: an hour of speech fits; longer keeps the start and the end
 HEADLINE_WORDS = 20
 WHY_CHARS = 300
+INTERVENTIONS = 60        # at most this many referee/bot lines in the prompt
 CRITERIA = ("factuality", "evidence", "responsiveness", "balance", "argument_quality", "civility")
 CRITERION_LABEL = {"factuality": "Factuality", "evidence": "Evidence", "responsiveness": "Responsiveness",
                    "balance": "Balance (bias)", "argument_quality": "Argument quality", "civility": "Civility"}
@@ -205,6 +207,20 @@ def fact_lines(rec: Record) -> list[str]:
     return out
 
 
+def intervention_lines(rec: Record, limit: int = INTERVENTIONS) -> list[str]:
+    """What the referee and the side bots said, and to which side (so the system's balance can be judged)."""
+    said = [(i.ts, f"referee {i.kind}", rec.aimed_at(i), i.text) for i in rec.interjections]
+    said += [(b.ts, f"{b.persona.upper()} bot {b.kind}", rec.aimed_at(b), b.text) for b in rec.bot_lines]
+    out = ["SYSTEM INTERVENTIONS (the referee's interjections and the side bots' lines, by the side addressed):"]
+    for _, who, side, text in sorted(said, key=lambda x: x[0])[:limit]:
+        out.append(f"- {who} -> {SIDE_LABEL.get(side or '', 'nobody in particular')}: \"{' '.join(text.split())}\"")
+    if len(said) > limit:
+        out.append(f"- ... and {len(said) - limit} more")
+    if not said:
+        out.append("- (none)")
+    return out
+
+
 def prompt(rec: Record, card: dict) -> str:
     people = "; ".join(f"{SIDE_LABEL[s]} ({s}): {', '.join(card['sides'][s]['speakers']) or 'unknown'}"
                        for s in SIDES)
@@ -220,6 +236,8 @@ def prompt(rec: Record, card: dict) -> str:
         json.dumps({k: card[k] for k in ("sides", "system", "formula")}, separators=(",", ":")),
         "",
         *fact_lines(rec),
+        "",
+        *intervention_lines(rec),
         "",
         f"TRANSCRIPT{note}:",
         *lines,
