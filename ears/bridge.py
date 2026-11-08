@@ -52,6 +52,7 @@ class Publisher:
             token = base64.b64encode(f"{user}:{password}".encode()).decode()
             self.headers["authorization"] = f"Basic {token}"
         self.dry_run = dry_run
+        self.failing = False                # the last try failed: say so when one goes through again
         self.queue: queue.Queue = queue.Queue()
         self.thread = threading.Thread(target=self._run, daemon=True, name="publisher")
         self.thread.start()
@@ -78,18 +79,27 @@ class Publisher:
                 print(f"bridge: dropped an event: {e!r}", file=sys.stderr)
 
     def _post(self, body: bytes, queued: float) -> None:
+        # Tries that hang until their timeout can leave events queued past max_age: skip those unsent.
+        if (age := time.monotonic() - queued) > self.max_age:
+            print(f"bridge: skipped an event {age:.0f} s old without sending it", file=sys.stderr)
+            return
         for attempt in itertools.count(1):
             try:
                 req = urllib.request.Request(self.url, data=body, headers=self.headers, method="POST")
                 with urllib.request.urlopen(req, timeout=5) as r:
                     r.read()
+                if self.failing:
+                    print(f"bridge: {self.url} reachable again", file=sys.stderr)
+                    self.failing = False
                 return
             except urllib.error.HTTPError as e:
                 print(f"bridge: {e.code} from {self.url}: {e.read()[:200]!r}", file=sys.stderr)
                 if e.code < 500:
                     return              # a 401 or 422 won't fix itself on retry
+                self.failing = True
             except Exception as e:
                 print(f"bridge: send failed (try {attempt}): {e!r}", file=sys.stderr)
+                self.failing = True
             delay = self.backoff[min(attempt, len(self.backoff)) - 1]
             if time.monotonic() + delay - queued > self.max_age:
                 print(f"bridge: gave up on an event after {attempt} tries", file=sys.stderr)

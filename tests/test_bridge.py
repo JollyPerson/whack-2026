@@ -245,3 +245,35 @@ def test_one_event_that_blows_up_does_not_stop_the_ones_after_it(monkeypatch, ca
     pub.close(timeout=2.0)
     assert [t["speaker"] for t in tries] == ["A", "B"]
     assert "unsent" not in capsys.readouterr().err
+
+
+def test_an_event_already_too_old_when_its_turn_comes_is_not_sent(monkeypatch, capsys):
+    # A hanging connection (remote server, Wi-Fi gone) holds each try for its timeout while sentences keep coming:
+    # once the network is back, the backlog must not reach the server as a burst of minute-old Utterances.
+    tries = []
+
+    def urlopen(req, timeout):
+        tries.append(json.loads(req.data)["speaker"])
+        if len(tries) == 1:
+            time.sleep(0.3)
+            raise urllib.error.URLError("timed out")
+        return OK()
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", urlopen)
+    pub = publisher(max_age=0.2)
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})          # queued behind A's 0.3 s try
+    assert wait_for(lambda: "gave up" in capsys.readouterr().err or len(tries) > 1)
+    pub.send({"event": "Pause", "speaker": "C", "t": 3.0})
+    pub.close()
+    assert tries == ["A", "C"]
+
+
+def test_the_server_coming_back_is_announced(monkeypatch, capsys):
+    flaky(monkeypatch, urllib.error.URLError("Connection refused"), urllib.error.URLError("Connection refused"))
+    pub = publisher()
+    pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
+    pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
+    pub.close()
+    err = capsys.readouterr().err
+    assert err.count("reachable again") == 1
