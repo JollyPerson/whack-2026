@@ -375,12 +375,14 @@ def _veto(st: State, v: Any, out: list, now: float) -> None:
 
 
 def _resolve_speaker(st: State, v: Any) -> Optional[str]:
-    """Control(time) value: a speaker id, or a side ("prop"/"opp"), or True = whoever spoke last."""
+    """Control(time) value: a speaker id, or a side ("prop"/"opp", aliases ok), or True = whoever spoke last.
+    An unknown id, or a side nobody is on yet, is None: a made-up speaker would shift later speakers' sides."""
     if isinstance(v, str) and v.strip():
         v = v.strip()
         if v in st.sides or v in st.last_speech:
             return v
-        return next((s for s, side in st.sides.items() if side == v), v)
+        side = norm_side(v)
+        return next((s for s, sd in st.sides.items() if sd == side), None) if side else None
     if v is True and st.last_speech:
         return max(st.last_speech, key=lambda s: (st.last_speech[s], s))
     return None

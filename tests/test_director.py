@@ -820,3 +820,12 @@ def test_time_call_is_what_its_force_window_fires():
     # a later force_next is the operator's "say whatever is next": the stronger correction goes first
     _, o = run(ev[:-len(ticks(15.5, 65))] + [(15.2, Control(flag="force_next"))])
     assert fired(o)[1][1:] == ("correction", "B", "c2")
+
+
+def test_time_control_by_side_alias_never_invents_a_speaker():
+    d, _ = run(talk("A", 0, 2) + [(3, Control(flag="time", value="Opposition"))] + talk("B", 4, 6))
+    assert "Opposition" not in d.st.sides and d.name("B") == "Opposition" and "Opposition" not in d.status(7).pressure
+    _, o = run(talk("A", 0, 2) + talk("B", 3, 9) + [(8, Control(flag="time", value="opp")), (10, P("B", 10))])
+    assert [f[1:3] for f in fired(o)] == [("time", "B")]
+    d, o = run(talk("A", 0, 2) + [(3, Control(flag="time", value="nobody")), (4, P("A", 4))])
+    assert fired(o) == [] and list(d.st.sides) == ["A"]
