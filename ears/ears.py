@@ -17,6 +17,10 @@ from faster_whisper import WhisperModel
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
 RING_CHUNKS = 160
+# A window's first words may be cut off mid-word: older words win there.
+HEAD_MARGIN = 0.4
+# The same word this soon after the previous one is one word heard twice.
+DUPLICATE_GAP = 0.3
 
 
 class AudioBuffer:
@@ -59,6 +63,7 @@ class SentenceBuffer:
     def __init__(self):
         self.words = []
         self.committed_until = 0.0
+        self.last_committed = None
 
     @staticmethod
     def normalize_word(word):
@@ -81,34 +86,50 @@ class SentenceBuffer:
         """Remove trailing three-dot or Unicode ellipsis."""
         return re.sub(r"(?:\.{3}|…)+\s*$", "", text).rstrip()
 
-    def add_words(self, new_words):
+    def add_words(self, new_words, window_start=None):
+        """Merge the words of one window into the uncommitted ones.
+
+        The newest window wins: it heard more audio around each word, so it
+        replaces older words from window_start + HEAD_MARGIN on. Before that,
+        where its first word may be cut off mid-word, the older words stay.
+        Without window_start, the first new word's start stands in for it.
+        """
+        fresh = []
+
         for new in new_words:
-            if new["end"] <= self.committed_until:
+            # Already emitted. The midpoint, not the end, so a re-heard last
+            # word that jitter pushed just past the boundary stays out.
+            if (new["start"] + new["end"]) / 2 <= self.committed_until:
                 continue
 
-            normalized = self.normalize_word(new["word"])
-
-            if not normalized and not self.is_sentence_end(new["word"]):
+            if not self.is_sentence_end(new["word"]) and not self.normalize_word(new["word"]):
                 continue
 
-            duplicate = None
+            fresh.append(dict(new))
 
-            # Avoid duplicating words from overlapping audio windows.
-            for old in self.words:
-                if (
-                    self.normalize_word(old["word"]) == normalized
-                    and abs(old["start"] - new["start"]) <= 0.18
-                ):
-                    duplicate = old
-                    break
+        if not fresh:
+            return
 
-            if duplicate is not None:
-                duplicate.update(new)
-            else:
-                self.words.append(new)
+        fresh.sort(key=lambda item: item["start"])
 
-        self.words.sort(key=lambda item: item["start"])
+        if window_start is None:
+            window_start = fresh[0]["start"]
 
+        kept = [old for old in self.words if old["start"] < window_start + HEAD_MARGIN]
+        splice = max([old["end"] for old in kept], default=self.committed_until)
+        fresh = [new for new in fresh if (new["start"] + new["end"]) / 2 > splice]
+
+        # The same word again right where the kept (or emitted) words end is
+        # one word heard twice with jittered timestamps.
+        previous = kept[-1] if kept else self.last_committed
+        if (
+            fresh and previous
+            and self.normalize_word(fresh[0]["word"]) == self.normalize_word(previous["word"])
+            and fresh[0]["start"] - previous["end"] < DUPLICATE_GAP
+        ):
+            fresh.pop(0)
+
+        self.words = sorted(kept + fresh, key=lambda item: item["start"])
 
 
     @staticmethod
@@ -162,6 +183,7 @@ class SentenceBuffer:
             emitted.append(self.make_sentence(sentence_words))
 
             self.committed_until = sentence_end
+            self.last_committed = sentence_words[-1]
             self.words = self.words[boundary + 1:]
 
         return emitted
@@ -298,7 +320,7 @@ def transcribe_source(model, source_name, state, args, output_file):
                 "probability": word.probability,
             })
 
-    state["sentences"].add_words(new_words)
+    state["sentences"].add_words(new_words, window_start)
 
     cutoff = window_end - args.holdback
 
