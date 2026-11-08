@@ -34,13 +34,23 @@ async def check(bus, c):
 
 
 async def run(bus):
+    pending: set[asyncio.Task] = set()     # this session's checks + progress: a SessionStart cancels them
+
+    def spawn(coro) -> None:
+        t = asyncio.create_task(coro)
+        pending.add(t)
+        t.add_done_callback(pending.discard)
+
     async for ev in bus.subscribe("mock_evidence", {"Claim", "SessionStart"}):
         if ev.event == "SessionStart":
+            for t in list(pending):        # a verdict for the previous session's claim must not land in this one
+                t.cancel()
+
             async def progress():
                 for i in range(0, 21, 4):
                     bus.publish(ResearchProgress(stage="ready" if i >= 20 else "searching", done=i, total=20),
                                 src="mock_evidence")
                     await asyncio.sleep(0.2)
-            asyncio.create_task(progress())
+            spawn(progress())
         elif ev.checkable:
-            asyncio.create_task(check(bus, ev))
+            spawn(check(bus, ev))

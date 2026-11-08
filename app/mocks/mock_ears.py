@@ -10,6 +10,7 @@ Env: FIXTURE (default fixtures/test_debate.jsonl, else fixtures/fake_debate.json
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 from app.bus import MAX_GAP_S, gap_offsets, last_session, load_jsonl, rebase
 from app.schemas import Utterance
 
+log = logging.getLogger("mock_ears")
 ROOT = Path(__file__).resolve().parents[2]
 SPEECH = ("SessionStart", "Utterance", "Pause")
 
@@ -52,7 +54,14 @@ def schedule(events) -> list:
 
 async def run(bus, fixture: Path | None = None, speed: float | None = None):
     fixture = Path(fixture or default_fixture())
-    speed = speed or float(os.environ.get("SPEED", "1"))
+    if not speed:
+        try:
+            speed = float(os.environ.get("SPEED", "1"))
+        except ValueError:
+            speed = 0.0
+    if not speed > 0:                      # 0 divided by zero on the first event (then a crash loop); < 0 ran backwards
+        log.warning("speed %r (SPEED=%r) is not a number > 0: replaying at 1x", speed, os.environ.get("SPEED"))
+        speed = 1.0
     max_gap = float(os.environ.get("FIXTURE_MAX_GAP", MAX_GAP_S))
     await asyncio.sleep(float(os.environ.get("MOCK_EARS_DELAY", "0.3")))   # let other modules subscribe first
     while True:

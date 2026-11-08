@@ -15,15 +15,37 @@ if "pytest" not in sys.modules and os.environ.get("DEBATE_REF_NO_DOTENV") != "1"
         pass
 
 
+TRUE_WORDS, FALSE_WORDS = {"1", "true", "yes", "on"}, {"0", "false", "no", "off", ""}
+
+
+def _warn(name: str, raw: str, used) -> None:
+    """Loud, not silent: during venue tuning a typo must not look like it took effect. stderr, because config is
+    imported before logging is set up."""
+    print(f"config: ignoring {name}={raw!r} (not a valid {type(used).__name__}): using {used!r}", file=sys.stderr)
+
+
 def _env(name: str, default):
     raw = os.environ.get(name)
     if raw is None:
         return default
     if isinstance(default, bool):
-        return raw.strip().lower() in ("1", "true", "yes", "on")
+        word = raw.strip().lower()
+        if word not in TRUE_WORDS | FALSE_WORDS:
+            _warn(name, raw, False)
+        return word in TRUE_WORDS
     try:
+        if isinstance(default, int):
+            try:
+                return int(raw)
+            except ValueError:
+                f = float(raw)                       # "4.0" is a fine int; "4.5" is not
+                if not f.is_integer():
+                    raise
+                return int(f)
         return type(default)(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        if raw.strip():                              # an empty value is just "not set"
+            _warn(name, raw, default)
         return default
 
 

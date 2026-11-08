@@ -52,6 +52,8 @@ async def run(bus):
                 bus.publish(c, src="mock_brain")
             snapshot()
         elif ev.event == "Verdict":
+            if ev.claim_id not in claims:  # e.g. a check that outlived its session: nothing on screen to correct
+                continue
             verdicts[ev.claim_id] = ev
             snapshot()
         elif ev.event == "Pause":

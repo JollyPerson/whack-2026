@@ -10,8 +10,8 @@ import pytest
 
 from app import bus as busmod
 from app.bus import Bus, load_jsonl, rebase, replay
-from app.schemas import (ArgMapSnapshot, Claim, DirectorDecision, Event, Interjection, ModuleStatus, Pause,
-                         SessionStart, Utterance, Verdict, parse_event)
+from app.schemas import (ArgMapSnapshot, Claim, DirectorDecision, DirectorStatus, Event, Interjection, ModuleStatus,
+                         Pause, ResearchProgress, SessionStart, Utterance, Verdict, parse_event)
 
 EV = [{"url": "https://x.org", "title": "t", "quote": "q"}]
 
@@ -267,8 +267,8 @@ async def test_replay_last_session_cuts_idle_gaps_and_skips_module_status(tmp_pa
     b = Bus()
     s = b.subscribe("r")
     t = time.monotonic()
-    assert await asyncio.wait_for(replay(b, p, speed=1, max_gap=0.05), 2) == 3
-    assert time.monotonic() - t < 1.0                                        # 120 s + 1 s of recorded gaps -> ~0.1 s
+    assert await asyncio.wait_for(replay(b, p, speed=1, max_gap=0.05), 3) == 3
+    assert time.monotonic() - t < 1.6                       # 119 s + 1 s of recorded gaps -> ~0.1 s, + u1's 1 s of speech
     evs = drain(s)
     assert [e.event for e in evs] == ["SessionStart", "Utterance", "Interjection"] and evs[0].motion == "judging"
     u, ij = evs[1], evs[2]
@@ -280,3 +280,79 @@ async def test_replay_last_session_cuts_idle_gaps_and_skips_module_status(tmp_pa
     assert [e.event for e in drain(s2)].count("SessionStart") == 2
     with pytest.raises(FileNotFoundError):
         await replay(Bus(), tmp_path / "missing.jsonl")
+
+
+# ----------------------------------------------------------------------------- hardening regressions: core
+def test_history_cap_keeps_the_latest_singletons(monkeypatch):
+    """ArgMapSnapshot/ResearchProgress/DirectorStatus compact into the slot of their FIRST publish, so the cap trimmed
+    the freshest state first: a refreshed dashboard lost the research status and the argument map."""
+    monkeypatch.setattr(busmod, "HISTORY_MAX", 10)
+    b = Bus()
+    b.publish(SessionStart(motion="m"))
+    b.publish(ResearchProgress(stage="ready", done=20, total=20))
+    b.publish(ArgMapSnapshot(version=1))
+    b.publish(DirectorStatus())
+    for i in range(12):
+        b.publish(Pause(speaker=str(i)))
+    b.publish(ArgMapSnapshot(version=2))
+    h = b.history
+    assert {"SessionStart", "ResearchProgress", "DirectorStatus", "ArgMapSnapshot"} <= {e.event for e in h}
+    assert len(h) <= 10 and [e.version for e in h if e.event == "ArgMapSnapshot"] == [2]   # still one slot each
+
+
+def test_last_session_skips_a_trailing_session_without_speech():
+    """Clicking New debate after the golden run left a last session of just a SessionStart: replay played 1 event
+    and reported a green 'finished'."""
+    evs = [parse_event(d) for d in [
+        {"event": "SessionStart", "motion": "golden", "ts": 100.0},
+        {"event": "Utterance", "id": "u1", "speaker": "A", "text": "one", "ts": 101.0},
+        {"event": "SessionStart", "motion": "empty", "ts": 130.0},
+        {"event": "DirectorStatus", "ts": 131.0},
+    ]]
+    assert [getattr(e, "motion", e.event) for e in busmod.last_session(evs)] == ["golden", "Utterance"]
+    no_speech = [parse_event(d) for d in [{"event": "SessionStart", "motion": "a", "ts": 1.0},
+                                          {"event": "Claim", "id": "c1", "speaker": "A", "text": "x", "ts": 2.0},
+                                          {"event": "SessionStart", "motion": "b", "ts": 3.0}]]
+    assert [e.event for e in busmod.last_session(no_speech)] == ["SessionStart"]      # nothing better: as before
+    assert busmod.last_session([]) == []
+
+
+async def test_replay_of_a_log_ending_with_a_session_start_plays_the_debate(tmp_path):
+    p = tmp_path / "golden.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in [
+        {"event": "SessionStart", "motion": "golden", "ts": 100.0},
+        {"event": "Utterance", "id": "u1", "speaker": "A", "text": "one", "ts": 101.0},
+        {"event": "Pause", "speaker": "A", "ts": 102.0},
+        {"event": "Utterance", "id": "u2", "speaker": "B", "text": "two", "ts": 103.0},
+        {"event": "SessionStart", "motion": "new debate", "ts": 130.0},
+    ]))
+    b = Bus()
+    s = b.subscribe("r")
+    assert await asyncio.wait_for(replay(b, p, speed=1000), 2) == 4
+    assert [getattr(e, "motion", None) for e in drain(s) if e.event == "SessionStart"] == ["golden"]
+
+
+async def test_replay_gap_cut_never_counts_a_finals_speech_as_silence(tmp_path):
+    """Finals-only speech (ears bridge, fake_debate, --only Utterance Pause): the ts gap before a final includes its
+    whole utterance, so long utterances were 'cut' and replayed t_start landed before earlier events."""
+    p = tmp_path / "finals.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in [
+        {"event": "SessionStart", "motion": "m", "ts": 100.0},
+        {"event": "Utterance", "id": "u1", "speaker": "A", "text": "long", "t_start": 100.5, "t_end": 112.0, "ts": 112.2},
+        {"event": "Pause", "speaker": "A", "t": 112.5, "ts": 112.5},
+        {"event": "Utterance", "id": "u2", "speaker": "B", "text": "reply", "t_start": 113.5, "t_end": 125.0, "ts": 125.2},
+        {"event": "Utterance", "id": "u3", "speaker": "A", "text": "after a break", "t_start": 185.0, "t_end": 186.0,
+         "ts": 186.2},
+    ]))
+    b = Bus()
+    s = b.subscribe("r")
+    assert await asyncio.wait_for(replay(b, p, speed=100), 5) == 5
+    evs = drain(s)
+    for prev, ev in zip(evs, evs[1:]):
+        assert ev.ts > prev.ts and (ev.event != "Utterance" or ev.t_start >= prev.ts - 1e-6), (prev, ev)
+    start, u1, pause, u2, u3 = evs
+    rec = lambda a, b: (b - a) * 100                                          # noqa: E731  replayed -> recorded s
+    assert rec(u1.t_start, u1.ts) == pytest.approx(11.7, abs=0.01)           # speech keeps its length
+    assert rec(pause.ts, u2.ts) == pytest.approx(12.7, abs=0.01)
+    assert rec(u2.ts, u3.t_start) == pytest.approx(5.0, abs=0.01)            # a real 59.8 s silence is still cut
+    assert busmod.gap_offsets([0, 10, 30], 5, begins=[0, 1, 29]) == [0, 0, 14]
