@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.evidence.checks import Guarded, Source
 from app.schemas import Evidence
 from eval import eval_verdicts as ev
@@ -155,7 +157,6 @@ async def test_save_evidence_keeps_the_old_file_when_retrieval_fails(tmp_path, m
     monkeypatch.setattr(ev, "SAVED", saved)
     monkeypatch.setattr(ev, "_retrieve", retrieve)
     monkeypatch.setattr(ev, "make_embedder", lambda: None)
-    import pytest
     with pytest.raises(SystemExit):
         await ev.save_evidence([ROW, {**ROW, "gid": "h"}])
     assert saved.read_text() == '{"gid": "hand", "sources": []}\n' and [p.name for p in tmp_path.iterdir()] == ["saved.jsonl"]

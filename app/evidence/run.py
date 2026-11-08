@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app import config, latency
-from app.brain.llm import LLMError, LLMTimeout
+from app.brain.llm import LLMInvalid, LLMRefusal
 from app.evidence import preresearch
 from app.evidence.checks import Guarded, Source
 from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
@@ -69,11 +69,11 @@ class Checker:
         sources = await self.retrieve(claim)
         outcome.retrieved_at = time.time()
         if sources:
+            # Other sources may still settle a refusal or a cut-short answer. A timeout leaves too little of the budget
+            # for the web, and a rate limit, bad key or outage would only fail again there, so those end the check.
             try:
                 outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
-            except LLMTimeout:
-                raise                           # too little of the budget is left for the web
-            except LLMError as e:               # a refusal or a cut-short answer: other sources may still settle it
+            except (LLMInvalid, LLMRefusal) as e:
                 log.warning("index verdict failed, trying the web: %r", e)
                 failed = e
         if outcome.guarded.label == "unverifiable" and web and self.searcher is not None:

@@ -427,12 +427,39 @@ RAIL = "Passenger fares brought in £11.2 billion in the year to March."
 RAIL_SRC, RAIL_QUOTE = [Source("https://orr.gov.uk/rail", "Rail finance", RAIL)], "Passenger fares brought in £11.2 billion"
 
 
-def test_figure_given_without_its_scale_word_is_compared():
-    """FACT-CARDS WRONG #8: the model writes 2 and 11.2 with unit "billion pounds"; both mean billions."""
-    g = apply_guards(raw(label="contradicted", quote=RAIL_QUOTE, claimed=2, actual=11.2, unit="billion pounds"),
+@pytest.mark.parametrize("unit,spoken", [
+    ("billion pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("billions of pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("£", "£11.2 billion, not £2 billion"),
+    ("GBP", "£11.2 billion, not £2 billion"),
+    ("£bn", "£11.2 billion, not £2 billion"),
+    ("£ billion", "£11.2 billion, not £2 billion"),
+    ("", "11.2 billion, not 2 billion"),
+])
+def test_figure_given_without_its_scale_word_is_compared_and_said_with_it(unit, spoken):
+    """FACT-CARDS WRONG #8: the model writes 2 and 11.2 for "£2 billion" and "£11.2 billion". The scale comes from
+    the text, never from the model's free-text unit, so the referee never says "£11.2, not £2"."""
+    from app.brain import voice
+    g = apply_guards(raw(label="contradicted", quote=RAIL_QUOTE, claimed=2, actual=11.2, unit=unit),
                      "Rail fares only bring in about £2 billion a year", RAIL_SRC)
     assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
-    assert (g.numeric.claimed, g.numeric.actual) == (2, 11.2)
+    assert (g.numeric.claimed, g.numeric.actual) == (2e9, 11.2e9)
+    assert voice.render("correction", verdict=g) == f"Point of fact: GOV.UK puts that at {spoken}."
+
+
+def test_figures_in_millions_are_published_whole():
+    from app.brain import voice
+    quote = "About 4.1m people use the bus every day"
+    g = apply_guards(raw(label="contradicted", quote=quote, claimed=5, actual=4.1, unit="people"),
+                     "5m people ride the bus daily", [Source("https://ons.gov.uk/bus", "Bus use", quote + ".")])
+    assert (g.numeric.claimed, g.numeric.actual, g.numeric.unit) == (5e6, 4.1e6, "people") and g.notes == []
+    assert "4.1 million people, not 5 million people" in voice.render("correction", verdict=g)
+
+
+def test_infinite_figure_is_dropped():
+    g = apply_guards(raw(claimed=float("inf"), actual=float("inf")), "Bus use outside London fell by 27%", SRC)
+    assert g.numeric is None and g.notes == ["numeric_dropped", "capped"] and g.label == "supported"
 
 
 @pytest.mark.parametrize("text,quote,actual", [
@@ -495,6 +522,14 @@ def test_load_drops_vectors_that_do_not_match_the_chunks(tmp_path):
     np.save(tmp_path / "m.npy", np.eye(5, dtype="float32"))
     idx = EvidenceIndex.load(tmp_path / "m")
     assert idx.vectors is None and idx.search("bus use", 3, query_vector=[0, 0, 0, 0, 1])
+
+
+def test_unreadable_vectors_leave_the_chunks_for_bm25(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    (tmp_path / "m.npy").write_bytes(b"\x93NUMPY truncated")
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and len(idx) == 3 and idx.search("bus use", 3)
 
 
 def test_save_leaves_no_temporary_files(tmp_path):
@@ -568,13 +603,17 @@ async def test_index_model_error_with_no_web_answer_is_still_an_error(web_on):
         await Checker(FakeLLM(LLMRefusal("no")), FakeSearch([]), index=index).check("Bus use outside London fell", web=web_on)
 
 
-async def test_index_model_timeout_does_not_spend_the_rest_on_the_web():
-    from app.brain.llm import LLMTimeout
+@pytest.mark.parametrize("error", ["timeout", "HTTP 429"])
+async def test_index_model_timeout_or_outage_does_not_spend_the_rest_on_the_web(error):
+    """A timeout leaves too little budget; a rate limit, bad key or outage would fail again on the same key."""
+    from app.brain.llm import LLMError, LLMTimeout
+    failure = LLMTimeout("slow") if error == "timeout" else LLMError(error)
     web = FakeSearch([{"url": "https://ons.gov.uk/a", "title": "ONS", "text": TEXT}])
     index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
-    with pytest.raises(LLMTimeout):
-        await Checker(FakeLLM(LLMTimeout("slow"), raw()), web, index=index).check("Bus use outside London fell")
-    assert web.calls == 0
+    llm = FakeLLM(failure, raw())
+    with pytest.raises(type(failure)):
+        await Checker(llm, web, index=index).check("Bus use outside London fell")
+    assert web.calls == 0 and llm.calls == 1
 
 
 # --- regressions: sessions
@@ -628,9 +667,10 @@ async def test_new_motion_cancels_the_previous_research():
         if cancelled:
             break
         await asyncio.sleep(.01)
-    task.cancel()
-    for t in list(mod.tasks):
+    pending = [task, *mod.tasks]
+    for t in pending:
         t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
     assert cancelled and all("Motion A" in q for q in cancelled)
 
 
@@ -669,7 +709,8 @@ async def test_research_that_finds_nothing_is_not_saved(tmp_path, monkeypatch):
     mod = EvidenceModule(bus, FakeLLM(raw()), Down())
     await mod.start_session("Motion C")
     assert not preresearch.index_path("Motion C").with_suffix(".json").exists() and mod.checker.index is None
-    assert [p.stage for p in drain(sub)][-1] == "error"
+    stages = [p.stage for p in drain(sub)]
+    assert stages[-1] == "error" and "ready" not in stages     # the dashboard never flashes "ready" first
 
 
 async def test_empty_saved_index_is_researched_again(tmp_path, monkeypatch):

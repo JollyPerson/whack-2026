@@ -5,9 +5,11 @@ confidence only reaches the Director's speaking threshold (0.75) when the eviden
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Optional
 
 from app.schemas import Evidence, Numeric
@@ -25,6 +27,7 @@ _QUOTES = {**dict.fromkeys(map(ord, "‘’‚‛"), "'"), **dict.fromkeys(map(o
 _NUMBER = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\d)(?:\s*(thousand|million|billion|trillion|bn|m|k)(?![a-z]))?",
                      re.I)
 _SCALE = {"thousand": 1e3, "k": 1e3, "million": 1e6, "m": 1e6, "billion": 1e9, "bn": 1e9, "trillion": 1e12}
+_UNIT_SCALE = re.compile(r"(?<![a-z])(?:(?:thousand|million|billion|trillion)s?(?:\s+of\b)?|bn|mn|tn|m|k)(?![a-z])", re.I)
 _COUNT = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
           "nine": 9, "ten": 10, "twenty": 20, "fifty": 50, "hundred": 100}
 _PART = {"half": 2, "halves": 2, "third": 3, "thirds": 3, "quarter": 4, "quarters": 4, "fifth": 5, "fifths": 5,
@@ -180,13 +183,28 @@ def _checked_numeric(raw: dict, claim_text: str, quote: str) -> Optional[Numeric
         return None
     if isinstance(claimed, bool) or isinstance(actual, bool):
         return None
+    if not (math.isfinite(claimed) and math.isfinite(actual)):
+        return None                         # json.loads reads Infinity, and an infinite figure is "close" to any other
     # The model's numbers must be the ones actually said and quoted, on one basis: 2 and 11.2 for "£2 billion" and
     # "£11.2 billion" are compared, 3.2 against 3.2e9 never is.
     bases = _bases(claimed, claim_text) & _bases(actual, quote)
     if not bases or (1.0 not in bases and len(bases) > 1):
         return None
+    unit = str(raw.get("unit") or "")
+    if 1.0 not in bases:                    # published whole, so the scale is said even when the unit is just "£"
+        (scale,) = bases
+        return Numeric(claimed=_scaled(claimed, scale), actual=_scaled(actual, scale), unit=_without_scale(unit))
     if 0 < claimed <= 1 < actual and number_appears(claimed * 100, claim_text):
         claimed *= 100                      # "three-quarters" against a quoted 40%: compare 75 with 40
     if 0 < actual <= 1 < claimed and number_appears(actual * 100, quote):
         actual *= 100
-    return Numeric(claimed=claimed, actual=actual, unit=str(raw.get("unit") or ""))
+    return Numeric(claimed=claimed, actual=actual, unit=unit)
+
+
+def _scaled(value: float, scale: float) -> float:
+    return float(Decimal(str(value)) * int(scale))      # 4.1 million is 4100000, not 4099999.9999999995
+
+
+def _without_scale(unit: str) -> str:
+    """Drop the scale word ("billion pounds" -> "pounds", "£bn" -> "£"): the published figure carries it now."""
+    return " ".join(_UNIT_SCALE.sub(" ", unit).split())

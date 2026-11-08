@@ -102,7 +102,8 @@ async def build_index(motion: str, searcher, llm=None, embedder=None, progress: 
     report("embedding", 0, len(chunks), f"{len(pages)} pages")
     vectors = await asyncio.to_thread(build_vectors, chunks, embedder)
     index = EvidenceIndex(chunks, vectors, embedder.name if embedder and vectors is not None else "")
-    report("ready", len(chunks), len(chunks), f"{len(pages)} pages")
+    if chunks:                                  # an empty index isn't ready: the caller reports the error
+        report("ready", len(chunks), len(chunks), f"{len(pages)} pages")
     return index
 
 

@@ -172,10 +172,14 @@ class EvidenceIndex:
         chunks, vectors = data["chunks"], None
         if path.with_suffix(".npy").exists():
             import numpy as np
-            vectors = np.load(path.with_suffix(".npy"))
-            if vectors.ndim != 2 or len(vectors) != len(chunks):
-                log.warning("%s: %s vectors for %d chunks, using BM25 only", path.name, vectors.shape, len(chunks))
-                vectors = None
+            try:
+                vectors = np.load(path.with_suffix(".npy"))
+            except Exception as e:              # the chunks are fine: answer from BM25 rather than research again
+                log.warning("%s: unreadable vectors, using BM25 only: %r", path.name, e)
+            else:
+                if vectors.ndim != 2 or len(vectors) != len(chunks):
+                    log.warning("%s: %s vectors for %d chunks, using BM25 only", path.name, vectors.shape, len(chunks))
+                    vectors = None
         return cls(chunks, vectors, data.get("embedder", ""))
 
 
