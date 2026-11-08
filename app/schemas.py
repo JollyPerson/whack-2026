@@ -232,7 +232,7 @@ class Verdict(Event):
     explanation: str = ""
     latency_ms: Annotated[int, BeforeValidator(_int)] = 0   # verdict emit - speech end of the source utterance
     # additions (optional) -----------------------------------------------------------------
-    via: str = "none"              # "index" | "web" | "cache" | "timeout" | "none" | ...
+    via: str = "none"              # "index" | "web" | "deep" | "cache" | "timeout" | "none" | ...
     short_fact: str = ""           # <= 10 words the moderator can say ("unemployment was 4.2%")
     numeric: Optional[Numeric] = None
     marks: Marks = Field(default_factory=dict)

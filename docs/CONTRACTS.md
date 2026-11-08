@@ -53,7 +53,6 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 | `ArgMapSnapshot` | B → D | — | full map: `nodes`, `edges`, `score{prop,opp}`, `call`, `turns`, `nonresponsive` |
 | `DirectorDecision` | B → D (reasoning panel), log | — | `key`, `kind`, `action` (candidate\|held\|fired\|skipped\|dropped), `reason`, `score` |
 | `DirectorStatus` | B → D (status chip), ~1 Hz | — | `floor_open`, `tts_busy`, `cooldown_left_s`, `muted`, `aggr`, `pending`, `pressure` |
-<<<<<<< HEAD
 | `ResearchProgress` | C → D | — | `stage` (searching\|embedding\|facts\|ready\|error), `done`, `total`, `detail`, `motion` |
 | `TTSState` | D (the one `?audio=1` tab) → A, B | `speaking` | `interjection_id` — `speaking: true` means the referee is **audible now** (sent when playback actually starts, `false` once it has stopped); gate on this event only |
 | `Control` | dashboard/CLI → all | `flag` | `value` — flags: `tts`, `director`, `web_fallback`, `interims`, `agent_speaking`, `mute`, `force_next`, `veto`, `aggr` (1–5), `time` |
@@ -65,7 +64,7 @@ downgraded to `unverifiable` on parse. Every verdict shows its source.
 **Upserts** (what the Snapshot, the reference dashboard and the argument map keep):
 - A re-sent `Claim` with the same `id` replaces the old one.
 - A later `Verdict` for the same `claim_id` replaces the earlier one on screen and in the map, e.g. an index
-  verdict followed by a web verdict. Spoken lines are different: the referee gives each claim at most one
+  verdict followed by a web verdict, or a `via="deep"` verdict from the background deep check about 30 s later. Spoken lines are different: the referee gives each claim at most one
   verdict line (correction, context or confirm). A better verdict that arrives after that line updates the chip
   but is not spoken. A source request ("what's your source?") doesn't count as a verdict line, so a later
   verdict can still be spoken after one.
