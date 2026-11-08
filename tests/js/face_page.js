@@ -136,5 +136,14 @@ const LINE = {event: 'Interjection', id: 'i-1', text: 'Point of fact.'};
   p.advance(10000); await flush();              // (the old watchdog would have started i-2 by now)
   check('SessionStart drops the queue', p.audios.length === 1, p.audios.map(a => a.url));
 }
+{ // 5. ./run.sh replay of a log recorded with an audio tab open: the recorded TTSState never drives this room's view
+  const p = page(''); p.connect(); p.live(LINE);
+  const until = p.state().banner.until;
+  p.live({event: 'TTSState', speaking: true, interjection_id: 'i-1', src: 'replay:face:audio'});
+  p.live({event: 'TTSState', speaking: false, interjection_id: 'i-1', src: 'replay:face:audio'});
+  check('replayed TTSState ignored', p.state().S.tts === null && p.state().banner.until === until && !p.speakingShown(), p.state().S.tts);
+  p.live({event: 'TTSState', speaking: true, interjection_id: 'i-1', src: 'face:audio'});
+  check('live TTSState still counts', p.speakingShown());
+}
 console.log(failures ? `${failures} FAILED` : 'all passed');
 Deno.exit(failures ? 1 : 0);

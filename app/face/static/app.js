@@ -65,6 +65,7 @@ function apply(e, live) {
     case 'DirectorDecision': S.considered.add(e.key || e.claim_id); S.decisions.push(e); S.decisions.splice(0, S.decisions.length - 30); break;
     case 'DirectorStatus': S.dstatus = e; break;
     case 'TTSState':
+      if (/^replay(:|$)/.test(e.src || '')) break;   // a recorded tab's voice (./run.sh replay): only this room's counts
       S.tts = e;
       if (!e.speaking && banner) banner.until = Math.min(banner.until, Date.now() + 4000);
       break;

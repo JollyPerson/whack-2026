@@ -21,12 +21,12 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import pytest
 
-from app.bus import Bus
+from app.bus import Bus, replay
 from app.face import run as face_run, speech, tts as ttsmod
 from app.face.speech import state_for
 from app.face.tts import TTS, ElevenHTTP, ElevenTTD, Espeak, Provider, TTSError, build_tts, speakable
 from app.main import build_app
-from app.schemas import DirectorDecision, Interjection
+from app.schemas import DirectorDecision, Interjection, TTSState
 from tests.test_main import make_client  # noqa: F401  (fixture)
 
 KEYS = {"op", "id", "text", "audio", "title", "on", "clear"}
@@ -411,6 +411,23 @@ def test_events_map_to_commands(make_client, tmp_path):
     assert poll(c, body["cursor"], ep)["cmds"] == []           # cursor moves on: nothing twice
     c.post("/session", json={"motion": "m"})
     assert poll(c, body["cursor"], ep)["cmds"] == [{**blank, "op": "stop", "clear": True}]   # SessionStart
+
+
+async def test_replayed_tts_state_never_moves_the_mouth(tmp_path):
+    """./run.sh replay re-publishes a recorded log's TTSState (src "replay:face:audio") while the live ?audio=1 tab
+    speaks the same replayed lines and sends its own: only this process's player drives the avatar's mouth."""
+    log = tmp_path / "golden.jsonl"
+    rows = [{"event": "SessionStart", "motion": "m", "ts": 100.0},
+            {"event": "Interjection", "id": "i-1", "text": "Point of fact.", "ts": 100.1, "src": "brain"},
+            {"event": "TTSState", "speaking": True, "interjection_id": "i-1", "ts": 100.2, "src": "face:audio"},
+            {"event": "TTSState", "speaking": False, "interjection_id": "i-1", "ts": 100.3, "src": "face:audio"},
+            {"event": "TTSState", "speaking": False, "ts": 100.4}]                  # no src: replayed as "replay"
+    log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    bus, tts = Bus(), TTS([], cache_dir=tmp_path)
+    assert await replay(bus, log, speed=20) == 5
+    bus.publish(TTSState(speaking=True, interjection_id="i-1"), src="face:audio")   # the live player
+    cmds = [(c["op"], c["on"]) for e in bus.history for c in speech.to_cmds(e, tts, time.time())]
+    assert cmds == [("stop", False), ("say", False), ("talk", True)]
 
 
 def test_say_audio_is_empty_without_a_server_voice(make_client, tmp_path):
