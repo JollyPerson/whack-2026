@@ -9,8 +9,10 @@
   --text: clamp(14px, 1.05vw, 26px);
   --horizon: 62vh;
   /* platforms: centre x, feet line y, width (arena.js sets these from ?for= / ?against=) */
-  --fx: 23.44vw; --fy: 88vh; --fw: 25vw;
-  --ax: 76.56vw; --ay: 88vh; --aw: 25vw;
+  --fx: 23.44vw; --fy: 94vh; --fw: 25vw;
+  --ax: 76.56vw; --ay: 94vh; --aw: 25vw;
+  /* the centre column: centre x, top, width, height (arena.js sets these from ?centre=) */
+  --cx: 50vw; --cy: 14vh; --cw: 46vw; --ch: 28.5vh;
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -49,11 +51,11 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 .dot { display: inline-block; width: .6em; height: .6em; border-radius: 50%; background: var(--unk); vertical-align: middle; }
 .dot.open { background: var(--ok); } .dot.connecting { background: var(--warn); } .dot.closed { background: var(--bad); }
 
-/* ---------- the two platforms ---------- */
+/* ---------- the two platforms: a disc under each avatar's feet, nothing else under the avatar ---------- */
 .for { --x: var(--fx); --y: var(--fy); --w: var(--fw); --side: var(--prop); }
 .against { --x: var(--ax); --y: var(--ay); --w: var(--aw); --side: var(--opp); }
 
-/* a soft spotlight cone from the rig down to the disc: light only, the avatar and its bubble stand in it */
+/* a soft spotlight cone from the rig down to the disc: light only, the avatar stands in it */
 .spot { position: absolute; z-index: 1; left: var(--x); top: 0; width: calc(var(--w) * 1.1); height: var(--y);
   transform: translateX(-50%); pointer-events: none; clip-path: polygon(42% 0, 58% 0, 100% 100%, 0 100%);
   background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--side) 15%, transparent) 75%,
@@ -63,8 +65,7 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 @keyframes spot-breathe { 50% { opacity: .55; } }
 
 .platform { position: absolute; z-index: 2; left: var(--x); top: var(--y); bottom: 0; width: var(--w);
-  transform: translateX(-50%); display: flex; flex-direction: column; align-items: center;
-  padding: calc(var(--w) * .028) 0 .35em; transition: opacity 1.2s, filter 1.2s; }
+  transform: translateX(-50%); transition: opacity 1.2s, filter 1.2s; }
 /* the riser: a drum from the disc down to the floor */
 .riser { position: absolute; inset: 0; z-index: -2;
   background: linear-gradient(180deg, color-mix(in srgb, var(--side) 30%, var(--raise)),
@@ -81,32 +82,41 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 .against .disc .rimlight { animation-delay: -2.5s; }
 @keyframes rim { 50% { opacity: .65; } }
 
-.plate { position: relative; flex: none; padding: .12em .9em; border-radius: .4em; background: var(--side); color: #fff;
-  font-size: .8em; font-weight: 650; letter-spacing: .03em; white-space: nowrap; box-shadow: 0 .2em 0 rgba(0, 0, 0, .35); }
-.plate b { font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+/* ---------- each bot's panel, on the OUTER side of its avatar: the avatar's bubble is beside its head on the inner side,
+   growing downwards. It ends a little above the feet line and keeps --clear (26% of the platform's width, about half
+   the avatar's width plus its idle sway) from the avatar's centre line. ---------- */
+.panel { position: absolute; z-index: 3; --clear: calc(var(--w) * .26);
+  bottom: calc(100vh - var(--y) + var(--w) * .06); max-height: calc(var(--y) - 50vh);
+  display: flex; flex-direction: column; justify-content: flex-end; gap: .35em;
+  transition: opacity 1.2s, filter 1.2s; }
+.panel.for { left: 1.2vw; right: calc(100vw - var(--x) + var(--clear)); align-items: flex-end; }
+.panel.against { right: 1.2vw; left: calc(var(--x) + var(--clear)); align-items: flex-start; }
+.plate { position: relative; flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  padding: .12em .7em; border-radius: .4em; background: var(--side); color: #fff;
+  font-size: .8em; font-weight: 650; letter-spacing: .02em; white-space: nowrap; box-shadow: 0 .2em 0 rgba(0, 0, 0, .35); }
+.plate b { font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
 
-/* the card under the plate: the bot's latest citation, or its latest line; it shrinks to the room left */
-.card { position: relative; flex: 0 1 auto; min-height: 0; overflow: hidden; width: calc(100% - 1.6em); max-width: 30em;
-  margin-top: .3em; padding: .3em .7em .35em; border-radius: .6em; background: var(--panel); color: var(--fg);
-  border: 1px solid var(--line); border-top: .22em solid var(--side); font-size: .78em; line-height: 1.3;
+/* the card under the plate: the bot's latest citation, or its latest line */
+.card { position: relative; flex: 0 1 auto; min-height: 0; overflow: hidden; width: 100%;
+  padding: .35em .75em .45em; border-radius: .6em; background: var(--panel); color: var(--fg);
+  border: 1px solid var(--line); border-top: .22em solid var(--side); font-size: 1em; line-height: 1.3;
   box-shadow: 0 .4em 1.2em rgba(0, 0, 0, .35); }
 .card.enter { animation: card-in .5s cubic-bezier(.2, 1.3, .4, 1) both; }
 @keyframes card-in { from { transform: translateY(.8em); opacity: 0; } to { transform: none; opacity: 1; } }
-.card .row { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
-.card .tag { flex: none; border-radius: 1em; padding: 0 .55em; font-size: .82em; font-weight: 800; letter-spacing: .04em;
+.card .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 .5em; min-width: 0; }
+.card .tag { flex: none; border-radius: 1em; padding: 0 .55em; font-size: .8em; font-weight: 800; letter-spacing: .04em;
   text-transform: uppercase; color: #0d1117; background: var(--unk); }
-.card .tag.src { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none;
+.card .tag.src { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none;
   letter-spacing: 0; background: var(--side); color: #fff; }
 .card .tag.src::before { content: '📄 '; }
 .card .tag.ai { background: #bc8cff; }
 .card .tag.dance { background: var(--warn); }
 .card .music { color: var(--mute); font-size: .9em; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card .title { min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card.dance .title { display: block; margin-top: .15em; }
-.card .quote, .card .text { margin: .15em 0 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .title { margin: .2em 0 0; font-weight: 700; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .quote, .card .text { margin: .2em 0 0; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .card .quote { padding-left: .6em; border-left: .2em solid var(--side); font-style: italic; color: var(--mute); }
-.card.line .text { -webkit-line-clamp: 3; }
-.card.dance .title { font-size: 1.1em; white-space: normal; }
+.card.line .text { -webkit-line-clamp: 6; }
+.card.dance .title { font-size: 1.1em; }
 
 /* ---------- the final screen: judging, then the winner's platform glows ---------- */
 .platform.judging .rimlight { animation: rim 1.6s ease-in-out infinite; }
@@ -118,25 +128,28 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 .platform.win .rimlight { stroke-width: 6; filter: drop-shadow(0 0 14px var(--side)) drop-shadow(0 0 4px #fff);
   animation: win-glow 2.4s ease-in-out infinite; }
 .platform.win .disc .top { fill: color-mix(in srgb, var(--side) 45%, var(--panel)); }
-.platform.win .plate { box-shadow: 0 0 1.2em var(--side), 0 .2em 0 rgba(0, 0, 0, .35); }
+.panel.win .plate { box-shadow: 0 0 1.2em var(--side), 0 .2em 0 rgba(0, 0, 0, .35); }
 .platform.win.reveal .disc { animation: win-pop 1s cubic-bezier(.2, 1.5, .4, 1) both; }
-.platform.lose { filter: saturate(.4) brightness(.75); }
+.platform.lose, .panel.lose { filter: saturate(.4) brightness(.75); }
 @keyframes win-glow { 50% { opacity: .75; } }
 @keyframes win-pop { 0% { filter: brightness(1); } 40% { filter: brightness(1.8); } 100% { filter: brightness(1); } }
 
-/* ---------- the centre column: between the platforms, below the bubbles ---------- */
-.centre { position: absolute; z-index: 2; top: 46vh; bottom: 1em; display: flex; flex-direction: column; min-width: 0;
-  left: calc(var(--fx) + var(--fw) / 2 + 1.5vw); right: calc(100vw - var(--ax) + var(--aw) / 2 + 1.5vw); }
-.live { display: flex; flex-direction: column; gap: .35em; min-height: 0; }
+/* ---------- the centre column: under the header, above the tops of the bubbles (which grow downwards from about
+   44% of the height into the middle), so neither avatar nor bubble ever covers it ---------- */
+.centre { position: absolute; z-index: 2; left: var(--cx); top: var(--cy); width: var(--cw); height: var(--ch);
+  transform: translateX(-50%); display: flex; flex-direction: column; min-width: 0; }
+.live { display: flex; flex-direction: column; gap: .35em; min-height: 0; overflow: hidden; }
 .centre-title { text-align: center; font-size: .72em; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--mute); }
 .uturns { display: flex; justify-content: space-between; align-items: baseline; padding: 0 .3em; font-weight: 800; }
 .uturns .prop { color: var(--prop); } .uturns .opp { color: var(--opp); }
 .uturns .label { font-size: .7em; font-weight: 600; color: var(--mute); text-transform: uppercase; letter-spacing: .08em; }
-.checks { display: flex; flex-direction: column; gap: .35em; min-height: 0; overflow: hidden; }
+/* two columns when the column is wide (the default), one when ?centre= makes it narrow; newest first */
+.checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17em), 1fr)); align-content: start;
+  gap: .4em .5em; min-height: 0; overflow: hidden; }
 .cidle { text-align: center; color: var(--mute); opacity: .6; font-size: .95em; padding: 1em; }
 .check { display: flex; align-items: center; gap: .5em; padding: .3em .6em .3em .35em; border-radius: .6em;
   background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line);
-  border-left: .3em solid var(--unk); font-size: .8em; animation: card-in .45s ease-out both; }
+  border-left: .3em solid var(--unk); min-width: 0; font-size: .85em; animation: card-in .45s ease-out both; }
 .check.prop { border-left-color: var(--prop); } .check.opp { border-left-color: var(--opp); }
 .check .body { display: flex; flex-direction: column; min-width: 0; }
 .check .head { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
@@ -162,7 +175,8 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 .verdict.prop .winner { color: var(--prop); } .verdict.opp .winner { color: var(--opp); } .verdict.draw .winner { color: var(--warn); }
 .verdict .names { font-weight: 650; }
 .verdict .margin { color: var(--mute); font-size: .85em; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
-.verdict .headline { margin-top: .4em; font-size: 1.05em; text-wrap: balance; }
+.verdict .headline { margin-top: .3em; font-size: 1.05em; text-wrap: balance;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .verdict .overall { display: flex; justify-content: center; align-items: baseline; gap: .8em; margin-top: .4em; }
 .verdict .overall b { font-size: 1.3em; } .verdict .overall .prop { color: var(--prop); } .verdict .overall .opp { color: var(--opp); }
 .verdict .overall .label { color: var(--mute); font-size: .75em; text-transform: uppercase; letter-spacing: .08em; }
@@ -173,6 +187,8 @@ h1 { max-width: 46em; margin: .1em auto 0; font-size: 1.6em; line-height: 1.15; 
 /* ---------- ?guides=1: where the avatar windows are ---------- */
 .guides { position: absolute; inset: 0; z-index: 9; pointer-events: none; }
 .guide { position: absolute; border: 2px dashed var(--warn); color: var(--warn); font-size: .75em; padding: .2em .4em; }
+.guide.bubble { border-style: dotted; border-color: var(--bad); color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 8%, transparent); }
 
 @media (prefers-reduced-motion: reduce) { *, *::before { animation-duration: 0s !important; animation-iteration-count: 1 !important;
   transition-duration: 0s !important; } }

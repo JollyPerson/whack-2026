@@ -1,5 +1,5 @@
 // The arena page (arena.js, with the stage's cast) against a fake DOM, WebSocket and clock: platform params, the
-// cards under the platforms, the centre column, the final screen's states, escaping and hidden-when-empty.
+// cards beside the avatars, the centre column, the final screen's states, escaping and hidden-when-empty.
 // Run by tests/test_face.py when deno is installed:
 //   deno run --allow-read tests/js/arena_page.js app/face/static/stage-cast.js app/face/static/arena.js
 const src = Deno.args.map(f => Deno.readTextFileSync(f)).join('\n');
@@ -57,11 +57,14 @@ const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline
                 scores: {prop: {evidence: 8, overall: 7.5}, opp: {evidence: 5, overall: 6}},
                 dances: {for: 'MMD-Conqueror', against: 'MMD-Lost One_s Weeping'}, music: {for: true, against: false}, via: 'llm'};
 
-{ // 1. platform params: px, %, defaults, junk keeps the default, guides
+{ // 1. platform and centre params: px, %, defaults, junk keeps the default, guides
   const p = page('');
   const st = p.doc.documentElement.style;
-  check('defaults: under the launcher windows', st.getPropertyValue('--fx') === '23.44vw' && st.getPropertyValue('--fy') === '88vh'
-    && st.getPropertyValue('--fw') === '25vw' && st.getPropertyValue('--ax') === '76.56vw', [st.getPropertyValue('--fx'), st.getPropertyValue('--ax')]);
+  check('defaults: under the launcher windows, feet at the window bottom', st.getPropertyValue('--fx') === '23.44vw'
+    && st.getPropertyValue('--fy') === '94vh' && st.getPropertyValue('--fw') === '25vw' && st.getPropertyValue('--ax') === '76.56vw'
+    && st.getPropertyValue('--ay') === '94vh', [st.getPropertyValue('--fy'), st.getPropertyValue('--ax')]);
+  check('defaults: centre column under the header, above the bubbles', ['--cx', '--cy', '--cw', '--ch'].map(k => st.getPropertyValue(k)).join()
+    === '50vw,14vh,46vw,28.5vh', ['--cx', '--cy', '--cw', '--ch'].map(k => st.getPropertyValue(k)));
   check('defaults: no guides', p.el('guides').hidden === true);
   const D = ['1', '2', '3'];
   check('parse: px numbers', JSON.stringify(p.parseSpot('450,950,480', D)) === '["450px","950px","480px"]');
@@ -69,18 +72,29 @@ const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline
   check('parse: mixed and explicit px', JSON.stringify(p.parseSpot('-40px,90%,500', D)) === '["-40px","90vh","500px"]');
   for (const bad of [null, '', '1,2', '1,2,3,4', 'a,b,c', '1,2,0', '1,2,-5', '1em,2,3', '1;2;3', '50%,50%,calc(1px)'])
     check(`parse: junk keeps the default (${bad})`, p.parseSpot(bad, D) === D);
+  const C = ['c'];
+  check('parse centre: x,y,w,h with %, y and h of the height', JSON.stringify(p.parseSpot('50%,10%,900,25%', C, 'xywh'))
+    === '["50vw","10vh","900px","25vh"]');
+  for (const bad of ['1,2,3', '1,2,3,4,5', '1,2,3,0', '1,2,0,4', '1,2,3,-4', '1,2,3,x'])
+    check(`parse centre: junk keeps the default (${bad})`, p.parseSpot(bad, C, 'xywh') === C);
   check('parseWin', JSON.stringify(p.parseWin('0,200,900,820', null)) === '[0,200,900,820]'
     && p.parseWin('0,200,900', 'd') === 'd' && p.parseWin('0,200,0,820', 'd') === 'd' && p.parseWin('a,b,c,d', 'd') === 'd');
-  const q = page('?for=400,900,500&against=80%,90%,20%&guides=1&againstwin=1000,100,920,900');
+  const q = page('?for=400,900,500&against=80%,90%,20%&guides=1&againstwin=1000,100,920,900&centre=960,120,600,30%');
   const s = q.doc.documentElement.style;
   check('params: set per side', s.getPropertyValue('--fx') === '400px' && s.getPropertyValue('--fy') === '900px'
     && s.getPropertyValue('--fw') === '500px' && s.getPropertyValue('--ax') === '80vw' && s.getPropertyValue('--ay') === '90vh'
     && s.getPropertyValue('--aw') === '20vw');
+  check('params: centre column', ['--cx', '--cy', '--cw', '--ch'].map(k => s.getPropertyValue(k)).join() === '960px,120px,600px,30vh');
   const g = q.el('guides');
-  check('guides: one outline per avatar window, defaults or overridden', !g.hidden && g.children.length === 2
-    && g.children[0].style.left === '0px' && g.children[0].style.width === '900px'
-    && g.children[1].style.left === '1000px' && g.children[1].style.height === '900px'
-    && g.children[1].textContent === 'Against avatar window 1000,100,920,900', g.children.map(c => c.textContent));
+  const [fw, fb, aw, ab] = g.children;
+  check('guides: one outline per avatar window, defaults or overridden', !g.hidden && g.children.length === 4
+    && fw.style.left === '0px' && fw.style.width === '900px' && fw.className === 'guide for'
+    && aw.style.left === '1000px' && aw.style.height === '900px'
+    && aw.textContent === 'Against avatar window 1000,100,920,900', g.children.map(c => c.textContent));
+  check('guides: each bubble on its inner side, from 35% of the window down', fb.className === 'guide bubble for'
+    && fb.style.left === '450px' && fb.style.width === '442px' && fb.style.top === '487px' && fb.style.height === '533px'
+    && ab.style.left === '1008px' && ab.style.width === '452px' && ab.style.top === '415px' && ab.textContent === 'Against bubble, about',
+    [fb.style, ab.style]);
   const r = page('?theme=light');
   check('theme=light', r.doc.documentElement.dataset.theme === 'light');
   check('never sends', q.ws().sent.length === 0);
@@ -92,7 +106,8 @@ const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline
   check('empty: verdict hidden, live column shown', p.el('verdict').hidden && !p.el('live').hidden);
   check('empty: waiting for a motion, side names', p.el('motion').textContent === 'Waiting for a motion'
     && p.el('spk-prop').textContent === 'Proposition' && p.el('spk-opp').textContent === 'Opposition');
-  check('empty: platforms unlit', p.el('plat-for').className === 'platform for' && p.el('plat-against').className === 'platform against');
+  check('empty: platforms unlit', p.el('plat-for').className === 'platform for' && p.el('plat-against').className === 'platform against'
+    && p.el('panel-for').className === 'panel for' && p.el('panel-against').className === 'panel against');
 }
 { // 3. cards: latest line, AI-knowledge tag, then a citation that stays until a newer citation
   const p = page(''); p.connect([p.snap(SESSION)]);
@@ -171,7 +186,8 @@ const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline
     && has(v, 'headline', RESULT.headline) && has(v, 'prop', '7.5') && has(v, 'opp', '6') && !v.some(([k]) => k === 'meta'), v);
   check('result: winner glows, loser dims', p.el('plat-for').className === 'platform for win reveal'
     && p.el('plat-against').className === 'platform against lose reveal'
-    && p.el('spot-for').className === 'spot for win' && p.el('spot-against').className === 'spot against lose');
+    && p.el('spot-for').className === 'spot for win' && p.el('spot-against').className === 'spot against lose'
+    && p.el('panel-for').className === 'panel for win' && p.el('panel-against').className === 'panel against lose');
   const f = p.card('for'), a = p.card('against');
   check('result: each card shows its bot dance', f.cls === 'card dance enter' && has(f.parts, 'tag dance', 'Victory dance')
     && has(f.parts, 'music', '♪ with music') && has(f.parts, 'title', 'MMD-Conqueror')
@@ -231,8 +247,9 @@ const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline
   p.live({event: 'Control', flag: 'screen', value: 'final'});
   p.live({event: 'DebateResult', winner: evil, margin: evil, headline: evil, scores: {prop: {overall: evil}}, dances: {for: evil}, music: {}});
   const v = parts(p.el('verdict'));
-  check('escaping: an unknown winner is a draw; a bad score is a dash', p.el('verdict').className === 'verdict draw reveal'
-    && has(v, 'headline', evil) && has(v, 'prop', '–') && has(v, 'opp', '–') && has(p.card('for').parts, 'title', evil)
+  check('escaping: an unknown winner is a draw; a string score is text, as on the dashboard; none is a dash',
+    p.el('verdict').className === 'verdict draw reveal'
+    && has(v, 'headline', evil) && has(v, 'prop', evil) && has(v, 'opp', '–') && has(p.card('for').parts, 'title', evil)
     && !v.some(([, t]) => /undefined|null|NaN/.test(t)), v);
   check('escaping: no model text in any innerHTML', !all.some(n => n.innerHTML.includes('<img')));
 }

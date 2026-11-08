@@ -5,15 +5,20 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Debate Referee · Arena</title>
 <!-- The full-screen backdrop the two side-bot avatars (Mate Engine, always on top) stand on: a lit platform per bot,
-     For (Prop's second) bottom left and Against (Opp's second) bottom right, each with a name plate and a card for the
-     bot's latest citation (or latest line); the motion and speakers on top; a calm centre column of fact checks and
-     U-turns between the platforms; the judge's verdict on the final screen. Display only: it never speaks or sends.
+     For (Prop's second) bottom left and Against (Opp's second) bottom right, a disc under the avatar's feet. Each
+     avatar's bubble is beside its head on the inner side, so each bot's panel (name plate, then a card for its latest
+     citation or latest line) is on the outer side; the motion and speakers on top; a calm centre column of fact checks
+     and U-turns (the judge's verdict on the final screen) under them, above the bubbles. Display only: it never
+     speaks or sends.
      Served at /arena (also /static/arena.html). Open it full screen (F11) behind the avatars.
      URL params: ?theme=light · ?ws=ws://host:8000/ws · ?all=1 also lists "unverifiable" checks
        ?for=x,y,w&against=x,y,w   each platform: centre x, feet line y, width. Numbers are px; with % x and w are a
-                                  share of the screen width and y of its height (default for=23.44%,88%,25% and
-                                  against=76.56%,88%,25%, i.e. 450,950,480 and 1470,950,480 px on 1920x1080)
-       ?guides=1                  dashed outlines of the avatar windows to line the platforms up at rehearsal
+                                  share of the screen width and y of its height (default for=23.44%,94%,25% and
+                                  against=76.56%,94%,25%, i.e. 450,1015,480 and 1470,1015,480 px on 1920x1080)
+       ?centre=x,y,w,h            the centre column: centre x, top, width, height, as above (default 50%,14%,46%,28.5%,
+                                  i.e. 960,151,883,308 px: under the header, above the bubbles)
+       ?guides=1                  dashed outlines of the avatar windows (and roughly where their bubbles go) to line
+                                  the platforms and the centre column up at rehearsal
        ?forwin=x,y,w,h&againstwin=x,y,w,h   those windows in px (default the launcher's 0,200,900,820 and
                                   1020,200,900,820) -->
 <link rel="stylesheet" href="/static/arena.css">
@@ -30,7 +35,7 @@
 <div id="spot-for" class="spot for" aria-hidden="true"></div>
 <div id="spot-against" class="spot against" aria-hidden="true"></div>
 
-<section id="plat-for" class="platform for" aria-label="For bot">
+<div id="plat-for" class="platform for" aria-hidden="true">
   <div class="riser" aria-hidden="true"></div>
   <svg class="disc" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
     <ellipse cx="100" cy="20" rx="99" ry="19" class="top"/>
@@ -38,11 +43,13 @@
     <ellipse cx="100" cy="20" rx="99" ry="19" class="rim" vector-effect="non-scaling-stroke"/>
     <path d="M1 20 A99 19 0 0 0 199 20" class="rimlight" vector-effect="non-scaling-stroke"/>
   </svg>
+</div>
+<aside id="panel-for" class="panel for" aria-label="For bot">
   <p class="plate"><b>For</b> · Proposition's second</p>
   <article id="card-for" class="card" hidden aria-live="polite"></article>
-</section>
+</aside>
 
-<section id="plat-against" class="platform against" aria-label="Against bot">
+<div id="plat-against" class="platform against" aria-hidden="true">
   <div class="riser" aria-hidden="true"></div>
   <svg class="disc" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
     <ellipse cx="100" cy="20" rx="99" ry="19" class="top"/>
@@ -50,9 +57,11 @@
     <ellipse cx="100" cy="20" rx="99" ry="19" class="rim" vector-effect="non-scaling-stroke"/>
     <path d="M1 20 A99 19 0 0 0 199 20" class="rimlight" vector-effect="non-scaling-stroke"/>
   </svg>
+</div>
+<aside id="panel-against" class="panel against" aria-label="Against bot">
   <p class="plate"><b>Against</b> · Opposition's second</p>
   <article id="card-against" class="card" hidden aria-live="polite"></article>
-</section>
+</aside>
 
 <section id="centre" class="centre" aria-live="polite">
   <div id="verdict" class="verdict" hidden></div>

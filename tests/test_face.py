@@ -45,7 +45,7 @@ def test_arena_page_is_served(make_client):
 
 @pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run arena.js")
 def test_arena_js_page_rules():
-    """The arena against a fake DOM: platform params, the cards under the platforms, the centre column, Judging… then
+    """The arena against a fake DOM: platform and centre params, the cards beside the avatars, the centre column, Judging… then
     the winner's glow and the dances, a draw, escaping and hidden-when-empty (tests/js/arena_page.js)."""
     root = Path(__file__).resolve().parent.parent
     static = root / "app/face/static"

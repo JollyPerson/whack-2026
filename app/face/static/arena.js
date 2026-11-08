@@ -1,9 +1,11 @@
 'use strict';
 // Arena: the full-screen backdrop the two side-bot avatars stand on (Mate Engine windows, always on top, see
-// tools/mate-bots.sh). For (Prop's second) gets a platform bottom left, Against (Opp's second) bottom right, each with a
-// name plate and a card under it: the bot's latest sourced citation (title, domain, quote), else its latest line, tagged
-// as in the dashboard's strip. The avatars draw their own bubbles above the platforms, so nothing is drawn there; the
-// centre column (latest fact checks, U-turn counts) stays between the platforms. Final screen (Control screen=final):
+// tools/mate-bots.sh). For (Prop's second) gets a platform bottom left, Against (Opp's second) bottom right, a disc
+// under the avatar's feet. Each avatar draws its bubble beside its head on the INNER side (towards the middle), growing
+// downwards, so each bot's panel (name plate, then a card: its latest sourced citation (domain, title, quote), else its
+// latest line, tagged as in the dashboard's strip) sits on the OUTER side of its avatar, and nothing is drawn under the
+// avatars. The centre column (latest fact checks, U-turn counts) sits between the header and the top of the bubbles,
+// where nothing of the avatars reaches. Final screen (Control screen=final):
 // "Judging…", then the winner's platform glows (a draw lights both), a verdict banner, and each bot's dance on its card.
 // Display only: it never sends. Model text goes in with textContent only. Protocol (Snapshot + seq + reconnect) as in
 // stage.js; the cast (Sunny, Grumble, Professor Hoot…) comes from stage-cast.js.
@@ -16,9 +18,16 @@ const JUDGE_BUSY = /^(waiting up to |judging: )/;   // the judge's ModuleStatus 
 const SIDE_NAMES = {prop: 'Proposition', opp: 'Opposition'};
 const BOTS = {for: {label: 'For', side: 'prop'}, against: {label: 'Against', side: 'opp'}};
 const MARGINS = {narrow: 'Narrow margin', clear: 'Clear margin', decisive: 'Decisive margin'};
-// Platforms sit under the launcher's default avatar windows (0,200,900,820 and 1020,200,900,820 on 1920x1080, the
-// avatar centred near the bottom of its window): centre x 450 / 1470 px, feet at 950 px, 480 px wide.
-const SPOT_DEFAULTS = {for: ['23.44vw', '88vh', '25vw'], against: ['76.56vw', '88vh', '25vw']};
+// Platforms sit under the launcher's default avatar windows (0,200,900,820 and 1020,200,900,820 on 1920x1080), the
+// avatar standing in the middle at the bottom of its window: centre x 450 / 1470 px, feet at 1015 px, 480 px wide. The
+// feet line comes from the players' logs (player.log "bubble shown ... right of the head at (x,y)"): the head bone is
+// 386-441 px above the window bottom, and the bubble's offsets (0.15 / 0.25 avatar metres = 56 / 93 px) give about
+// 373 px per avatar metre, so the head bone is 1.05-1.18 avatar metres up: the feet stand at the window bottom (1020).
+const SPOT_DEFAULTS = {for: ['23.44vw', '94vh', '25vw'], against: ['76.56vw', '94vh', '25vw']};
+// The centre column: centre x, top, width, height. The same logs put the bubbles' tops at screen y 472-541 (outer
+// corners 0.25 avatar metres above the head, KWin's 14 px included), and they grow downwards from there, into the
+// middle up to the windows' inner edges (892 / 1028 px), so the column ends at 459 px, under the header at 151 px.
+const CENTRE_DEFAULT = ['50vw', '14vh', '46vw', '28.5vh'];
 const WIN_DEFAULTS = {for: [0, 200, 900, 820], against: [1020, 200, 900, 820]};
 if (Q.get('theme') === 'light') document.documentElement.dataset.theme = 'light';
 
@@ -27,41 +36,53 @@ const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : null;
 const host = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 const clip = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim();
   return s.length <= n ? s : s.slice(0, s.lastIndexOf(' ', n - 1) > n * .6 ? s.lastIndexOf(' ', n - 1) : n - 1) + '…'; };
-const scoreText = v => typeof v === 'number' && Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : v.toFixed(1)) : '–';
+const scoreText = v => typeof v === 'number' && Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : v.toFixed(1))
+                 : typeof v === 'string' && v ? v : '–';   // as app.js's verdict card
 
 // ------------------------------------------------------------------ platform positions (URL params)
-// "x,y,w": centre x, feet line y, width. A bare number (or "px") is pixels; "%" makes x and w a share of the screen
-// width and y a share of its height. Anything else keeps the default, so a typo never hides a platform.
-function parseSpot(raw, def) {
+// "x,y,w" (a platform: centre x, feet line y, width) or, with axes 'xywh', "x,y,w,h" (the centre column: centre x,
+// top, width, height). A bare number (or "px") is pixels; "%" makes x and w a share of the screen width and y and h a
+// share of its height. Anything else, or a width or height that is not positive, keeps the default, so a typo never
+// hides anything.
+function parseSpot(raw, def, axes = 'xyw') {
   const parts = String(raw ?? '').split(',').map(s => s.trim());
-  if (raw == null || parts.length !== 3) return def;
+  if (raw == null || parts.length !== axes.length) return def;
   const out = [];
-  for (let i = 0; i < 3; i++) {
+  for (const [i, a] of [...axes].entries()) {
     const m = /^(-?\d+(?:\.\d+)?)(px|%)?$/.exec(parts[i]);
-    if (!m) return def;
-    out.push(m[2] === '%' ? `${+m[1]}${i === 1 ? 'vh' : 'vw'}` : `${+m[1]}px`);
+    if (!m || ('wh'.includes(a) && !(+m[1] > 0))) return def;
+    out.push(m[2] === '%' ? `${+m[1]}${'yh'.includes(a) ? 'vh' : 'vw'}` : `${+m[1]}px`);
   }
-  return parseFloat(out[2]) > 0 ? out : def;
+  return out;
 }
 function parseWin(raw, def) {             // "x,y,w,h" in px, as the launcher's FOR_GEOM / AGAINST_GEOM
   const n = String(raw ?? '').split(',').map(s => s.trim());
   return raw != null && n.length === 4 && n.every(x => /^-?\d+$/.test(x)) && +n[2] > 0 && +n[3] > 0 ? n.map(Number) : def;
 }
 const SPOTS = {for: parseSpot(Q.get('for'), SPOT_DEFAULTS.for), against: parseSpot(Q.get('against'), SPOT_DEFAULTS.against)};
+const CENTRE = parseSpot(Q.get('centre'), CENTRE_DEFAULT, 'xywh');
+function guide(cls, text, x, y, w, h) {
+  const g = document.createElement('div');
+  g.className = cls;
+  Object.assign(g.style, {left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, width: `${Math.round(w)}px`, height: `${Math.round(h)}px`});
+  g.textContent = text;
+  return g;
+}
 function placePlatforms() {
   const st = document.documentElement.style;
   for (const [p, k] of [['for', 'f'], ['against', 'a']]) {
     ['x', 'y', 'w'].forEach((v, i) => st.setProperty(`--${k}${v}`, SPOTS[p][i]));
   }
+  ['x', 'y', 'w', 'h'].forEach((v, i) => st.setProperty(`--c${v}`, CENTRE[i]));
   const guides = $('guides');
   guides.hidden = Q.get('guides') !== '1';
   if (guides.hidden) return;
-  guides.replaceChildren(...Object.keys(BOTS).map(p => {
-    const [x, y, w, h] = parseWin(Q.get(`${p}win`), WIN_DEFAULTS[p]), g = document.createElement('div');
-    g.className = `guide ${p}`;
-    Object.assign(g.style, {left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`});
-    g.textContent = `${BOTS[p].label} avatar window ${x},${y},${w},${h}`;
-    return g;
+  // Each avatar window, and roughly where its bubble can be (from the players' logs): from the middle of the window
+  // to its inner edge, from 35% of its height down to its bottom.
+  guides.replaceChildren(...Object.keys(BOTS).flatMap(p => {
+    const [x, y, w, h] = parseWin(Q.get(`${p}win`), WIN_DEFAULTS[p]), inner = BOTS[p].side === 'prop';
+    return [guide(`guide ${p}`, `${BOTS[p].label} avatar window ${x},${y},${w},${h}`, x, y, w, h),
+            guide(`guide bubble ${p}`, `${BOTS[p].label} bubble, about`, inner ? x + w / 2 : x + 8, y + h * .35, w / 2 - 8, h * .65)];
   }));
 }
 
@@ -160,10 +181,9 @@ function drawCard(persona, fin) {
   if (b.cite) {
     const {ev, live} = b.cite, url = safeUrl(ev.url);
     box.className = `card cite${live ? ' enter' : ''}`;
-    const row = part(box, 'div', 'row');               // one line: the source's domain, then its title
-    part(row, 'span', 'tag src', (url && host(url)) || 'Source');
-    if (ev.title) part(row, 'span', 'title', clip(ev.title, 90));
-    if (ev.quote) part(box, 'blockquote', 'quote', `“${clip(ev.quote, 170)}”`);
+    part(part(box, 'div', 'row'), 'span', 'tag src', (url && host(url)) || 'Source');   // the source's domain
+    if (ev.title) part(box, 'p', 'title', clip(ev.title, 110));
+    if (ev.quote) part(box, 'blockquote', 'quote', `“${clip(ev.quote, 200)}”`);
     return;
   }
   const {e, live} = b.line;
@@ -249,6 +269,7 @@ function draw() {
     const live = fin.mode === 'result' && fin.r.live ? ' reveal' : '';
     $(`plat-${p}`).className = `platform ${p}${glow}${glow ? live : ''}`;
     $(`spot-${p}`).className = `spot ${p}${glow}`;
+    $(`panel-${p}`).className = `panel ${p}${glow}`;
     drawCard(p, fin);
   }
   document.body.className = fin.mode === 'live' ? '' : 'on-final';
