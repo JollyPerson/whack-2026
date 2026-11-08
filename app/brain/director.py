@@ -319,8 +319,9 @@ def _add(st: State, cd: Cand, out: list, now: float, why: Optional[str] = None) 
     if why:
         _log(st, out, cd, "skipped", why)
         return
+    text = _text(st, cd, now)                     # before it is pending: a line that can't render never queues
     st.pending[cd.key] = cd
-    _log(st, out, cd, "candidate", "new", _text(st, cd, now))   # text lets D pre-synthesise TTS
+    _log(st, out, cd, "candidate", "new", text)   # text lets D pre-synthesise TTS
 
 
 def _tts(st: State, speaking: bool, now: float) -> None:

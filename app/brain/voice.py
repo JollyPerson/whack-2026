@@ -103,7 +103,10 @@ def _site_from_title(title: str) -> str:
 def source_name(evidence: Iterable[Any]) -> str:
     """Spoken name for the first usable evidence item: known domain > site name in title > title > host."""
     for e in evidence or []:
-        host = (urlparse(str(_get(e, "url", "") or "")).hostname or "").lower()
+        try:
+            host = (urlparse(str(_get(e, "url", "") or "")).hostname or "").lower()
+        except ValueError:                        # "https://[broken/x": an unmatched IPv6 bracket raises
+            host = ""
         host = host[4:] if host.startswith("www.") else host
         for dom in _DOMAINS:
             if host == dom or host.endswith("." + dom):

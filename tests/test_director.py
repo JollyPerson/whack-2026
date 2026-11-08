@@ -769,3 +769,21 @@ def test_prompt_and_source_request_still_respect_cooldown_and_rank_under_confide
     _, o = run(ev)
     assert fired(o) == [(6, "correction", "A", "c1"), (37, "prompt", "B", "a1")]
     assert ("prompt:a1", "held", "cooldown") in logs(o)
+
+
+# ----------------------------------------------------------------------------- hardening regressions
+
+
+def test_malformed_evidence_url_never_blocks_the_referee():
+    """urlparse raises on an unmatched bracket: the bad candidate raised on every Pause/tick and held the queue."""
+    assert voice.source_name([{"url": "https://[broken/x"}]) == ""
+    assert voice.source_name([{"url": "http://a]b/", "title": "Crime survey - Office for National Statistics"}]) == \
+        "Office for National Statistics"
+    assert voice.source_name([{"url": "https://[broken/x"}, {"url": "https://www.ons.gov.uk/x"}]) == "the ONS"
+    bad = [Evidence(url="https://[broken/x", title="", quote="q")]
+    ev = talk("A", 0, 5) + [(4, C("c1", "A", 3, imp=1.0)), (4.5, Verdict(claim_id="c1", label="contradicted",
+                                                                        confidence=.95, evidence=bad)),
+                            (4.6, C("c2", "A", 3, canon="k2")), (4.8, V("c2", "missing_context", .9)), (6, P("A", 6))]
+    _, o = run(ev)
+    assert fired(o) == [(6, "correction", "A", "c1")]
+    assert lines(o)[0].text == "Point of fact: the source contradicts that. Details on screen."
