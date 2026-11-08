@@ -102,6 +102,15 @@ def test_statuses(name, k, ops, expect):
     assert {cid: d.status(cid) for cid in expect} == expect
 
 
+def test_importance_normalisation_matches_the_claim_contract():
+    """Raw scores never reach the map (schemas.Claim maps them), but the old fallback ladder disagreed with the
+    contract and was not monotonic: 3.5 -> 0.7, 5 -> 1.0, 6 -> 0.06."""
+    from app.brain.argmap import _norm_importance
+    for x in (-1.0, 0.0, 0.33, 0.5, 1.0, 2.0, 2.5, 3.0, 3.5, 5.0, 6.0, 50.0, 100.0):
+        assert _norm_importance(x) == Claim(id="c", speaker="A", text="t", importance=x).importance, x
+    assert _norm_importance("x") == 0.5 and _norm_importance(None) == 0.5
+
+
 def test_unanswered_notice_exactly_once():
     d = Driver().run([S("A"), C("c1", "A"), S("B"), C("c2", "B"), S("A"), P("A"), S("B"), C("c3", "B"), S("A")])
     un = [n for n in d.kinds("unanswered") if n.claim_id == "c1"]

@@ -69,18 +69,13 @@ def _norm_side(s: Any) -> Optional[str]:
 
 
 def _norm_importance(v: Any) -> float:
-    """Contract is 0..1; tolerate an LLM-style 1..3 (or 1..5, or percent) from a swapped-in extractor."""
+    """Contract is 0..1 and schemas.Claim already maps a 1..3 score; a raw value that bypassed validation is
+    scaled the same way (x/3, capped at 1), like director._imp."""
     try:
         v = float(v)
     except (TypeError, ValueError):
         return 0.5
-    if v <= 1:
-        return max(v, 0.0)
-    if v <= 3:
-        return round(v / 3, 2)
-    if v <= 5:
-        return round(v / 5, 2)
-    return min(v / 100, 1.0)
+    return min(v / 3.0, 1.0) if v > 1 else max(v, 0.0)
 
 
 def _sig(text: str) -> tuple[frozenset, frozenset]:

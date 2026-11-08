@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
 from app import config
-from app.brain.argmap import ArgMap
+from app.brain.argmap import ELIGIBLE, NO_CHECK, ArgMap   # one threshold/rule for extractor and map
 from app.brain.llm import LLMError, LLMInvalid, LLMTimeout, parse_json_text
 from app.brain.prompts import CLAIM_TYPES, OUTPUT_SCHEMA, SYSTEM_PROMPT, render_user
 from app.schemas import Claim, Event, Link, Utterance
@@ -34,9 +34,7 @@ log = logging.getLogger("brain.claims")
 
 _cid = itertools.count(1)          # process-global: claim ids never repeat across sessions
 IMPORTANCE = {1: 0.33, 2: 0.67, 3: 1.0}
-NO_CHECK = {"value", "prediction"}
 KNOWN_TYPES = set(CLAIM_TYPES) | {"other"}
-ELIGIBLE = 0.5                     # argument-map "eligible point" threshold
 MAX_PER_SENTENCE = 3
 CONTEXT_LIMIT = 15
 # Fragment timers (s, our clock). QUIET: since the speaker's last sign of speech (a final, or an interim that
