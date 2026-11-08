@@ -38,6 +38,9 @@ How it works and what each event means: `README.md` ("Side bots", "Debate summar
   Credits.
 
 ## Run it
+For the live microphone setup (one phone via MicYou + one USB-C mic: placement, levels, sound check, what the
+ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MICS.md`](LIVE-MICS.md).
+
 1. **Server.** Bind it to localhost, because `/face/tts` has no login:
    ```bash
    HOST=127.0.0.1 EARS=external BOTS=real JUDGE=real ./run.sh live
