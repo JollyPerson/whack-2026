@@ -288,6 +288,33 @@ const SESSION = {event: 'SessionStart', motion: 'Ban cars', speakers: {A: {name:
   q.live(RESULT); q.draw();
   check('judging: a late verdict still shows', !q.el('verdict').hidden && has(verdict(q), 'winner', 'Proposition wins'));
 }
+{ // 12b. the judge answered without a verdict (nobody spoke, judging failed, the module restarted): no "Judging…"
+  const JS = (state, detail) => ({event: 'ModuleStatus', module: 'judge', state, detail});
+  for (const [state, detail] of [['up', 'nothing to judge: no speech this session'],
+                                 ['degraded', "judging failed: RuntimeError('boom')"],
+                                 ['up', 'llm: claude-opus-5-5; waiting for the final screen']]) {
+    const p = page(''); p.connect([p.snap(SESSION), p.snap(JS('up', 'llm: x; waiting for the final screen'))], {judge: 'real'});
+    p.live({event: 'Control', flag: 'screen', value: 'final'}); p.advance(500); p.live(JS(state, detail)); p.draw();
+    check(`no verdict coming: no "Judging…" (${detail})`, p.el('verdict').hidden, verdict(p));
+  }
+  const q = page(''); q.connect([q.snap(SESSION)], {judge: 'real'});
+  q.live({event: 'Control', flag: 'screen', value: 'final'}); q.advance(500);
+  q.live(JS('up', 'waiting up to 8 s for the record to settle: 1 fact check in flight')); q.draw();
+  check('judging: still "Judging…" while the judge works', !q.el('verdict').hidden && has(verdict(q), 'winner pulse', 'Judging…'));
+}
+{ // 12c. a click after more speech re-judges: the earlier verdict gives way to "Judging…" until the new one lands
+  const JS = detail => ({event: 'ModuleStatus', module: 'judge', state: 'up', detail});
+  const p = page(''); p.connect([p.snap(SESSION)], {judge: 'real'});
+  p.live({event: 'Control', flag: 'screen', value: 'final'}); p.advance(1000); p.live(RESULT); p.draw();
+  p.live({event: 'Control', flag: 'screen', value: 'live'}); p.advance(20000);
+  p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
+  check('re-judge: the earlier verdict stays while the judge has said nothing', has(verdict(p), 'winner', 'Proposition wins'));
+  p.advance(100); p.live(JS('judging: 6 utterances, 3 claims')); p.draw();
+  check('re-judge: "Judging…" once the judge is at it', has(verdict(p), 'winner pulse', 'Judging…'), verdict(p));
+  p.advance(5000); p.live({...RESULT, winner: 'opp', headline: 'Tom came back.'}); p.live(JS('opp wins (clear) via llm')); p.draw();
+  check('re-judge: then the new verdict', has(verdict(p), 'winner', 'Opposition wins') && has(verdict(p), 'headline', 'Tom came back.'),
+    verdict(p));
+}
 { // 13. a refreshed tab (Snapshot) of a real recorded debate shows the verdict at once, without the reveal animation
   const golden = Deno.readTextFileSync(Deno.args[0].replace(/app\/face\/static\/app\.js$/, 'fixtures/golden_run.jsonl'))
     .split('\n').filter(Boolean).map(l => JSON.parse(l));

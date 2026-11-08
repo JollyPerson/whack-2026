@@ -226,9 +226,11 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
 
     out += ["## Verdict dances", ""]
     for p in ("for", "against"):
-        if p in dances:
-            out.append(f"- {PERSONA_LABEL[p]}: **{dances[p]}**" + (" with its music" if music.get(p) else ", silent"))
-    out += [f"- Both stop after {dance_s:g} s or at the next debate.", "", "---", "", f"_{automated(j)}_", ""]
+        if p in dances:            # no title: the face plays nothing for that bot
+            out.append(f"- {PERSONA_LABEL[p]}: " + ("does not dance" if not dances[p] else f"**{dances[p]}**"
+                                                     + (" with its music" if music.get(p) else ", silent")))
+    until = f"stop after {dance_s:g} s or" if dance_s > 0 else "play to the end, or stop"   # 0: to the end (the face)
+    out += [f"- Both {until} at the next debate.", "", "---", "", f"_{automated(j)}_", ""]
     return "\n".join(out)
 
 
