@@ -1338,3 +1338,21 @@ def test_tunable_defaults():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env,
                          cwd=Path(__file__).resolve().parent.parent, check=True).stdout
     assert out.split() == ["0.8", "0.6", "20.0", "10.0"]
+
+
+# ----------------------------------------------------------------------------- live speech (debug/bots regressions)
+@pytest.mark.parametrize("deep,kind", [(dict(), "rebut"), (dict(label="supported"), "followup")])
+async def test_a_deep_verdict_that_replaces_an_unverifiable_one_while_the_check_runs_still_wins(deep, kind):
+    """Evidence publishes a second, better Verdict for the same claim when its deep check does better (a timeout
+    or no source first): the bot must use it, not the first one."""
+    bots, out, clock = make(check=FakeLLM(check=false_check(), delay=0.3))
+    bots.handle(C("c1"))
+    bots.handle(V("c1", label="unverifiable", evidence=[]))     # the fast check found nothing (or ran out of time)
+    await asyncio.sleep(0.1)
+    bots.handle(V("c1", **deep))                                # the deep check, while Claude's check still runs
+    await settle(bots, 1.0)
+    [b] = said(out)
+    assert b.kind == kind and b.sourced == (kind == "rebut")
+    if kind == "followup":
+        assert b.text in lines.GRANTED
+

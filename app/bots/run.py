@@ -11,7 +11,8 @@ A claim with no side is ignored, and a bot never answers its own side. Per oppon
   likely_false -> "challenge" with Claude's correction; surprising_true (a well-known misconception) -> a grudging
   "concede", both only with confidence >= BOTS_CHECK_MIN_CONF; misleading (true figure, misrepresented) -> a
   "True, but ..." "challenge" from BOTS_MISLEADING_MIN_CONF, its own bar. A check that disagrees with the claim's
-  Verdict label is dropped. At most one fact line per claim.
+  Verdict label is dropped. At most one fact line per claim. A later Verdict for the same claim (Evidence's deep
+  check, published only when it does better) replaces the earlier one, so it still counts while the bot is busy.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
@@ -125,7 +126,7 @@ class Bots:
         elif name == "Control":
             self.on_control(ev)
         elif name == "Verdict":
-            self.verdicts.setdefault(ev.claim_id, ev)    # the first verdict decides: one fact line per claim
+            self.verdicts[ev.claim_id] = ev             # a later one (Evidence's deep check) is the better one
             if (w := self.waiting.get(ev.claim_id)) is not None:
                 w.set()
         elif name == "Claim":
@@ -437,7 +438,7 @@ class Bots:
                 elif ev.event == "Claim":
                     self.remember(ev)
                 elif ev.event == "Verdict":
-                    self.verdicts.setdefault(ev.claim_id, ev)
+                    self.verdicts[ev.claim_id] = ev
                 elif ev.event == "ArgMapSnapshot" and ev.version > self.map_version:
                     self.map_version, self.statuses = ev.version, {n.claim_id: n.status for n in ev.nodes}
                     self.nudged.update(c for nr in final_nr(ev) for c in nr.get("ignored") or [])
