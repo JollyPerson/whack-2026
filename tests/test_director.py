@@ -790,7 +790,8 @@ def test_malformed_evidence_url_never_blocks_the_referee():
 
 
 def test_judgement_word_in_numeric_unit_is_never_spoken():
-    v = {"evidence": [{"url": "https://www.ons.gov.uk/x"}], "numeric": {"claimed": 6, "actual": 4, "unit": "false claims"}}
+    v = {"evidence": [{"url": "https://www.ons.gov.uk/x"}],
+         "numeric": {"claimed": 6, "actual": 4, "unit": "false claims"}}
     text = voice.render("correction", verdict=v)
     assert voice.ok(text) and text == "Point of fact: the ONS contradicts that. Details on screen."
     v["numeric"]["unit"] = "deaths"
@@ -833,9 +834,9 @@ def test_time_control_by_side_alias_never_invents_a_speaker():
 
 def test_restated_claim_replacing_a_pending_line_is_logged():
     """Same canonical_key, new claim: the old candidate is logged superseded and the new text reaches D."""
-    ev = talk("A", 0, 9) + [(4, C("c1", "A", 3, canon="k")), (4.5, V("c1", "contradicted", .9, short_fact="crime fell 3 percent")),
-                            (8, C("c9", "A", 7, canon="k")), (8.5, V("c9", "contradicted", .9, short_fact="crime fell 5 percent")),
-                            (10, P("A", 10))]
+    ev = talk("A", 0, 9) + [(4, C("c1", "A", 3, canon="k")), (8, C("c9", "A", 7, canon="k")), (10, P("A", 10)),
+                            (4.5, V("c1", "contradicted", .9, short_fact="crime fell 3 percent")),
+                            (8.5, V("c9", "contradicted", .9, short_fact="crime fell 5 percent"))]
     _, o = run(ev)
     cands = [(x.claim_id, x.text) for _, x in o if isinstance(x, DirectorDecision) and x.action == "candidate"]
     assert cands == [("c1", "Point of fact: the ONS says crime fell 3 percent."),
