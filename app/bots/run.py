@@ -14,7 +14,7 @@ A claim with no side is ignored, and a bot never answers its own side. Per oppon
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
 non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
 Banter (BOTS_BANTER): after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S across both, the
-other bot may answer it with one dry line. Banter is never answered.
+other bot may answer it with one dry line, if it is idle (banter never delays a real line). Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently.
 """
@@ -35,6 +35,7 @@ from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, Event, ModuleS
 log = logging.getLogger("bots")
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
+BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
 
 
 class Bots:
@@ -75,6 +76,7 @@ class Bots:
         self.map_version = -1
         self.nudged: set[str] = set()
         self.said: list[str] = []                     # texts posted this session, newest last (LLM "don't repeat")
+        self.banters: list[str] = []                  # the banter among them
         self.last_banter = -1e18
         self.banter_busy = False
 
@@ -192,6 +194,8 @@ class Bots:
             return
         raw = await self.writer.followup(c, self.motion, persona, granted, tuple(self.said))
         text = lines.guard(raw, "followup", c.text, strict=True, names=self.names) if raw else None
+        if raw and not text:
+            log.info("bots: follow-up dropped by the guards: %r", raw)
         if not text or self.pacer.has_said(text):
             text = lines.followup(c, self.said, granted)
         if text:
@@ -250,24 +254,31 @@ class Bots:
             due[persona] = (n.importance, n, target)
 
     # ------------------------------------------------------------------------------------------- banter
+    def idle(self, persona: str, within: float = 0.0) -> bool:
+        """Free to post within `within` seconds, with nothing of its own waiting (banter never displaces a line)."""
+        return self.pacer.free(persona, self.clock() + within) and not self.pacer.queued(persona)
+
     def on_botline(self, line: BotLine) -> None:
         if line.src != "bots" or line.kind == "banter" or line.reply_to:
             return                                    # never chained; replayed or foreign lines don't count
         if not config.BOTS_BANTER or self.paused or self.writer.fast is None or self.banter_busy:
             return
-        if self.clock() - self.last_banter < config.BOTS_BANTER_GAP_S:
-            return
         other = lines.OTHER.get(line.persona)
-        if other:
-            prev, self.last_banter, self.banter_busy = self.last_banter, self.clock(), True
-            self.spawn(self.banter(line, other, prev, self.session))
+        if not other or not self.idle(other, BANTER_SOON_S) or \
+                self.clock() - self.last_banter < config.BOTS_BANTER_GAP_S:
+            return
+        prev, self.last_banter, self.banter_busy = self.last_banter, self.clock(), True   # reserves the gap
+        self.spawn(self.banter(line, other, prev, self.session))
 
     async def banter(self, line: BotLine, persona: str, prev: float, session: int) -> None:
         ok = False
         try:
-            raw = await self.writer.banter(line.text, persona, line.persona)
+            raw = await self.writer.banter(line.text, persona, line.persona, tuple(self.banters))
             text = lines.guard(raw, "banter", line.text, strict=True, names=self.names) if raw else None
-            ok = bool(text) and self.queue(session, persona=persona, text=text, kind="banter", reply_to=line.id)
+            if raw and not text:
+                log.info("bots: banter dropped by the guards: %r", raw)
+            ok = bool(text) and self.idle(persona, BANTER_SOON_S) and \
+                self.queue(session, persona=persona, text=text, kind="banter", reply_to=line.id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -276,7 +287,7 @@ class Bots:
             if session == self.session:
                 self.banter_busy = False
                 if not ok:
-                    self.last_banter = prev           # nothing posted: the gap doesn't start yet
+                    self.last_banter = prev           # nothing queued: the gap doesn't start yet
 
     # ------------------------------------------------------------------------------------------- output
     def tick(self) -> None:
@@ -285,6 +296,7 @@ class Bots:
                 self.said.append(ev.text)
                 if ev.kind == "banter":
                     self.last_banter = self.clock()
+                    self.banters.append(ev.text)
             self.publish(ev)
 
     def restore(self, history: list[Event]) -> None:
@@ -307,6 +319,7 @@ class Bots:
                         self.nudged.add(ev.claim_id)
                     if ev.kind == "banter":
                         self.last_banter = ev.ts
+                        self.banters.append(ev.text)
             except Exception:
                 log.exception("bots: restore skipped %s", ev.event)
 

@@ -428,6 +428,24 @@ async def test_banter_that_fails_its_guards_is_dropped_and_does_not_start_the_ga
     assert [b.kind for b in said(out)] == ["followup", "followup", "banter"]
 
 
+async def test_banter_goes_only_to_an_idle_bot():
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", "A", "prop", typ="value", checkable=False, text="Fair pay is a moral duty."))
+    await settle(bots)                                                          # Against posts (banter still off)
+    config.BOTS_BANTER = True
+    clock.t += 2
+    bots.handle(C("c2", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)] == [("against", "followup"), ("for", "followup")]
+    assert not [k for k, _ in fast.calls if k == "banter"]                      # Against is still up: no call
+    clock.t += 10
+    bots.handle(C("c3", typ="causal", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    assert [(b.persona, b.kind) for b in said(out)[2:]] == [("for", "followup"), ("against", "banter")]
+    assert said(out)[3].reply_to == said(out)[2].id
+
+
 async def test_banter_switch_off():
     fast = FakeLLM()
     bots, out, clock = make(fast=fast)                                          # BOTS_BANTER=False (fixture)

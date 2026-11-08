@@ -37,7 +37,7 @@ only the opposing debater, in a short speech bubble on screen.
 
 Write ONE pointed follow-up question addressed directly to the opposing debater ("you") about the claim they \
 just made.
-- Dry and sharp, like a good heckle. At most 12 words.
+- Dry and sharp, like a good heckle. One short question of at most 10 words: the bubble cuts anything longer.
 - Ask for what is missing: a source, a definition, a baseline, a mechanism, a consequence.
 - Add no facts, figures, dates, names or sources of your own. You may repeat a figure from the claim.
 {_RULES}
@@ -68,8 +68,9 @@ the Opposition. Now and then they spar with each other: dry, witty and good-natu
 quips at ringside.
 
 You are one of the bots. The other bot just posted a line aimed at your side's debater. Reply to the other bot \
-(not to the debaters) with ONE dry, witty line of at most 12 words.
+(not to the debaters) with ONE dry, witty sentence of at most 10 words: the bubble cuts anything longer.
 - Tease the other bot's line, its style or its confidence; you may lightly stand up for your side.
+- Don't open the way an earlier line did.
 - No numbers, facts, statistics, names or sources, and no new claims about the topic.
 {_RULES}
 - If nothing good and safe comes to mind, return an empty line.
@@ -162,10 +163,11 @@ class Writer:
         out = await self._call(self.fast, FOLLOWUP_SYSTEM, user, FOLLOWUP_SCHEMA, FAST_TIMEOUT_S)
         return str(_get(out, "question") or "") if out else ""
 
-    async def banter(self, line: str, persona: str, other: str) -> str:
+    async def banter(self, line: str, persona: str, other: str, avoid: tuple = ()) -> str:
         """`persona`'s dry reply to the `other` bot's `line` (raw: the caller guards it), or ""."""
         me, them = PERSONA_NAME.get(persona, persona), PERSONA_NAME.get(other, other)
-        user = f"You are {me}. The {them} bot just said: {line}"
+        seen = "\nEarlier banter (don't repeat): " + " | ".join(avoid[-4:]) if avoid else ""
+        user = f"You are {me}. The {them} bot just said: {line}{seen}"
         out = await self._call(self.fast, BANTER_SYSTEM, user, BANTER_SCHEMA, FAST_TIMEOUT_S)
         return str(_get(out, "line") or "") if out else ""
 
