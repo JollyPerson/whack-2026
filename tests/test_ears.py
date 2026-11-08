@@ -488,3 +488,13 @@ def test_levels_are_reported_now_and_then():
     levels = [m for m in said if "dBFS" in m]
     assert len(levels) == 2 and "-20 dBFS" in levels[0]
 
+
+# ----------------------------------------------------------------------------- falling behind
+def test_falling_behind_is_reported(capsys):
+    state = source_state(seconds=10.0)
+    state["transcribed_until"] = 2.0                         # the last window ended at 2 s; this one starts at 6 s
+    ears.transcribe_source(FakeModel([]), "mic1", state, ARGS, None)
+    assert "behind" in capsys.readouterr().err
+    state["audio"].add(np.zeros(ears.SAMPLE_RATE, dtype=np.float32))
+    ears.transcribe_source(FakeModel([]), "mic1", state, ARGS, None)    # overlapping windows: all heard
+    assert "behind" not in capsys.readouterr().err

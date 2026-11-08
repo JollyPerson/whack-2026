@@ -476,7 +476,15 @@ def transcribe_source(model, source_name, state, args, output_file):
     if window_end == state.get("transcribed_until"):
         return
 
+    previous = state.get("transcribed_until")
     state["transcribed_until"] = window_end
+
+    # Windows overlap while ears keeps up; a gap between them is speech nobody will ever see.
+    if previous is not None and window_start > previous:
+        say(
+            f"!! ears: {source_name} is falling behind: {window_start - previous:.1f} s of audio was never "
+            f"transcribed. Use a smaller MODEL (base.en, tiny.en) or a longer WINDOW"
+        )
 
     segments, info = model.transcribe(
         audio,
