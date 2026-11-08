@@ -21,7 +21,7 @@ from app import main as mainmod
 from app.bus import Bus, load_jsonl
 from app.config import FLAGS
 from app.main import build_app, loop_lag, resolve, supervise
-from app.schemas import Claim, Control, Utterance, Verdict, parse_event
+from app.schemas import Claim, Control, Pause, Utterance, Verdict, parse_event
 from app.tools import tail
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -625,3 +625,197 @@ def test_stamp_and_finish_helpers():
     v2 = latency.finish(Verdict(claim_id="c2"), {"t_end": 1_762_500_000_000, "marks": {}}, now=1_762_500_001.0)
     assert v2.latency_ms == 1000                                                       # ms t_end from a JS producer
     assert latency.finish(Verdict(claim_id="c3"), None, now=5.0).latency_ms == 0       # unknown speech end: no number
+
+
+# ----------------------------------------------------------------------------- hardening regressions: core
+def test_nan_control_value_never_poisons_health_or_the_snapshot(make_client):
+    """Python's json accepts NaN/Infinity: the raw float in FLAGS made /health a 500 and every ws Snapshot invalid
+    JSON for browsers (JSON.parse rejects NaN) until restart."""
+    c = make_client()
+    raw = {"content-type": "application/json"}
+    assert c.post("/control", content=b'{"flag": "probe", "value": NaN}', headers=raw).status_code == 200
+    assert c.post("/control", content=b'{"flag": "deep", "value": {"x": [Infinity, 1]}}', headers=raw).status_code == 200
+    wait_for(lambda: "deep" in FLAGS)
+    h = c.get("/health")
+    assert h.status_code == 200 and h.json()["flags"]["probe"] is None and h.json()["flags"]["deep"] == {"x": [None, 1]}
+
+    def strict(token):
+        raise ValueError(f"not JSON: {token}")
+
+    with c.websocket_connect("/ws") as ws:
+        snap = json.loads(_POOL.submit(ws.receive_text).result(5), parse_constant=strict)
+    assert snap["flags"]["probe"] is None
+
+
+async def crashy(bus):
+    """Crashes on its first Pause; the background consumer it spawned stays parked on its own subscription."""
+    BG_TASKS.append(asyncio.create_task(_bg_consumer(bus)))
+    async for _ in bus.subscribe("crashy", {"Pause"}):
+        raise RuntimeError("boom")
+
+
+async def _bg_consumer(bus):
+    async for _ in bus.subscribe("crashy-bg", {"NeverPublished"}):
+        pass
+
+
+BG_TASKS: list[asyncio.Task] = []
+_REAL_SLEEP = asyncio.sleep
+
+
+async def test_supervisor_restart_closes_the_crashed_attempts_subscriptions(monkeypatch):
+    """A crashed role's Sub stayed in bus.subs after the restart: its queue filled and 'dropped N events (too slow)'
+    warnings blamed the live module."""
+    async def no_wait(d, *a, **k):
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    b, BG_TASKS[:] = Bus(), []
+    t = asyncio.create_task(supervise(b, "brain", "tests.test_main:crashy"))
+    names = lambda: [s.name for s in b.subs]                                     # noqa: E731
+    try:
+        for _ in range(3):
+            for _ in range(50):
+                await _REAL_SLEEP(0)
+                if "crashy" in names():
+                    break
+            b.publish(Pause(speaker="A"))
+        for _ in range(50):
+            await _REAL_SLEEP(0)
+        assert names().count("crashy") == 1 and names().count("crashy-bg") == 1, names()
+    finally:
+        t.cancel()
+        for bg in BG_TASKS:
+            bg.cancel()
+
+
+FLAKY: list[int] = []
+
+
+async def flaky(bus):
+    """Attempts 1-4 crash at once, attempt 5 runs 'healthy' for a while then crashes, attempt 6 returns."""
+    FLAKY.append(1)
+    if len(FLAKY) == 5:
+        await _REAL_SLEEP(0.1)
+    if len(FLAKY) <= 5:
+        raise RuntimeError(f"crash {len(FLAKY)}")
+
+
+async def test_supervisor_backoff_resets_after_a_healthy_run(monkeypatch):
+    """The backoff only ever doubled: after 4 crashes any later crash cost 10 s of downtime, even hours later."""
+    slept: list[float] = []
+
+    async def record(d, *a, **k):
+        slept.append(d)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(asyncio, "sleep", record)
+    monkeypatch.setattr(mainmod, "HEALTHY_RUN_S", 0.05, raising=False)
+    FLAKY.clear()
+    await asyncio.wait_for(supervise(Bus(), "brain", "tests.test_main:flaky"), 5)
+    assert len(FLAKY) == 6 and slept == [1.0, 2.0, 4.0, 8.0, 1.0]
+
+
+def test_second_server_on_a_busy_port_leaves_latest_jsonl_alone(tmp_path, monkeypatch, capsys):
+    """An accidental second ./run.sh re-pointed logs/latest.jsonl at its own empty log, then died on the busy port."""
+    import socket
+    import uvicorn
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "golden.jsonl").write_text('{"event": "SessionStart", "ts": 1.0}\n')
+    (logs / "latest.jsonl").symlink_to("golden.jsonl")
+    monkeypatch.setattr(mainmod, "ROOT", tmp_path)
+    for k in ROLES:
+        monkeypatch.setenv(k, "off")
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: sys.exit(3))     # what uvicorn does on a busy port
+    with socket.create_server(("127.0.0.1", 0)) as busy:
+        port = busy.getsockname()[1]
+        monkeypatch.setattr(sys, "argv", ["app.main", "mock", "--host", "127.0.0.1", "--port", str(port)])
+        with pytest.raises(SystemExit) as e:
+            mainmod.main()
+    assert e.value.code == 2 and f"port {port}" in capsys.readouterr().err
+    assert os.readlink(logs / "latest.jsonl") == "golden.jsonl"
+    assert sorted(p.name for p in logs.iterdir()) == ["golden.jsonl", "latest.jsonl"]   # no new empty log either
+
+
+async def test_ws_handler_and_its_subscriber_end_when_the_client_leaves_in_a_quiet_period(tmp_path, monkeypatch):
+    """Under real uvicorn the writer sat in `async for ev in sub` after a disconnect until the next event arrived:
+    every refresh in a quiet period left a zombie handler and a 2000-slot Sub (TestClient cancels it, hiding this)."""
+    for k in ROLES:
+        monkeypatch.setenv(k, "off")
+    app = build_app("mock", log_dir=tmp_path)
+    bus = app.state.bus
+    inbox, sent = asyncio.Queue(), []
+    inbox.put_nowait({"type": "websocket.connect"})
+
+    async def send(m):
+        sent.append(m)
+
+    scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws", "http_version": "1.1", "path": "/ws",
+             "raw_path": b"/ws", "root_path": "", "query_string": b"", "headers": [(b"host", b"test")],
+             "client": ("127.0.0.1", 1), "server": ("test", 80), "subprotocols": [], "state": {}}
+    task = asyncio.create_task(app(scope, inbox.get, send))
+    try:
+        for _ in range(200):
+            if any(m["type"] == "websocket.send" for m in sent):
+                break
+            await asyncio.sleep(0.01)
+        assert [s for s in bus.subs if s.name.startswith("ws-")]
+        inbox.put_nowait({"type": "websocket.disconnect", "code": 1000})
+        await asyncio.wait_for(asyncio.shield(task), 1)
+        assert not [s for s in bus.subs if s.name.startswith("ws-")]
+    finally:
+        task.cancel()
+        bus.close()
+
+
+def test_ws_subscribe_accepts_one_name_and_rejects_non_lists(make_client):
+    """{"events": "Claim"} became the set {'C','l','a','i','m'}: everything was filtered out, with no Error frame."""
+    c = make_client()
+    with c.websocket_connect("/ws") as ws:
+        recv(ws)
+        ws.send_json({"op": "subscribe", "events": "Claim"})
+        ws.send_json({"event": "Pause", "speaker": "A"})                     # frames are handled in order: a barrier
+        ws.send_json({"event": "Claim", "id": "c1", "speaker": "A", "text": "x"})
+        assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["event"] == "Claim"
+        for bad in ({"Claim": 1}, ["Claim", 3], 7):
+            ws.send_json({"op": "subscribe", "events": bad})
+            err = recv_until(ws, lambda m: m["event"] in ("Error", "Pause", "Claim"), 3)
+            assert err["event"] == "Error" and err["op"] == "subscribe"
+        ws.send_json({"event": "Pause", "speaker": "A"})
+        ws.send_json({"event": "Claim", "id": "c2", "speaker": "A", "text": "x"})
+        assert recv_until(ws, lambda m: m["event"] in ("Pause", "Claim"), 3)["id"] == "c2"   # filter kept as it was
+
+
+@pytest.mark.parametrize("bad", [["--speed", "0"], ["--speed", "-2"], ["--speed", "nan"], ["--max-gap", "-1"]])
+def test_cli_rejects_non_positive_speed_and_negative_max_gap(tmp_path, monkeypatch, capsys, bad):
+    """--speed 0 was a ZeroDivisionError inside the replay (red dot); negative values ran time backwards."""
+    import uvicorn
+    f = _write_log(tmp_path / "x.jsonl", [{"event": "Pause", "speaker": "A", "ts": 1.0}])
+    monkeypatch.setattr(mainmod, "ROOT", tmp_path)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["app.main", "replay", "--file", str(f), *bad])
+    with pytest.raises(SystemExit) as e:
+        mainmod.main()
+    assert e.value.code == 2 and bad[0] in capsys.readouterr().err
+
+
+def test_debug_history_n_zero_or_negative_is_empty(make_client):
+    """history[-0:] is the whole list (up to 5000 rows dumped on the loop); history[--5:] skipped the first rows."""
+    c = make_client()
+    for i in range(3):
+        c.post("/publish", json={"event": "Pause", "speaker": f"p{i}"})
+    assert len(c.get("/debug/history?n=2").json()) == 2
+    assert c.get("/debug/history?n=0").json() == [] and c.get("/debug/history?n=-5").json() == []
+
+
+def test_run_sh_survives_a_dotenv_value_bash_cannot_parse(tmp_path):
+    """run.sh sourced .env as bash under `set -eu`: `MOTION=This house ...` ran `house` and aborted startup."""
+    d = _fake_repo(tmp_path)
+    (d / ".venv" / "bin" / "python").write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exit 0; fi\n'
+                                                'echo "PYTHON $* GOOD=$GOOD"\n')
+    (d / ".env").write_text("MOTION=This house would ban cars\nHASH=$2a$12$abc\nGOOD=1\n")
+    r = subprocess.run(["bash", str(d / "run.sh"), "mock"], capture_output=True, text=True, timeout=20,
+                       env={**os.environ, "SKIP_PIP": "1", "GOOD": "from-shell"})
+    assert r.returncode == 0, r.stderr
+    assert "PYTHON -m app.main mock GOOD=1" in r.stdout                        # .env still wins over the shell

@@ -24,7 +24,8 @@ import asyncio
 import logging
 import re
 import time
-from typing import Iterable
+from contextlib import contextmanager
+from typing import Iterable, Iterator
 
 from app import config
 from app.brain.argmap import ArgMap
@@ -118,6 +119,14 @@ class EchoGuard:
     def is_echo(self, u: Utterance, now: float) -> bool:
         return self.classify(u, now) == "echo"
 
+    def _stopped(self, ts: float, now: float) -> float:
+        """When our TTS of the line published at `ts` stopped: the end of the first speaking window that began
+        after it, `now` while it is still playing, else `ts` (D never reported playing it)."""
+        end = next((b for a, b in self.windows if a >= ts), None)
+        if end is None and self.speaking_since is not None and self.speaking_since >= ts:
+            end = now
+        return ts if end is None else end
+
     def classify(self, u: Utterance, now: float) -> str:
         """Returns "echo" (drop), "floor" (Director/pauses only, never extracted) or "speech"."""
         if self.speaking_since is not None and now - self.speaking_since > self.cap_s:
@@ -134,9 +143,11 @@ class EchoGuard:
             # Under 2 content words ("hold on", or the first interim of our own echo): echo if every word is ours,
             # else a human claiming the floor. Too short to be a claim: floor tracking only, no extraction/argmap.
             return "echo" if any(words <= s for s in said) else "floor"
-        if len(words) >= 3:
+        if len(words) >= 3:     # after the fact: TTS start-up, the line's audio and STT latency all come first
+            late_ok = len(words - STOP) >= 2   # past publish + window_s: "it is the" is too little to call echo
             for ts, said in self.said:
-                if now - ts <= self.window_s and len(words & said) / len(words) >= self.overlap:
+                recent = now - ts <= self.window_s or (late_ok and now - self._stopped(ts, now) <= self.window_s)
+                if recent and len(words & said) / len(words) >= self.overlap:
                     return "echo"
         return "speech"
 
@@ -240,7 +251,7 @@ async def run(bus) -> None:
             publish(e)
 
     extractor = ClaimExtractor(amap, publish, llm)
-    inflight: set[asyncio.Task] = set()
+    inflight: set[asyncio.Task] = set()               # extraction + warmup: cancelled on SessionStart and on exit
     log.info("brain up: llm=%s", getattr(llm, "name", None) or "heuristic")
 
     def drain(now: float) -> None:
@@ -256,11 +267,14 @@ async def run(bus) -> None:
         except Exception:
             log.exception("claim extraction failed for %s", u.id)
 
+    def spawn(coro) -> None:
+        t = asyncio.create_task(coro)
+        inflight.add(t)                                # also keeps it from being garbage-collected mid-flight
+        t.add_done_callback(inflight.discard)
+
     def start_extract(units: Iterable[Utterance]) -> None:
         for unit in units:
-            t = asyncio.create_task(_extract(unit))
-            inflight.add(t)
-            t.add_done_callback(inflight.discard)
+            spawn(_extract(unit))
 
     def on_tts(ev: Event, now: float) -> None:
         if ev.event == "TTSState":
@@ -279,8 +293,10 @@ async def run(bus) -> None:
                 if ev.event == "SessionStart":
                     amap.reset(ev)
                     director.reset(ev)
-                elif ev.event == "Utterance" and ev.final:
-                    amap.on_utterance(ev)
+                elif ev.event == "Utterance" and ev.final:   # the live ingress guards, in the live order
+                    heard = echo.classify(ev, ev.ts)         # (bleed also remembers a floor-only final)
+                    if heard != "echo" and not bleed.is_bleed(ev) and heard == "speech":
+                        amap.on_utterance(ev)
                 elif ev.event == "Claim":
                     amap.add_claim(ev)
                     director.handle(ev, ev.ts)
@@ -302,22 +318,37 @@ async def run(bus) -> None:
         if n:
             log.info("brain restored %d events from history", n)
 
+    @contextmanager
+    def guarded(what: str) -> Iterator[None]:
+        """One step on its own: a step that raises is logged and the steps after it still run (a ticker step that
+        keeps failing never stops the heartbeat; a Director error never costs the map or extraction)."""
+        try:
+            yield
+        except Exception:
+            log.exception("brain step failed: %s", what)
+
     async def ticker() -> None:
         last_ver, last_snap, last_status, last_stats = -1, 0.0, 0.0, time.time()
         while True:
             await asyncio.sleep(TICK_S)
             now = time.time()
-            try:
+            with guarded("tick pauses"):
                 for p in pauses.due(now):
                     bus.publish(p, src="brain:pause_synth")   # comes back through the subscription
+            with guarded("tick flush"):
                 start_extract(extractor.flush_due(now))
+            with guarded("tick director"):
                 emit(director.tick(now))
-                if amap.version != last_ver and now - last_snap >= 1.0 / config.ARGMAP_SNAPSHOT_HZ:
+            with guarded("tick snapshot"):
+                hz = config.ARGMAP_SNAPSHOT_HZ                # <= 0: snapshots off
+                if hz > 0 and amap.version != last_ver and now - last_snap >= 1.0 / hz:
                     last_ver, last_snap = amap.version, now
                     publish(amap.snapshot())
+            with guarded("tick status"):
                 if now - last_status >= 1.0:
                     last_status = now
                     publish(director.status(now))
+            with guarded("tick stats"):
                 if now - last_stats >= STATS_EVERY_S:
                     last_stats = now
                     s = getattr(extractor, "stats", {}) or {}
@@ -327,8 +358,6 @@ async def run(bus) -> None:
                     publish(ModuleStatus(module="brain", state="degraded" if degraded else "up",
                                          detail=f"llm={s.get('llm', '?')} p50={s.get('p50_ms') or '-'}ms "
                                                 f"fallback {fb}/{calls} {s.get('by_cause', {})}"))
-            except Exception:
-                log.exception("brain tick failed")
 
     restore_from_history(history)
     tick_task = asyncio.create_task(ticker())
@@ -345,13 +374,14 @@ async def run(bus) -> None:
                         m.reset(ev)
                     for m in (extractor, pauses, echo, bleed, late):
                         m.reset()
-                    asyncio.create_task(extractor.warmup(ev.motion))
+                    spawn(extractor.warmup(ev.motion))
                 elif name == "Utterance":
                     if late.is_late(ev) or (heard := echo.classify(ev, now)) == "echo" or \
                             (ev.final and bleed.is_bleed(ev)):
                         continue
                     pauses.on_utterance(ev, now)
-                    emit(director.handle(ev, now))
+                    with guarded("director"):                  # first, on its own: the floor model hears the
+                        emit(director.handle(ev, now))         # speech even if the map raises, and vice versa
                     if heard == "floor":                       # a 1-2 word barge-in over our TTS: floor only
                         continue
                     if ev.final:

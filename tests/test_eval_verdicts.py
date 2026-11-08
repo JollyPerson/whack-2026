@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.evidence.checks import Guarded, Source
 from app.schemas import Evidence
 from eval import eval_verdicts as ev
@@ -107,3 +109,66 @@ def test_report_shows_the_counts_and_the_sides():
 def test_example_file_matches_the_format():
     rows = ev.load_gold(ev.ROOT / "eval" / "verdict_gold.example.jsonl")
     assert rows and all(r["gid"].startswith("example") and r["label"] in ev.LABELS for r in rows)
+
+
+# --- regressions
+GOLD_UNVERIFIABLE = {**ROW, "label": "unverifiable"}
+
+
+class Raises:
+    name = "raises"
+
+    def __init__(self, error):
+        self.error = error
+
+    async def complete_json(self, *a, **k):
+        raise self.error
+
+
+async def test_a_model_error_is_counted_and_never_correct():
+    results = await ev.run_verdict_once([GOLD_UNVERIFIABLE], Raises(TimeoutError()), {"g": [SRC]})
+    m = ev.score(results)
+    assert m["correct"] == 0 and m["errors"] == 1 and "errors 1" in ev.report(m)
+
+
+async def test_full_layer_error_is_counted(monkeypatch):
+    from app.evidence.index import EvidenceIndex
+    monkeypatch.setattr(ev, "_load_index", lambda motion, cache: EvidenceIndex([{"url": SRC.url, "title": "A", "text": SRC.text}]))
+    row = {**GOLD_UNVERIFIABLE, "text": "Output grew last year"}
+    results = await ev.run_full_once([row], Raises(RuntimeError("bad key")), None, None, {})
+    m = ev.score(results)
+    assert results[0].via == "error" and m["correct"] == 0 and m["errors"] == 1
+
+
+def test_results_without_errors_score_as_before():
+    assert ev.score(passing())["errors"] == 0
+
+
+async def test_save_evidence_keeps_the_old_file_when_retrieval_fails(tmp_path, monkeypatch):
+    saved = tmp_path / "saved.jsonl"
+    saved.write_text('{"gid": "hand", "sources": []}\n')
+    calls = []
+
+    async def retrieve(row, cache, embedder):
+        calls.append(row["gid"])
+        if len(calls) == 2:
+            raise SystemExit("No saved index")
+        return [SRC]
+    monkeypatch.setattr(ev, "SAVED", saved)
+    monkeypatch.setattr(ev, "_retrieve", retrieve)
+    monkeypatch.setattr(ev, "make_embedder", lambda: None)
+    with pytest.raises(SystemExit):
+        await ev.save_evidence([ROW, {**ROW, "gid": "h"}])
+    assert saved.read_text() == '{"gid": "hand", "sources": []}\n' and [p.name for p in tmp_path.iterdir()] == ["saved.jsonl"]
+
+
+async def test_save_evidence_writes_every_row(tmp_path, monkeypatch):
+    saved = tmp_path / "saved.jsonl"
+
+    async def retrieve(row, cache, embedder):
+        return [SRC]
+    monkeypatch.setattr(ev, "SAVED", saved)
+    monkeypatch.setattr(ev, "_retrieve", retrieve)
+    monkeypatch.setattr(ev, "make_embedder", lambda: None)
+    assert await ev.save_evidence([ROW, {**ROW, "gid": "h"}]) == 0
+    assert [json.loads(line)["gid"] for line in saved.read_text().splitlines()] == ["g", "h"]

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import importlib
 import inspect
 import json
 import logging
 import os
+import socket
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +28,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.bus import MAX_GAP_S, TIME_FIELDS, Bus, replay
+from app.bus import MAX_GAP_S, SUB_OWNER, TIME_FIELDS, Bus, replay
 from app.config import FLAGS
 from app.schemas import SCHEMA_VERSION, Control, ModuleStatus, SessionStart, parse_event
 
@@ -80,11 +82,28 @@ def load(spec: str):
     return getattr(importlib.import_module(mod), fn)
 
 
+HEALTHY_RUN_S = 30.0   # an attempt that ran this long before crashing restarts after 1 s again, not the backoff
+
+
+async def _restart_after_crash(bus: Bus, name: str, e: Exception, owner: object, started: float, delay: float) -> float:
+    """Red dot, close the subscriptions the crashed attempt opened (their queues would fill up forever and look
+    'too slow'), wait, and return the next backoff."""
+    log.exception("module %s crashed", name)
+    bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
+    bus.close_owned(owner)
+    if time.monotonic() - started >= HEALTHY_RUN_S:
+        delay = 1.0
+    await asyncio.sleep(delay)
+    return min(delay * 2, 10.0)
+
+
 async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
     """Run one role. Returning = done (one-shot setup, finished fixture): stays green, never re-run.
     `served` names what the server already serves for this role (routes/static) if run.py is missing."""
     delay, mod = 1.0, spec.split(":")[0]
     while True:
+        owner, started = object(), time.monotonic()
+        token = SUB_OWNER.set(owner)                 # tags the subs of this attempt and of the tasks it spawns
         try:
             fn = load(spec)
             bus.publish(ModuleStatus(module=name, state="up", detail=spec), src="main")
@@ -109,15 +128,11 @@ async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
                 bus.publish(ModuleStatus(module=name, state="down", detail=f"missing dependency {e.name!r}: add it "
                                          f"to requirements/<role>.txt and rerun ./run.sh"), src="main")
                 return
-            log.exception("module %s crashed", name)
-            bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            delay = await _restart_after_crash(bus, name, e, owner, started, delay)
         except Exception as e:                       # crash -> red dot -> restart with backoff
-            log.exception("module %s crashed", name)
-            bus.publish(ModuleStatus(module=name, state="down", detail=repr(e)[:200]), src="main")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            delay = await _restart_after_crash(bus, name, e, owner, started, delay)
+        finally:
+            SUB_OWNER.reset(token)
 
 
 ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAGS; every other flag is state
@@ -125,8 +140,8 @@ ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAG
 
 async def flags_watcher(bus: Bus):
     async for ev in bus.subscribe("flags", {"Control"}):
-        if ev.flag not in ONE_SHOT_FLAGS:
-            FLAGS[ev.flag] = ev.value
+        if ev.flag not in ONE_SHOT_FLAGS:            # the JSON form: a NaN would 500 /health and break every Snapshot
+            FLAGS[ev.flag] = ev.model_dump(mode="json")["value"]
 
 
 async def loop_lag(bus: Bus, tick: float = 0.1, warn: float = 0.05, recover: int = 20):
@@ -173,7 +188,12 @@ def _ws_message(bus: Bus, sub, m: Any) -> None:
     elif op == "control":
         bus.publish(Control.model_validate(body), src="dashboard")
     elif op == "subscribe":
-        sub.events = set(m.get("events") or [])
+        names = m.get("events") or []
+        if isinstance(names, str):                   # "Claim" would otherwise filter on {'C', 'l', 'a', 'i', 'm'}
+            names = [names]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError('"events" must be a list of event names, e.g. ["Claim", "Verdict"] (empty = all)')
+        sub.events = set(names)
     else:
         raise ValueError(f"unknown op {op!r} - use publish|session_start|control|subscribe")
 
@@ -198,15 +218,21 @@ def _create_hint(path: Path) -> str:
     return f"Save a recorded run there first: cp logs/latest.jsonl {path} (e.g. the 20:00 golden run)."
 
 
+def replay_file(file: str | Path) -> Path:
+    """Resolve a replay --file NOW: follows logs/latest.jsonl before it is re-pointed; a missing file fails loudly."""
+    try:
+        path = Path(file).resolve(strict=True)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(e.errno, f"No such file. {_create_hint(Path(file))}", str(file)) from None
+    if not path.is_file():
+        raise FileNotFoundError(f"not a file: {path}")
+    return path
+
+
 def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0, only=(),
               log_dir: Path | None = None, last: bool = True, max_gap: float = MAX_GAP_S) -> FastAPI:
-    if file:   # resolve NOW: follows logs/latest.jsonl before it is re-pointed; a missing file fails loudly
-        try:
-            file = Path(file).resolve(strict=True)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(e.errno, f"No such file. {_create_hint(Path(file))}", str(file)) from None
-        if not file.is_file():
-            raise FileNotFoundError(f"not a file: {file}")
+    if file:
+        file = replay_file(file)
     log_dir = log_dir or ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{profile}.jsonl"
@@ -274,20 +300,29 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
                     op = m.get("op", "publish") if isinstance(m, dict) else "publish" if isinstance(m, list) else None
                     await sock.send_json({"event": "Error", "detail": str(e)[:300], "op": op})
 
-        rt = asyncio.create_task(reader())
-        try:
+        async def writer():                                   # bus -> client: the snapshot, then live events
             await sock.send_json({"event": "Snapshot", "schema": SCHEMA_VERSION, "last_seq": snap_seq,
                                   "flags": FLAGS, "modules": choice, "events": hist})
             async for ev in sub:
                 if sub.dropped:
                     await sock.close(code=1013)               # too slow: client reconnects + resyncs
-                    break
+                    return
                 await sock.send_text(ev.model_dump_json())
-        except (WebSocketDisconnect, RuntimeError):
-            pass
+
+        # Whichever side ends first ends both: a client that left in a quiet period must not leave the writer
+        # (and its 2000-slot Sub) parked until the next event.
+        tasks = [asyncio.create_task(writer()), asyncio.create_task(reader())]   # writer first: Snapshot first
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                try:
+                    t.result()
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
         finally:
             sub.close()
-            rt.cancel()
+            for t in tasks:
+                t.cancel()
 
     @app.post("/publish")
     async def publish(req: Request):
@@ -325,7 +360,7 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
 
     @app.get("/debug/history")
     async def debug_history(n: int = 200):
-        return [e.model_dump(mode="json") for e in bus.history[-n:]]
+        return [e.model_dump(mode="json") for e in bus.history[-n:]] if n > 0 else []   # [-0:] is everything
 
     @app.get("/debug")
     async def debug_page():
@@ -361,16 +396,40 @@ def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0
     return app
 
 
+def speed_arg(s: str) -> float:
+    v = float(s)
+    if not v > 0:                                    # also NaN; 0 divides by zero, < 0 runs time backwards
+        raise argparse.ArgumentTypeError(f"must be > 0, not {s}")
+    return v
+
+
+def max_gap_arg(s: str) -> float:
+    v = float(s)
+    if not v >= 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0 (0 = keep every gap), not {s}")
+    return v
+
+
+def port_in_use(host: str, port: int) -> bool:
+    """Another server (an accidental second ./run.sh) already listens there. uvicorn only finds out after the app
+    is built, when logs/latest.jsonl already points at this run's empty log. Other bind errors: uvicorn's to report."""
+    try:
+        socket.create_server((host, port), family=socket.AF_INET6 if ":" in host else socket.AF_INET).close()
+    except OSError as e:
+        return e.errno == errno.EADDRINUSE
+    return False
+
+
 def main():
     import uvicorn
     p = argparse.ArgumentParser(description="debate-ref: live debate fact-checker")
     p.add_argument("profile", nargs="?", default="mock", choices=PROFILES)
     p.add_argument("--file", help="replay a JSONL (fixture or logs/*.jsonl; logs/latest.jsonl = the last run)")
-    p.add_argument("--speed", type=float, default=1.0)
+    p.add_argument("--speed", type=speed_arg, default=1.0)
     p.add_argument("--only", nargs="*", default=[], help="replay only these event types, e.g. Utterance Pause")
     p.add_argument("--all-sessions", action="store_true",
                    help="replay every session in the file (default: from the last SessionStart on)")
-    p.add_argument("--max-gap", type=float, default=MAX_GAP_S,
+    p.add_argument("--max-gap", type=max_gap_arg, default=MAX_GAP_S,
                    help=f"cut replayed silences longer than this many seconds (default {MAX_GAP_S:g}; 0 = keep)")
     p.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8000)))
@@ -380,9 +439,12 @@ def main():
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
-        app = build_app(a.profile, a.file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
+        file = replay_file(a.file) if a.file else None
     except FileNotFoundError as e:
         p.error(f"--file {a.file}: {e.strerror or e}")
+    if port_in_use(a.host, a.port):                  # before build_app re-points logs/latest.jsonl
+        p.error(f"port {a.port} is already in use: is another ./run.sh running? Stop it or pass --port")
+    app = build_app(a.profile, file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 

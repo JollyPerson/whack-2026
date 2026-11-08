@@ -25,8 +25,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
 from app import config
-from app.brain.argmap import ArgMap
-from app.brain.llm import LLMError, LLMInvalid, parse_json_text
+from app.brain.argmap import ELIGIBLE, NO_CHECK, ArgMap   # one threshold/rule for extractor and map
+from app.brain.llm import LLMError, LLMInvalid, LLMTimeout, parse_json_text
 from app.brain.prompts import CLAIM_TYPES, OUTPUT_SCHEMA, SYSTEM_PROMPT, render_user
 from app.schemas import Claim, Event, Link, Utterance
 
@@ -34,9 +34,7 @@ log = logging.getLogger("brain.claims")
 
 _cid = itertools.count(1)          # process-global: claim ids never repeat across sessions
 IMPORTANCE = {1: 0.33, 2: 0.67, 3: 1.0}
-NO_CHECK = {"value", "prediction"}
 KNOWN_TYPES = set(CLAIM_TYPES) | {"other"}
-ELIGIBLE = 0.5                     # argument-map "eligible point" threshold
 MAX_PER_SENTENCE = 3
 CONTEXT_LIMIT = 15
 # Fragment timers (s, our clock). QUIET: since the speaker's last sign of speech (a final, or an interim that
@@ -49,6 +47,8 @@ FRAG_PAUSE_S, FRAG_PAUSE_FINALS_S = 1.0, 2.0
 FRAG_MAX_AGE_S, FRAG_MAX_WORDS = 8.0, 40      # hard caps: nothing is held longer / bigger than this
 INTERIM_LIVE_S = 5.0                          # an interim this recent from the speaker -> the shorter timers
 CLOCK_SKEW_S = 30.0                           # |t_end - ts| beyond this: t_end is on another clock, use ts
+LAG_WINDOW = 20                               # finals per speaker whose least (ts - t_end) is their clock offset
+MIN_CALL_S = 0.3                              # no LLM call with less left than this (or half CLAIM_TIMEOUT_S)
 LLM_MAX_TOKENS = 400
 WARMUP_TIMEOUT_S = 15.0            # first call compiles the schema; give it room
 WARMUP_SENTENCE = "Unemployment has risen by two percent since last year, according to the ONS."
@@ -465,8 +465,8 @@ def heuristic_drafts(sentence: str, side: str, context: Iterable[Any] = (),
                      side_of: Optional[Callable[[Any], str]] = None, motion: str = "") -> list[Draft]:
     """Deterministic, regex-only claim extraction for one sentence (no LLM, no clock)."""
     raw = (sentence or "").strip()
-    if not raw or (raw.endswith("?") and not (has_quantity(raw) or named_source(raw))):
-        return []                                  # genuine questions aren't claims
+    if not raw or (raw.endswith("?") and not (named_source(raw) or (has_quantity(raw) and len(raw.split()) >= 4))):
+        return []                                  # genuine questions ("Forty thousand?") aren't claims
     ctx = list(context)
     side_of = side_of or (lambda c: getattr(c, "side", None))
     mstems = _motion_stems(motion)
@@ -528,7 +528,7 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
     if isinstance(out, (str, bytes)):
         out = parse_json_text(out.decode() if isinstance(out, bytes) else out)
     if isinstance(out, dict) and isinstance(out.get("claims"), dict):     # JSON mode: one claim, not a list
-        out = {**out, "claims": [out["claims"]]}
+        out = {**out, "claims": [out["claims"]] if out["claims"] else []}
     if not isinstance(out, dict) or not isinstance(out.get("claims"), list):
         raise LLMInvalid("response has no 'claims' list")
     drafts: list[Draft] = []
@@ -540,8 +540,8 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
             continue
         typ = str(item.get("type") or "other").strip().lower()
         typ = typ if typ in KNOWN_TYPES else "other"
-        links, seen = [], set()
-        for ln in item.get("links") or []:
+        links, seen, raw_links = [], set(), item.get("links") or []
+        for ln in [raw_links] if isinstance(raw_links, dict) else raw_links:   # JSON mode: one link, not a list
             if not isinstance(ln, dict):
                 continue
             to = str(ln.get("to") or ln.get("claim_id") or "").strip()
@@ -553,6 +553,8 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
         topic = " ".join(str(item.get("topic") or "").split()[:4]) or heuristic_topic(text)
         drafts.append(Draft(text=text[:300], type=typ, checkable=_truthy(item.get("checkable")) and typ not in NO_CHECK,
                             importance=map_importance(item.get("importance")), topic=topic, links=links))
+    if out["claims"] and not drafts:              # [] is the model saying "no claim"; junk items are not
+        raise LLMInvalid(f"no usable claim in {len(out['claims'])} item(s): {str(out['claims'])[:80]!r}")
     return drafts
 
 
@@ -591,6 +593,7 @@ class ClaimExtractor:
         self._interims: dict[str, tuple] = {}          # speaker -> (time, (id, text)) of their last interim
         self._held: dict[str, float] = {}              # released unit id -> seconds the assembler sat on it
         self._sides: dict[str, str] = {}               # fallback side assignment if the argmap can't say
+        self._lags: dict[str, deque] = {}              # speaker -> recent (ts - t_end) of their finals
         self._motion = ""
         self._sem: Optional[asyncio.Semaphore] = None
         self._sem_loop: Any = None
@@ -601,7 +604,7 @@ class ClaimExtractor:
     # ------------------------------------------------------------------ session
     def reset(self) -> None:
         self.gen += 1
-        for d in (self._buf, self._interims, self._held, self._sides):
+        for d in (self._buf, self._interims, self._held, self._sides, self._lags):
             d.clear()
 
     async def warmup(self, motion: str) -> None:
@@ -719,7 +722,6 @@ class ClaimExtractor:
         else:
             user = render_user(self._motion_text(), [(c.id, self._claim_side(c), c.text) for c in ctx],
                                self._earlier(u, earlier), side, sent)
-            t0 = time.perf_counter()
             try:
                 out = await asyncio.wait_for(self._call(user), float(getattr(config, "CLAIM_TIMEOUT_S", 2.5)))
                 drafts = drafts_from_llm(out, {c.id for c in ctx})
@@ -729,8 +731,6 @@ class ClaimExtractor:
                 cause = _cause(e)
                 log.log(logging.ERROR if cause == "error" else logging.WARNING,
                         "claim LLM fallback (%s) for %s: %s", cause, u.id, e)
-            finally:
-                self._note_latency((time.perf_counter() - t0) * 1000.0)
         self.stats["calls"] += 1
         source = "llm"
         if drafts is None:
@@ -740,10 +740,20 @@ class ClaimExtractor:
         return self._emit(u, drafts, side, source, gen)
 
     async def _call(self, user: str) -> Any:
+        """One LLM call in what CLAIM_TIMEOUT_S leaves after waiting for a slot. A call with no time to finish is
+        never started (LLMTimeout, no tokens spent), and latency counts from the slot: queueing isn't the model."""
+        budget = float(getattr(config, "CLAIM_TIMEOUT_S", 2.5))
+        deadline = time.monotonic() + budget
         async with self._semaphore():
-            return await self.llm.complete_json(SYSTEM_PROMPT, user, OUTPUT_SCHEMA,
-                                                timeout=float(getattr(config, "CLAIM_TIMEOUT_S", 2.5)),
-                                                max_tokens=LLM_MAX_TOKENS)
+            left = deadline - time.monotonic()
+            if left < min(MIN_CALL_S, budget / 2):
+                raise LLMTimeout(f"waited {budget - left:.2f}s for an LLM slot, {left:.2f}s left")
+            t0 = time.perf_counter()
+            try:
+                return await self.llm.complete_json(SYSTEM_PROMPT, user, OUTPUT_SCHEMA, timeout=left,
+                                                    max_tokens=LLM_MAX_TOKENS)
+            finally:
+                self._note_latency((time.perf_counter() - t0) * 1000.0)
 
     def _emit(self, u: Utterance, drafts: list[Draft], side: str, source: str, gen: int) -> list[Claim]:
         out: list[Claim] = []
@@ -820,14 +830,26 @@ class ClaimExtractor:
         except Exception:
             prev = []
         sents = [s for t in prev for s in split_sentences(str(t))]
+        own = f" {_norm(u.text)} "
+        while sents and f" {_norm(sents[-1])} " in own:   # a joined unit has its LAST final's id: the finals
+            sents.pop()                                   # before it are its own opening fragments
         return (sents + list(earlier))[-2:]
 
     def _motion_text(self) -> str:
         return str(getattr(self.argmap, "motion", "") or self._motion or "")
 
     def _age(self, u: Utterance) -> float:
+        """Seconds since the speech ended, less the least lag of the speaker's recent finals: ears/bridge.py stamps
+        t_end on the ears host's clock, and a constant offset (inside CLOCK_SKEW_S) is not staleness. A backlog
+        building on top of it still is. Only ever lowers the age: fail open, i.e. call the LLM."""
         t = _speech_end(u)
-        return self.clock() - t if t else 0.0
+        if not t:
+            return 0.0
+        if u.ts:
+            lags = self._lags.setdefault(u.speaker, deque(maxlen=LAG_WINDOW))
+            lags.append(u.ts - t)
+            t += max(0.0, min(lags))
+        return self.clock() - t
 
     def _note_latency(self, ms: float) -> None:
         self._lat.append(ms)

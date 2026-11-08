@@ -102,6 +102,15 @@ def test_statuses(name, k, ops, expect):
     assert {cid: d.status(cid) for cid in expect} == expect
 
 
+def test_importance_normalisation_matches_the_claim_contract():
+    """Raw scores never reach the map (schemas.Claim maps them), but the old fallback ladder disagreed with the
+    contract and was not monotonic: 3.5 -> 0.7, 5 -> 1.0, 6 -> 0.06."""
+    from app.brain.argmap import _norm_importance
+    for x in (-1.0, 0.0, 0.33, 0.5, 1.0, 2.0, 2.5, 3.0, 3.5, 5.0, 6.0, 50.0, 100.0):
+        assert _norm_importance(x) == Claim(id="c", speaker="A", text="t", importance=x).importance, x
+    assert _norm_importance("x") == 0.5 and _norm_importance(None) == 0.5
+
+
 def test_unanswered_notice_exactly_once():
     d = Driver().run([S("A"), C("c1", "A"), S("B"), C("c2", "B"), S("A"), P("A"), S("B"), C("c3", "B"), S("A")])
     un = [n for n in d.kinds("unanswered") if n.claim_id == "c1"]
@@ -318,6 +327,32 @@ def test_late_claim_lands_in_its_own_turn():
     d.m.add_claim(Claim(id="c1", speaker="A", utterance_id="u-A-0001", text="late"))
     d.m.add_claim(Claim(id="c2", speaker="A", utterance_id="unit-A-7", text="late, synthetic unit id"))
     assert d.m.turns[0].claims == ["c1", "c2"] and len(d.m.turns) == 2
+
+
+@pytest.mark.parametrize("claim_first", [True, False], ids=["claim_while_held", "claim_after_hold_died"])
+def test_claim_from_held_backchannel_does_not_split_turn(claim_first):
+    """A claim extracted from a held interjection ("Forty thousand?") opened a turn for B, closing A's open turn
+    while A was still talking: c1 went 'unanswered' and B got a 'you haven't answered' notice for two words."""
+    d = Driver().run([S("A"), C("c1", "A", imp=0.67), S("B", text="Forty thousand?")])
+    ops = [C("c2", "B", imp=0.67), S("A")]
+    d.run(ops if claim_first else ops[::-1])          # the LLM may answer before or after A's next final
+    assert [(t.speaker, t.closed, t.claims) for t in d.m.turns] == [("A", False, ["c1"])]
+    assert d.status("c1") == "open" and d.notices == []
+    assert d.m.nodes["c2"].turn == 0 and "c2" in [n.claim_id for n in d.m.snapshot().nodes]
+    d.run([S("B", dur=9), S("A")])                    # B takes the floor later: A's point goes unanswered
+    assert [t.speaker for t in d.m.turns] == ["A", "B", "A"] and d.status("c1") == "unanswered"
+    d.m.add_claim(Claim(id="c2", speaker="B", utterance_id=d.uid["B"], text="moved", importance=0.67))
+    assert d.m.nodes["c2"].turn == 1 and d.m.turns[1].claims == ["c2"]
+
+
+def test_claim_from_held_backchannel_joins_the_turn_it_starts():
+    d = Driver().run([S("A"), C("c1", "A"), S("B", text="Forty thousand?"), C("c2", "B"), S("B")])
+    assert [(t.speaker, t.claims, len(t.utts)) for t in d.m.turns] == [("A", ["c1"], 1), ("B", ["c2"], 2)]
+    assert d.m.nodes["c2"].turn == 1
+    d = Driver().run([S("A"), S("B", text="Forty thousand?"), C("c2", "B"), S("A")])     # the hold died...
+    d.m.on_utterance(Utterance(id=d.uid["B"], speaker="B", text="Forty thousand people died last year?",
+                               t_start=d.t, t_end=d.t + 2, ts=d.t + 2.5))              # ...an STT revision
+    assert [(t.speaker, t.claims) for t in d.m.turns] == [("A", []), ("B", ["c2"])] and d.m.nodes["c2"].turn == 1
 
 
 # --------------------------------------------------------------------------- version, reset, upsert, snapshot

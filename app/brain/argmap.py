@@ -8,6 +8,8 @@ Code, not the LLM, decides (design §7.3, reconciled):
 - side: from SessionStart.speakers; otherwise first speaker seen = prop, then whichever side has fewer speakers.
 - turn: maximal run of finals from one speaker; it closes when another speaker's final arrives. A 1-2 word
   final from the other speaker ("No!", "Yeah.") is held: it only opens a turn if that speaker keeps going.
+  A claim extracted from a held final never opens or closes a turn: it joins the turn its speaker goes on to
+  open, else it stays filed under the turn it interrupted (node.turn, not in that turn's claims).
 - status: minor (importance < 0.5) | answered (attacked by the other side) | conceded (only supported by the
   other side) | unanswered (no response link after >= k_turns CLOSED substantive turns by the other side;
   substantive = >= 1 claim or >= min_turn_s long) | open. A late reply moves unanswered -> answered/conceded.
@@ -67,18 +69,13 @@ def _norm_side(s: Any) -> Optional[str]:
 
 
 def _norm_importance(v: Any) -> float:
-    """Contract is 0..1; tolerate an LLM-style 1..3 (or 1..5, or percent) from a swapped-in extractor."""
+    """Contract is 0..1 and schemas.Claim already maps a 1..3 score; a raw value that bypassed validation is
+    scaled the same way (x/3, capped at 1), like director._imp."""
     try:
         v = float(v)
     except (TypeError, ValueError):
         return 0.5
-    if v <= 1:
-        return max(v, 0.0)
-    if v <= 3:
-        return round(v / 3, 2)
-    if v <= 5:
-        return round(v / 5, 2)
-    return min(v / 100, 1.0)
+    return min(v / 3.0, 1.0) if v > 1 else max(v, 0.0)
 
 
 def _sig(text: str) -> tuple[frozenset, frozenset]:
@@ -159,6 +156,7 @@ class ArgMap:
         self._nr_sent: set[int] = set()
         self._pending_verdicts: dict[str, Verdict] = {}
         self._held: Optional[Utterance] = None
+        self._interrupted: dict[str, int] = {}        # held final's id -> idx of the turn it was said over
         self._now = 0.0
 
     def reset(self, session: Optional[SessionStart] = None) -> None:
@@ -209,6 +207,7 @@ class ArgMap:
                 self._append(cur, held)
             elif cur is not None and len(u.text.split()) < self.backchannel_words:
                 self._held = u                          # "No!" over the speaker: not a turn (yet)
+                self._interrupted[u.id] = cur.idx
                 return
             else:
                 cur = self._open_turn(u.speaker)
@@ -239,18 +238,24 @@ class ArgMap:
             if self._content(node.claim) == self._content(stored):
                 return                                  # exact duplicate (e.g. replay): no change
             if stored.utterance_id != node.claim.utterance_id and stored.utterance_id in self.utt_turn:
-                self.turns[node.turn].claims.remove(c.id)
+                if c.id in self.turns[node.turn].claims:
+                    self.turns[node.turn].claims.remove(c.id)
                 node.turn = self.utt_turn[stored.utterance_id]
                 self.turns[node.turn].claims.append(c.id)
             node.claim = stored
         else:
-            turn = self._turn_for(stored)
-            node = self.nodes[c.id] = Node(claim=stored, turn=turn.idx, order=len(self.nodes))
-            turn.claims.append(c.id)
-            tc = c.t_end or c.ts
-            if tc and not turn.utts:                    # claims-only turn: time it by its claims
-                turn.t_start = turn.t_start or tc
-                turn.t_end = max(turn.t_end, tc)
+            # said over the other speaker (a held final): no turn of its own, so it must not open one (that
+            # closed the speaker's turn mid-flow). Filed under the turn it interrupted until _append() adopts it.
+            idx = None if stored.utterance_id in self.utt_turn else self._interrupted.get(stored.utterance_id)
+            if idx is None:
+                turn = self._turn_for(stored)
+                idx = turn.idx
+                turn.claims.append(c.id)
+                tc = c.t_end or c.ts
+                if tc and not turn.utts:                # claims-only turn: time it by its claims
+                    turn.t_start = turn.t_start or tc
+                    turn.t_end = max(turn.t_end, tc)
+            node = self.nodes[c.id] = Node(claim=stored, turn=idx, order=len(self.nodes))
             v = self._pending_verdicts.pop(c.id, None)
             if v is not None:
                 node.verdict, node.confidence = v.label, v.confidence
@@ -359,6 +364,15 @@ class ArgMap:
         turn.t_end = max(turn.t_end, t1)
         turn.utts.append((u.id, u.text))
         self.utt_turn[u.id] = turn.idx
+        if self._interrupted.pop(u.id, None) is not None:   # a held final made it into a turn after all
+            self._adopt(turn, u.id)
+
+    def _adopt(self, turn: Turn, utterance_id: str) -> None:
+        """Claims already extracted from a held final move into the turn it ended up in."""
+        for n in self.nodes.values():
+            if n.claim.utterance_id == utterance_id and n.id not in self.turns[n.turn].claims:
+                n.turn = turn.idx
+                turn.claims.append(n.id)
 
     def _turn_for(self, c: Claim) -> Turn:
         if c.utterance_id in self.utt_turn:

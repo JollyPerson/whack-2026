@@ -75,11 +75,13 @@ class ElevenTTD(Provider):
                             {"inputs": [{"text": text, "voice_id": self.voice, "new_turn": False}]},
                             {"flush": True}, {"close_socket": True}):
                     await ws.send(json.dumps(msg))
-                while True:
-                    try:   # after the first chunk, a long silence also ends the line (the end marker got lost)
+                while True:   # the line ends with is_final or the server closing; silence after audio is a stall
+                    try:
                         raw = await (asyncio.wait_for(ws.recv(), self.quiet_s) if pcm else ws.recv())
-                    except (TimeoutError, ConnectionClosedOK):
+                    except ConnectionClosedOK:
                         break
+                    except TimeoutError:          # never cache half a line: the next provider says all of it
+                        raise TTSError(f"stream stalled: no audio for {self.quiet_s:g} s") from None
                     msg = json.loads(raw)
                     if msg.get("error"):
                         raise TTSError(f"{msg.get('error')}: {msg.get('message')}")
@@ -118,14 +120,20 @@ class ElevenHTTP(Provider):
 class Espeak(Provider):
     name, model, voice = "espeak", "espeak-ng", "en-gb"
 
-    def __init__(self, exe: str):
-        self.exe = exe
+    def __init__(self, exe: str, timeout: float = 10.0):
+        self.exe, self.timeout = exe, timeout
 
     async def synth(self, text: str) -> bytes:
         p = await asyncio.create_subprocess_exec(self.exe, "--stdin", "--stdout", "-v", self.voice, "-s", "165",
                                                  stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                  stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await p.communicate(text.encode())
+        try:
+            out, _ = await asyncio.wait_for(p.communicate(text.encode()), self.timeout)
+        except TimeoutError:
+            raise TTSError(f"espeak-ng hung for {self.timeout:g} s") from None
+        finally:
+            if p.returncode is None:      # hung (audio backend, speech-dispatcher) or cancelled: never orphan it
+                p.kill()
         if p.returncode:
             raise TTSError(f"espeak-ng exited {p.returncode}")
         return await asyncio.to_thread(_pcm24k, out)
@@ -267,14 +275,18 @@ class TTS:
         for p in self.providers:
             try:
                 pcm = await p.synth(say)
-                path = self._path(p, say)
+            except Exception as e:
+                log.warning("tts %s failed: %s", p.name, self._scrub(f"{type(e).__name__}: {e}"))
+                continue
+            path = self._path(p, say)
+            try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_suffix(".part")
                 tmp.write_bytes(wav_bytes(pcm))
                 tmp.replace(path)                # atomic: a reader never sees half a file
-            except Exception as e:
-                log.warning("tts %s failed: %s", p.name, self._scrub(f"{type(e).__name__}: {e}"))
-                continue
+            except OSError as e:                 # not the provider's fault: paying the next one again can't help
+                log.error("tts cache write failed: %s", self._scrub(f"{type(e).__name__}: {e}"))
+                return None
             log.info("tts %s: %.1f s of audio for %r", p.name, len(pcm) / (2 * RATE), say[:60])
             return path
         return None

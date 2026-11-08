@@ -220,6 +220,15 @@ CI_KEY="$KEY_DIR/ci_key"
 as_root()   { ssh -n -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes "root@$VULTR_HOST" "$@"; }
 as_deploy() { ssh -i "$CI_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes "deploy@$VULTR_HOST" "$@"; }
 set_remote() { printf '%s' "$3" | as_deploy "$APP_DIR/set-env.sh '$APP_DIR/$1' '$2'"; }
+# ask_valid KEY "Prompt" DEFAULT REGEX "Rule": like ask, with Enter meaning DEFAULT, until the answer matches REGEX.
+ask_valid() {
+  while :; do
+    ask "$1" "$2"
+    printf -v "$1" '%s' "${!1:-$3}"
+    [[ ${!1} =~ $4 ]] && return
+    warn "$5"
+  done
+}
 
 banner "Vultr deployment setup"
 
@@ -265,6 +274,17 @@ confirm "Set up $VULTR_HOST?" || { warn "Stopped, nothing changed."; exit 1; }
 ssh-keygen -q -t ed25519 -N "" -C "github-actions-deploy" -f "$CI_KEY"
 scp -q deploy/bootstrap.sh "root@$VULTR_HOST:/root/debate-ref-bootstrap.sh"
 as_root bash /root/debate-ref-bootstrap.sh "'$(cat "$CI_KEY.pub")'"
+# The server now trusts only the new key, so GitHub gets it before anything else can stop the wizard.
+set_secret VULTR_SSH_KEY "$(cat "$CI_KEY")"
+if [[ " ${WRITTEN_SECRET[*]-} " != *" VULTR_SSH_KEY "* ]]; then
+  trap - EXIT
+  warn "GitHub didn't take the VULTR_SSH_KEY secret, and the server now lets CI in only with that key."
+  note "It's kept in $CI_KEY. Set it, then delete it:"
+  note "  gh secret set VULTR_SSH_KEY < '$CI_KEY' && rm -r '$KEY_DIR'"
+  note "Or re-run this wizard once gh can set secrets on this repo (that makes a new key)."
+  exit 1
+fi
+set_secret VULTR_KNOWN_HOSTS "$VULTR_KNOWN_HOSTS"
 scp -q -i "$CI_KEY" -o IdentitiesOnly=yes deploy/compose.yml deploy/Caddyfile deploy/deploy.sh deploy/set-env.sh \
   "deploy@$VULTR_HOST:$APP_DIR/"
 
@@ -282,7 +302,8 @@ if [[ "$VULTR_DOMAIN" != "$SSLIP_DOMAIN" ]]; then
 fi
 set_remote .env DOMAIN "$VULTR_DOMAIN"
 
-ask BASIC_AUTH_USER "Site username (e.g. debate):"
+ask_valid BASIC_AUTH_USER "Site username (Enter for debate):" debate '^[A-Za-z0-9._-]+$' \
+  "Use only letters, digits, '.', '_' and '-'."
 write_env BASIC_AUTH_USER "$BASIC_AUTH_USER"
 set_remote .env BASIC_AUTH_USER "$BASIC_AUTH_USER"
 say "Everything except /health sits behind this login, because the app has no auth of its own."
@@ -307,8 +328,8 @@ fi
 stage "App profile and API keys"
 say "Profiles are listed in the README. 'mock' needs no keys and spends nothing."
 say "Once the keys below are set: 'drive' plays the recorded debate through the real pipeline, 'live' uses the mics."
-ask APP_PROFILE "Profile: mock, drive or live (Enter for mock on a first run):"
-APP_PROFILE=${APP_PROFILE:-mock}
+ask_valid APP_PROFILE "Profile: mock, drive or live (Enter for mock on a first run):" mock '^(mock|drive|live)$' \
+  "Choose mock, drive or live."
 write_env APP_PROFILE "$APP_PROFILE"
 set_remote .env APP_PROFILE "$APP_PROFILE"
 say "Keys are stored only on the server, in $APP_DIR/app.env. Press Enter to skip or keep what's there."
@@ -326,8 +347,6 @@ note "Other keys (Deepgram, ...) can be added later. See docs/DEPLOY.md."
 
 # ─────────────────────────────────────────────────────────────────────────
 stage "Connect GitHub Actions"
-set_secret VULTR_SSH_KEY "$(cat "$CI_KEY")"
-set_secret VULTR_KNOWN_HOSTS "$VULTR_KNOWN_HOSTS"
 set_var VULTR_HOST "$VULTR_HOST"
 set_var VULTR_DOMAIN "$VULTR_DOMAIN"
 set_var DEPLOY_ENABLED "true"

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app import config, latency
+from app.brain.llm import LLMInvalid, LLMRefusal
 from app.evidence import deep, preresearch
 from app.evidence.cache import VerdictCache
 from app.evidence.checks import Guarded, Source
@@ -70,14 +71,14 @@ class Checker:
         facts = self.fact_sources(claim)
         if not self.index or not len(self.index):
             return facts
-        vector = None
-        if self.embedder is not None and self.index.vectors is not None:
-            try:
+        vector, index = None, self.index
+        if self.embedder is not None and index.vectors is not None and getattr(self.embedder, "name", None) == index.embedder_name:
+            try:                                # another model's vectors would be meaningless, or the wrong size
                 vector = (await asyncio.wait_for(asyncio.to_thread(self.embedder.embed, [claim]), QUERY_EMBED_TIMEOUT_S))[0]
             except Exception as e:
                 log.warning("query embedding failed, using BM25: %r", e)
         k = TOP_K_WITH_VECTORS if vector is not None else TOP_K
-        found = [Source(c["url"], c["title"], c["text"]) for c in self.index.search(claim, k, vector)]
+        found = [Source(c["url"], c["title"], c["text"]) for c in index.search(claim, k, vector)]
         seen = {s.text for s in facts}
         return facts + [s for s in found if s.text not in seen][:k - len(facts) // 2]
 
@@ -90,19 +91,27 @@ class Checker:
     async def check(self, claim: str, web: bool = True) -> Outcome:
         if self.llm is None:
             return Outcome(Guarded(explanation="No verdict model is configured."))
-        outcome = Outcome(Guarded(explanation="No source settles this."))
+        outcome, failed = Outcome(Guarded(explanation="No source settles this.")), None
         sources = await self.retrieve(claim)
         outcome.retrieved_at = time.time()
         if sources:
-            outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
+            # Other sources may still settle a refusal or a cut-short answer. A timeout leaves too little of the budget
+            # for the web, and a rate limit, bad key or outage would only fail again there, so those end the check.
+            try:
+                outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
+            except (LLMInvalid, LLMRefusal) as e:
+                log.warning("index verdict failed, trying the web: %r", e)
+                failed = e
         if outcome.guarded.label == "unverifiable" and web and self.searcher is not None:
             try:
                 web_found = await self.web_sources(claim)
             except Exception as e:
                 log.warning("web fallback failed: %r", e)
-                return outcome
+                web_found = []
             if web_found:
-                outcome = await self._judged(claim, web_found, "web", outcome.retrieved_at)
+                return await self._judged(claim, web_found, "web", outcome.retrieved_at)
+        if failed is not None:
+            raise failed                        # nothing else answered: still a failed check, not "unverifiable"
         return outcome
 
     async def _judged(self, claim: str, sources: list[Source], via: str, retrieved_at: Optional[float]) -> Outcome:
@@ -133,10 +142,16 @@ class EvidenceModule:
         self.deep_waiting = 0
         self.builds: dict[str, asyncio.Task] = {}   # index path -> build in flight (prepare and SessionStart share it)
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        task.add_done_callback(self._finished)
+        return task
+
+    def _finished(self, task: asyncio.Task) -> None:
+        self.tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error("evidence task failed", exc_info=task.exception())
 
     def _progress(self, stage: str, done: int, total: int, detail: str = "", motion: str = "") -> None:
         self.bus.publish(ResearchProgress(stage=stage, done=done, total=total, detail=detail, motion=motion), src="evidence")
@@ -145,8 +160,20 @@ class EvidenceModule:
         public = [{k: v for k, v in f.items() if k != "context"} for f in facts]
         self.bus.publish(FactSheet(motion=motion, brief=brief, facts=public), src="evidence")
 
-    async def _load(self, path) -> tuple[EvidenceIndex, list[dict]]:
-        index = await asyncio.to_thread(EvidenceIndex.load, path)
+    async def _load(self, path) -> Optional[tuple[EvidenceIndex, list[dict]]]:
+        """A saved index and its facts, or None when it's missing, unreadable or empty (every search failed when it
+        was built): the caller researches it again."""
+        if not path.with_suffix(".json").exists():
+            return None
+        try:
+            index = await asyncio.to_thread(EvidenceIndex.load, path)
+        except Exception as e:
+            log.warning("saved index %s is unreadable, researching it again: %r", path, e)
+            return None
+        if not len(index):
+            return None
+        if index.vectors is not None and getattr(self.embedder, "name", "") != index.embedder_name:
+            log.warning("index %s was embedded with %r, so retrieval uses BM25 alone", path, index.embedder_name)
         return index, await asyncio.to_thread(preresearch.load_facts, path)
 
     def _build(self, motion: str, brief: str, deadline_s: float) -> asyncio.Task:
@@ -166,10 +193,16 @@ class EvidenceModule:
         index = await preresearch.build_index(motion, self.searcher, self.llm, None, progress,
                                               deadline_s=deadline_s, brief=brief)
         facts = await preresearch.extract_facts(motion, index, self.llm, brief, progress=progress)
+        if not len(index):                  # never cache an empty index: the next try should search again
+            self._progress("error", 0, 0, "Pre-research found nothing, using web search only", motion)
+            self._fact_sheet(motion, brief, facts)
+            return index, facts
         path = preresearch.index_path(motion, brief=brief)
-        if len(index):                      # never cache an empty index: the next try should search again
+        try:
             await asyncio.to_thread(index.save, path)
             await asyncio.to_thread(preresearch.save_facts, path, facts)
+        except Exception as e:              # the index still serves this session from memory
+            log.warning("couldn't save the index for %r: %r", motion, e)
         self._progress("ready", len(index), len(index), f"{len(index)} passages, {len(facts)} key facts", motion)
         self._fact_sheet(motion, brief, facts)
         return index, facts
@@ -178,9 +211,9 @@ class EvidenceModule:
         """ResearchRequest: research before the debate, leaving the running session alone."""
         if not motion.strip():
             return
-        path = preresearch.index_path(motion, brief=brief)
-        if path.with_suffix(".json").exists():
-            index, facts = await self._load(path)
+        loaded = await self._load(preresearch.index_path(motion, brief=brief))
+        if loaded:
+            index, facts = loaded
             self._progress("ready", len(index), len(index), "built in advance", motion)
             self._fact_sheet(motion, brief, facts)
             return
@@ -196,34 +229,42 @@ class EvidenceModule:
     async def start_session(self, motion: str, brief: str = "") -> None:
         self.session += 1
         session = self.session
-        self.checker = Checker(self.llm, self.searcher, self.embedder, motion=motion)
+        # A local checker: after any await below, self.checker may already be a newer Motion's.
+        checker = self.checker = Checker(self.llm, self.searcher, self.embedder, motion=motion)
         self.verdicts = VerdictCache()
         verdicts = await asyncio.to_thread(VerdictCache.for_motion, motion)
         if session == self.session:
             self.verdicts = verdicts
+
+        def progress(stage: str, done: int, total: int, detail: str = "") -> None:
+            if session == self.session:         # once a newer Motion starts, the research line is its own
+                self._progress(stage, done, total, detail, motion)
+
         path = preresearch.index_path(motion, brief=brief)
         if not path.with_suffix(".json").exists() and brief.strip() and str(path) not in self.builds:
             plain = preresearch.index_path(motion)     # a demo Motion with a brief added still has its saved index
             if plain.with_suffix(".json").exists():
                 path = plain
-        if path.with_suffix(".json").exists():
-            self.checker.index, facts = await self._load(path)
-            self.checker.set_facts(facts)
-            self._progress("ready", len(self.checker.index), len(self.checker.index), "built in advance", motion)
-            self._fact_sheet(motion, brief, facts)
+        loaded = await self._load(path)
+        if loaded:
+            checker.index, facts = loaded
+            checker.set_facts(facts)
+            progress("ready", len(checker.index), len(checker.index), "built in advance")
+            if session == self.session:
+                self._fact_sheet(motion, brief, facts)
             return
         if not motion or self.searcher is None:
-            self._progress("error", 0, 0, "No saved index, and live research isn't available", motion)
+            progress("error", 0, 0, "No saved index, and live research isn't available")
             return
         try:
             index, facts = await self._build(motion, brief, preresearch.LIVE_DEADLINE_S)
         except Exception as e:
             log.warning("pre-research failed: %r", e)
-            self._progress("error", 0, 0, "Pre-research failed, using web search only", motion)
+            progress("error", 0, 0, "Pre-research failed, using web search only")
             return
-        if session == self.session:
-            self.checker.index = index
-            self.checker.set_facts(facts)
+        if len(index):                          # an empty build was reported as an error and isn't used
+            checker.index = index
+            checker.set_facts(facts)
 
     async def handle_claim(self, claim: Claim) -> None:
         session, checker, verdicts = self.session, self.checker, self.verdicts

@@ -769,3 +769,100 @@ def test_prompt_and_source_request_still_respect_cooldown_and_rank_under_confide
     _, o = run(ev)
     assert fired(o) == [(6, "correction", "A", "c1"), (37, "prompt", "B", "a1")]
     assert ("prompt:a1", "held", "cooldown") in logs(o)
+
+
+# ----------------------------------------------------------------------------- hardening regressions
+
+
+def test_malformed_evidence_url_never_blocks_the_referee():
+    """urlparse raises on an unmatched bracket: the bad candidate raised on every Pause/tick and held the queue."""
+    assert voice.source_name([{"url": "https://[broken/x"}]) == ""
+    assert voice.source_name([{"url": "http://a]b/", "title": "Crime survey - Office for National Statistics"}]) == \
+        "Office for National Statistics"
+    assert voice.source_name([{"url": "https://[broken/x"}, {"url": "https://www.ons.gov.uk/x"}]) == "the ONS"
+    bad = [Evidence(url="https://[broken/x", title="", quote="q")]
+    ev = talk("A", 0, 5) + [(4, C("c1", "A", 3, imp=1.0)), (4.5, Verdict(claim_id="c1", label="contradicted",
+                                                                        confidence=.95, evidence=bad)),
+                            (4.6, C("c2", "A", 3, canon="k2")), (4.8, V("c2", "missing_context", .9)), (6, P("A", 6))]
+    _, o = run(ev)
+    assert fired(o) == [(6, "correction", "A", "c1")]
+    assert lines(o)[0].text == "Point of fact: the source contradicts that. Details on screen."
+
+
+def test_judgement_word_in_numeric_unit_is_never_spoken():
+    v = {"evidence": [{"url": "https://www.ons.gov.uk/x"}],
+         "numeric": {"claimed": 6, "actual": 4, "unit": "false claims"}}
+    text = voice.render("correction", verdict=v)
+    assert voice.ok(text) and text == "Point of fact: the ONS contradicts that. Details on screen."
+    v["numeric"]["unit"] = "deaths"
+    assert voice.render("correction", verdict=v) == "Point of fact: the ONS puts that at 4 deaths, not 6 deaths."
+
+
+def test_a_pause_with_no_speech_since_the_last_line_never_reopens_the_floor():
+    """The referee's own echo makes the bridge send Pause(A) with no new human speech: that is not a human pause."""
+    ev = talk("A", 0, 5) + [(4, C("c1", "A", 4, imp=1.0)), (4, C("c2", "A", 4, imp=1.0, canon="k2")),
+                            (5, V("c1", "contradicted", .95)), (5, V("c2", "contradicted", .95)), (6, P("A", 6)),
+                            (14, P("A", 14))] + ticks(6, 48)
+    d, o = run(ev)
+    assert fired(o) == [(6, "correction", "A", "c1")]
+    assert d.status(48).blocked == "awaiting_pause"
+    _, o = run(ev + talk("A", 40, 41) + [(42, P("A", 42))])     # a human speaks and pauses: the next line may come
+    assert fired(o) == [(6, "correction", "A", "c1"), (42, "correction", "A", "c2")]
+
+
+def test_time_call_is_what_its_force_window_fires():
+    """Control(time) forces the time line, not whichever candidate outscores it (the call was then dropped stale)."""
+    ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
+          + talk("B", 7, 15) + [(14, C("c2", "B", 14, imp=1.0)), (14.5, V("c2", "contradicted", .99)),
+                                (15, Control(flag="time", value="B")), (15.5, P("B", 15.5))] + ticks(15.5, 65))
+    _, o = run(ev)
+    assert fired(o)[:2] == [(6, "correction", "A", "c1"), (15.5, "time", "B", None)]
+    assert ("time:B:15", "fired", "forced") in logs(o) and ("time:B:15", "dropped", "stale_ttl") not in logs(o)
+    # a later force_next is the operator's "say whatever is next": the stronger correction goes first
+    _, o = run(ev[:-len(ticks(15.5, 65))] + [(15.2, Control(flag="force_next"))])
+    assert fired(o)[1][1:] == ("correction", "B", "c2")
+
+
+def test_veto_and_status_agree_with_the_time_calls_force_window():
+    """veto(True) and DirectorStatus.pending ranked by score alone: in a time call's force window they named the
+    stronger correction (and vetoed it), while the time line was what would fire."""
+    ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
+          + talk("B", 7, 15) + [(14, C("c2", "B", 14, imp=1.0)), (14.5, V("c2", "contradicted", .99)),
+                                (15, Control(flag="time", value="B"))])
+    d, _ = run(ev)
+    assert [x["key"] for x in d.status(15.2).pending][:2] == ["time:B:15", "correction:c2"]
+    _, o = run(ev + [(15.2, Control(flag="veto", value=True)), (15.5, P("B", 15.5))])
+    assert ("time:B:15", "dropped", "veto") in logs(o) and ("correction:c2", "dropped", "veto") not in logs(o)
+    assert [f[1] for f in fired(o)] == ["correction"]               # c1 at 6; the vetoed time line never fires
+
+
+def test_time_control_by_side_alias_never_invents_a_speaker():
+    d, _ = run(talk("A", 0, 2) + [(3, Control(flag="time", value="Opposition"))] + talk("B", 4, 6))
+    assert "Opposition" not in d.st.sides and d.name("B") == "Opposition" and "Opposition" not in d.status(7).pressure
+    _, o = run(talk("A", 0, 2) + talk("B", 3, 9) + [(8, Control(flag="time", value="opp")), (10, P("B", 10))])
+    assert [f[1:3] for f in fired(o)] == [("time", "B")]
+    d, o = run(talk("A", 0, 2) + [(3, Control(flag="time", value="nobody")), (4, P("A", 4))])
+    assert fired(o) == [] and list(d.st.sides) == ["A"]
+
+
+def test_restated_claim_replacing_a_pending_line_is_logged():
+    """Same canonical_key, new claim: the old candidate is logged superseded and the new text reaches D."""
+    ev = talk("A", 0, 9) + [(4, C("c1", "A", 3, canon="k")), (8, C("c9", "A", 7, canon="k")), (10, P("A", 10)),
+                            (4.5, V("c1", "contradicted", .9, short_fact="crime fell 3 percent")),
+                            (8.5, V("c9", "contradicted", .9, short_fact="crime fell 5 percent"))]
+    _, o = run(ev)
+    cands = [(x.claim_id, x.text) for _, x in o if isinstance(x, DirectorDecision) and x.action == "candidate"]
+    assert cands == [("c1", "Point of fact: the ONS says crime fell 3 percent."),
+                     ("c9", "Point of fact: the ONS says crime fell 5 percent.")]
+    assert ("correction:k", "dropped", "superseded") in logs(o)
+    assert fired(o) == [(10, "correction", "A", "c9")] and lines(o)[0].text == cands[1][1]
+
+
+def test_restart_keeps_the_operators_aggr_from_flags(monkeypatch):
+    monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": 5})
+    assert Director(aggr=3).aggr == 5
+    monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": "2"})
+    assert Director(aggr=3).aggr == 2 and Director(aggr=3).st.cfg.min_gap_s == 45
+    for rel in ("up", "+", None, "junk"):                      # a relative step can't be replayed onto a fresh level
+        monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": rel})
+        assert Director(aggr=3).aggr == 3

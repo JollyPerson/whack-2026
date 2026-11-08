@@ -191,9 +191,11 @@ async def build_index(motion: str, searcher, llm=None, embedder=None, progress: 
                 report("searching", done, len(jobs), query)
 
     tasks = [asyncio.create_task(one(q, d)) for q, d in jobs]
-    await asyncio.wait(tasks, timeout=deadline_s * .7)
-    for t in tasks:
-        t.cancel()
+    try:
+        await asyncio.wait(tasks, timeout=deadline_s * .7)
+    finally:                                    # also when this build is cancelled: wait() leaves its tasks running
+        for t in tasks:
+            t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     pages, seen = [], set()
     for t in tasks:                             # primary-source pages first, then the open searches
@@ -207,7 +209,8 @@ async def build_index(motion: str, searcher, llm=None, embedder=None, progress: 
     vectors = await asyncio.to_thread(build_vectors, chunks, embedder)
     index = EvidenceIndex(chunks, vectors, embedder.name if embedder and vectors is not None else "")
     index.queries = queries
-    report("ready", len(chunks), len(chunks), f"{len(pages)} pages")
+    if chunks:                                  # an empty index isn't ready: the caller reports the error
+        report("ready", len(chunks), len(chunks), f"{len(pages)} pages")
     return index
 
 
@@ -306,18 +309,23 @@ def main() -> int:
     def show(stage: str, done: int, total: int, detail: str) -> None:
         print(f"  {stage} {done}/{total} {detail[:70]}", flush=True)
 
-    async def go() -> None:
+    async def go() -> int:
+        empty = 0
         for motion in motions:
             print(motion, flush=True)
             index = await build_index(motion, searcher, llm, embedder, show,
                                       deadline_s=float(os.environ.get("PRERESEARCH_DEADLINE_S", 240)), brief=brief)
+            if not len(index):                  # saving it would replace a good index, or make --missing skip it
+                empty += 1
+                print("  nothing found, not saved: check EXA_API_KEY and the search quota", flush=True)
+                continue
             path = index_path(motion, brief=brief)
             index.save(path)
             save_facts(path, await extract_facts(motion, index, llm, brief, progress=show))
             print(f"  saved {len(index)} chunks to {path} (embedder: {index.embedder_name or 'none, BM25 only'})", flush=True)
+        return empty
 
-    asyncio.run(go())
-    return 0
+    return 1 if asyncio.run(go()) else 0
 
 
 if __name__ == "__main__":

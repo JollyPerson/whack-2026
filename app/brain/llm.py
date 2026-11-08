@@ -193,13 +193,26 @@ def thinking_for(model: str) -> Optional[dict]:
 
 
 # ----------------------------------------------------------------------------- Anthropic
+def _claude_model(model: Any = None) -> str:
+    """The Claude model id to send: `model`, else config.LLM_MODEL, if it is a valid id; otherwise
+    ANTHROPIC_DEFAULT_MODEL. LLM_MODEL may hold a GPT name (how ChatGPT is picked for claims), and Claude Code
+    style values ("opus", "claude-opus-5-5[1m]") are rejected by the API."""
+    explicit = str(model or "").strip()
+    m = explicit or str(config.LLM_MODEL or "").strip()
+    if CLAUDE_MODEL_ID.fullmatch(m):
+        return m
+    if explicit or m.lower().startswith("claude"):   # a GPT name in LLM_MODEL is expected; a broken id is not
+        log.warning("%r is not a Claude model id; using %s", m, ANTHROPIC_DEFAULT_MODEL)
+    return ANTHROPIC_DEFAULT_MODEL
+
+
 class AnthropicLLM:
     def __init__(self, client: Any = None, model: Optional[str] = None, effort: str = "low"):
         if client is None:
             import anthropic
             client = anthropic.AsyncAnthropic(max_retries=0)   # SDK retries would multiply wall time
         self.client = client
-        self.model = model or config.LLM_MODEL
+        self.model = _claude_model(model)              # also for clients built directly (C's verdict model)
         self.name = f"anthropic:{self.model}"
         self.effort = effort
         self.thinking = thinking_for(self.model)
@@ -499,14 +512,9 @@ def _make_anthropic(quiet: bool = False) -> Optional[AnthropicLLM]:
         if not quiet:
             log.warning("no Anthropic credentials (ANTHROPIC_API_KEY or `ant auth login`); heuristic extraction only")
         return None
-    # LLM_MODEL is the one knob. ANTHROPIC_MODEL is deliberately ignored: it is Claude Code's own setting, so it
-    # may be exported in a teammate's shell with an alias ("opus") or a "[1m]" suffix the API rejects.
-    model = str(config.LLM_MODEL or "").strip()
-    if not CLAUDE_MODEL_ID.fullmatch(model):
-        if model.lower().startswith("claude"):                 # a GPT name is expected here; a broken id is not
-            log.warning("LLM_MODEL=%r is not a Claude model id; using %s", model, ANTHROPIC_DEFAULT_MODEL)
-        model = ANTHROPIC_DEFAULT_MODEL
-    return AnthropicLLM(client, model=model)
+    # LLM_MODEL is the one knob (validated by _claude_model). ANTHROPIC_MODEL is deliberately ignored: it is Claude
+    # Code's own setting, so it may be exported in a teammate's shell with an alias ("opus") or a "[1m]" suffix.
+    return AnthropicLLM(client)
 
 
 def _make_openai(quiet: bool = False) -> Optional[OpenAICompatLLM]:

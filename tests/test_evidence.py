@@ -638,10 +638,391 @@ async def test_slow_query_embedding_falls_back_to_bm25(monkeypatch):
             time.sleep(.2)
             return [[1.0, 0.0, 0.0]]
     np = pytest.importorskip("numpy")
-    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"))
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "slow")
     found = await Checker(None, embedder=Slow(), index=index).retrieve("bus use in London")
     assert found[0].url.endswith("/0")
 
+
+# --- regressions: guards
+@pytest.mark.parametrize("kw,text", [(dict(claimed=50, actual=27), "Bus use fell by 50%"),
+                                     (dict(directly_states=False), "Bus use fell"),
+                                     (dict(claimed=99, actual=27), "Bus use fell by 27%"),
+                                     ({}, "Bus use fell by 27%")])
+def test_guard_capped_verdict_is_marked_even_below_the_cap(kw, text):
+    """At aggressiveness 4-5 the Director voices .65+, so a cap the guard chose must be marked whatever the confidence."""
+    g = apply_guards(raw(confidence=.7, **kw), text, SRC)
+    assert "capped" in g.notes and g.confidence == .7
+
+
+def test_figures_followed_by_letters_are_read_whole():
+    assert numbers_in("20mph zones") == [20] and numbers_in("over-75s") == [75] and numbers_in("the 1990s") == [1990]
+    assert numbers_in("5m people, 3 metres, 12km") == [5e6, 3, 12] and numbers_in("COVID-19 cases") == [19]
+
+
+WALES = "The default speed limit on restricted roads in Wales changed from 30mph to 20mph in September 2023."
+WALES_SRC = [Source("https://gov.wales/20mph", "20mph", WALES)]
+
+
+def test_figure_with_a_unit_attached_is_compared():
+    g = apply_guards(raw(quote="changed from 30mph to 20mph", claimed=20, actual=20, unit="mph"),
+                     "The default limit in Wales is now 20mph", WALES_SRC)
+    assert g.numeric is not None and g.numeric.actual == 20 and g.notes == [] and g.confidence == .9
+
+
+RAIL = "Passenger fares brought in £11.2 billion in the year to March."
+RAIL_SRC, RAIL_QUOTE = [Source("https://orr.gov.uk/rail", "Rail finance", RAIL)], "Passenger fares brought in £11.2 billion"
+
+
+@pytest.mark.parametrize("unit,spoken", [
+    ("billion pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("billions of pounds", "11.2 billion pounds, not 2 billion pounds"),
+    ("£", "£11.2 billion, not £2 billion"),
+    ("GBP", "£11.2 billion, not £2 billion"),
+    ("£bn", "£11.2 billion, not £2 billion"),
+    ("£ billion", "£11.2 billion, not £2 billion"),
+    ("", "11.2 billion, not 2 billion"),
+])
+def test_figure_given_without_its_scale_word_is_compared_and_said_with_it(unit, spoken):
+    """FACT-CARDS WRONG #8: the model writes 2 and 11.2 for "£2 billion" and "£11.2 billion". The scale comes from
+    the text, never from the model's free-text unit, so the referee never says "£11.2, not £2"."""
+    from app.brain import voice
+    g = apply_guards(raw(label="contradicted", quote=RAIL_QUOTE, claimed=2, actual=11.2, unit=unit),
+                     "Rail fares only bring in about £2 billion a year", RAIL_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
+    assert (g.numeric.claimed, g.numeric.actual) == (2e9, 11.2e9)
+    assert voice.render("correction", verdict=g) == f"Point of fact: GOV.UK puts that at {spoken}."
+
+
+def test_figures_in_millions_are_published_whole():
+    from app.brain import voice
+    quote = "About 4.1m people use the bus every day"
+    g = apply_guards(raw(label="contradicted", quote=quote, claimed=5, actual=4.1, unit="people"),
+                     "5m people ride the bus daily", [Source("https://ons.gov.uk/bus", "Bus use", quote + ".")])
+    assert (g.numeric.claimed, g.numeric.actual, g.numeric.unit) == (5e6, 4.1e6, "people") and g.notes == []
+    assert "4.1 million people, not 5 million people" in voice.render("correction", verdict=g)
+
+
+def test_infinite_figure_is_dropped():
+    g = apply_guards(raw(claimed=float("inf"), actual=float("inf")), "Bus use outside London fell by 27%", SRC)
+    assert g.numeric is None and g.notes == ["numeric_dropped", "capped"] and g.label == "supported"
+
+
+@pytest.mark.parametrize("text,quote,actual", [
+    ("It cost £3.2 billion", "It cost 3,200,000,000 pounds", 3.2e9),     # a mantissa against a full figure
+    ("It cost £3.2 billion", "It cost £3.2 million", 3.2),               # billions against millions
+])
+def test_mantissa_is_never_compared_with_another_basis(text, quote, actual):
+    g = apply_guards(raw(label="contradicted", quote=quote, claimed=3.2, actual=actual), text, [Source("u", "t", quote)])
+    assert g.numeric is None and "numeric_dropped" in g.notes and g.label == "contradicted"
+
+
+def test_close_figure_in_words_does_not_flip_contradicted_to_supported():
+    """The 25% band for words only stops code calling a fair "about a quarter" wrong; "half" is not 38%."""
+    src = [Source("u", "t", "Transport produced 38% of emissions in 2023.")]
+    g = apply_guards(raw(label="contradicted", quote="Transport produced 38% of emissions", claimed=50, actual=38, unit="%"),
+                     "Transport produces half of emissions", src)
+    assert g.label == "contradicted" and "numeric_override" not in g.notes and "capped" in g.notes
+
+
+def test_far_figure_in_words_still_overrules_supported():
+    g = apply_guards(raw(quote=GHG_QUOTE, claimed=50, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.label == "contradicted" and "numeric_override" in g.notes and "capped" in g.notes
+
+
+ROADS = "More than half a million people were hurt on Britain's roads in 2024."
+ROADS_TEXT = "In 2024 there were an estimated 128,272 casualties of all severities on Britain's roads."
+ROADS_SRC, ROADS_QUOTE = [Source("https://gov.uk/roads", "Road casualties", ROADS_TEXT)], "an estimated 128,272 casualties"
+
+
+def test_word_figure_reported_beside_a_year_is_compared_and_stays_on_air():
+    g = apply_guards(raw(label="contradicted", quote=ROADS_QUOTE, claimed=500000, actual=128272), ROADS, ROADS_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
+
+
+# --- regressions: index
+def test_query_vector_of_the_wrong_size_leaves_bm25_to_answer():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e")
+    assert index.search("bus use in London", 1, query_vector=[1.0] * 5)[0]["url"].endswith("/0")
+
+
+def test_save_without_vectors_removes_old_vectors(tmp_path):
+    np = pytest.importorskip("numpy")
+    five = [{"url": f"https://x.org/{i}", "title": "t", "text": f"bus use {i}"} for i in range(5)]
+    EvidenceIndex(five, np.eye(5, dtype="float32"), "e").save(tmp_path / "m")
+    EvidenceIndex(five[:1]).save(tmp_path / "m")
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and len(idx.search("bus use", 5, query_vector=[1, 0, 0, 0, 0])) == 1
+
+
+def test_load_drops_vectors_that_do_not_match_the_chunks(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    np.save(tmp_path / "m.npy", np.eye(5, dtype="float32"))
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and idx.search("bus use", 3, query_vector=[0, 0, 0, 0, 1])
+
+
+def test_unreadable_vectors_leave_the_chunks_for_bm25(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    (tmp_path / "m.npy").write_bytes(b"\x93NUMPY truncated")
+    idx = EvidenceIndex.load(tmp_path / "m")
+    assert idx.vectors is None and len(idx) == 3 and idx.search("bus use", 3)
+
+
+def test_save_leaves_no_temporary_files(tmp_path):
+    np = pytest.importorskip("numpy")
+    EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "e").save(tmp_path / "m")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["m.json", "m.npy"]
+
+
+def test_openai_embedder_reuses_one_connection(monkeypatch):
+    import httpx
+    from app.evidence import index as index_module
+    made, sent = [], []
+
+    def reply(request):
+        sent.append(request)
+        n = len(json.loads(request.content)["input"])
+        return httpx.Response(200, json={"data": [{"index": i, "embedding": [float(i)]} for i in range(n)]})
+
+    class Counting(httpx.Client):
+        def __init__(self, **kw):
+            made.append(self)
+            super().__init__(transport=httpx.MockTransport(reply), **kw)
+    monkeypatch.setattr(index_module.httpx, "Client", Counting)
+    monkeypatch.setattr(index_module.httpx, "post", lambda *a, **k: pytest.fail("a new connection for every call"))
+    embedder = index_module.OpenAIEmbedder("k")
+    assert embedder.embed(["a"]) == [[0.0]] and embedder.embed(["a", "b"]) == [[0.0], [1.0]]
+    assert len(made) == 1 and len(sent) == 2 and sent[0].headers["authorization"] == "Bearer k"
+
+
+# --- regressions: the check flow
+class NamedEmbedder:
+    def __init__(self, name, vector):
+        self.name, self.vector, self.calls = name, vector, 0
+
+    def embed(self, texts):
+        self.calls += 1
+        return [self.vector for _ in texts]
+
+
+async def test_index_built_by_another_embedder_answers_from_bm25():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}],
+                          np.ones((1, 4), dtype="float32") / 2, "fastembed:BAAI/bge-small-en-v1.5")
+    web, other = FakeSearch(), NamedEmbedder("openai:text-embedding-3-small", [1.0] * 6)
+    out = await Checker(FakeLLM(raw()), web, embedder=other, index=index).check("Bus use outside London fell")
+    assert out.via == "index" and out.guarded.label == "supported" and web.calls == 0 and other.calls == 0
+
+
+async def test_matching_embedder_is_used_for_the_query():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "same")
+    same = NamedEmbedder("same", [0.0, 1.0, 0.0])
+    found = await Checker(None, embedder=same, index=index).retrieve("zzz unrelated")
+    assert same.calls == 1 and found[0].url.endswith("/1")
+
+
+async def test_index_model_error_still_tries_the_web():
+    from app.brain.llm import LLMInvalid
+    web = FakeSearch([{"url": "https://ons.gov.uk/a", "title": "ONS", "text": TEXT}])
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    llm = FakeLLM(LLMInvalid("stop_reason=max_tokens"), raw())
+    out = await Checker(llm, web, index=index).check("Bus use outside London fell")
+    assert out.via == "web" and out.guarded.label == "supported" and web.calls == 1
+
+
+@pytest.mark.parametrize("web_on", [True, False])
+async def test_index_model_error_with_no_web_answer_is_still_an_error(web_on):
+    from app.brain.llm import LLMRefusal
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    with pytest.raises(LLMRefusal):
+        await Checker(FakeLLM(LLMRefusal("no")), FakeSearch([]), index=index).check("Bus use outside London fell", web=web_on)
+
+
+@pytest.mark.parametrize("error", ["timeout", "HTTP 429"])
+async def test_index_model_timeout_or_outage_does_not_spend_the_rest_on_the_web(error):
+    """A timeout leaves too little budget; a rate limit, bad key or outage would fail again on the same key."""
+    from app.brain.llm import LLMError, LLMTimeout
+    failure = LLMTimeout("slow") if error == "timeout" else LLMError(error)
+    web = FakeSearch([{"url": "https://ons.gov.uk/a", "title": "ONS", "text": TEXT}])
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    llm = FakeLLM(failure, raw())
+    with pytest.raises(type(failure)):
+        await Checker(llm, web, index=index).check("Bus use outside London fell")
+    assert web.calls == 0 and llm.calls == 1
+
+
+# --- regressions: sessions
+def drain(sub):
+    out = []
+    while not sub.q.empty():
+        out.append(sub.q.get_nowait())
+    return out
+
+
+async def test_slow_index_load_does_not_land_on_the_next_motion(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    EvidenceIndex(chunks()).save(preresearch.index_path("Motion A"))
+    real_load = EvidenceIndex.load
+
+    def slow_load(path):
+        time.sleep(.3)
+        return real_load(path)
+    monkeypatch.setattr(EvidenceIndex, "load", staticmethod(slow_load))
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()))
+    first = asyncio.create_task(mod.start_session("Motion A"))
+    await asyncio.sleep(.05)
+    await mod.start_session("Motion B")
+    await first
+    assert mod.checker.motion == "Motion B" and mod.checker.index is None
+    assert [p.stage for p in drain(sub)] == ["error"]           # Motion A's "ready" never reaches the dashboard
+
+
+async def test_new_motion_leaves_a_shared_build_running():
+    """A build can be shared with a ResearchRequest for the same Motion, so a new SessionStart must not cancel it."""
+    started, cancelled = asyncio.Event(), []
+
+    class Hangs(FakeSearch):
+        async def search(self, query, **k):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(query)
+                raise
+            return []
+    bus = Bus()
+    mod = EvidenceModule(bus, None, Hangs())
+    task = asyncio.create_task(mod.run())
+    await asyncio.sleep(0)
+    bus.publish(SessionStart(motion="Motion A"))
+    await asyncio.wait_for(started.wait(), 2)
+    bus.publish(SessionStart(motion=""))
+    await asyncio.sleep(.3)
+    still_running = not cancelled and len(mod.builds) == 1
+    pending = [task, *mod.tasks, *mod.builds.values()]
+    for t in pending:
+        t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert still_running
+
+
+async def test_corrupt_saved_index_reports_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    path = preresearch.index_path("Motion D")
+    path.with_suffix(".json").write_text('{"chunks": [')
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()))
+    await mod.start_session("Motion D")
+    assert [p.stage for p in drain(sub)] == ["error"] and mod.checker.index is None
+
+
+async def test_failed_background_task_is_logged(caplog):
+    async def boom():
+        raise RuntimeError("lost")
+    mod = EvidenceModule(Bus())
+    mod._spawn(boom())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    logged = [r for r in caplog.records if r.name == "evidence" and r.exc_info and "lost" in repr(r.exc_info[1])]
+    assert logged and not mod.tasks
+
+
+class Down(FakeSearch):
+    async def search(self, *a, **k):
+        self.calls += 1
+        raise RuntimeError("down")
+
+
+async def test_research_that_finds_nothing_is_not_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()), Down())
+    await mod.start_session("Motion C")
+    assert not preresearch.index_path("Motion C").with_suffix(".json").exists() and mod.checker.index is None
+    stages = [p.stage for p in drain(sub)]
+    assert stages[-1] == "error" and "ready" not in stages     # the dashboard never flashes "ready" first
+
+
+async def test_empty_saved_index_is_researched_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    EvidenceIndex([]).save(preresearch.index_path("Motion E"))
+    web = FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}])
+    mod = EvidenceModule(Bus(), FakeLLM(raw()), web)
+    await mod.start_session("Motion E")
+    assert web.calls and len(mod.checker.index) == 1
+    assert len(EvidenceIndex.load(preresearch.index_path("Motion E"))) == 1
+
+
+def test_preresearch_cli_does_not_save_an_empty_index(tmp_path, monkeypatch, capsys):
+    import sys
+    from app.evidence import llm as llm_module, search as search_module
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    monkeypatch.setattr(search_module, "make_search", lambda: Down())
+    monkeypatch.setattr(llm_module, "make_verdict_llm", lambda: None)
+    monkeypatch.setattr(preresearch, "make_embedder", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["preresearch", "Motion C"])
+    assert preresearch.main() == 1
+    assert not list(tmp_path.iterdir()) and "not saved" in capsys.readouterr().out
+
+
+async def test_index_that_cannot_be_saved_is_still_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+
+    def full_disk(self, path):
+        raise OSError("No space left on device")
+    monkeypatch.setattr(EvidenceIndex, "save", full_disk)
+    mod = EvidenceModule(Bus(), FakeLLM(raw()), FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}]))
+    await mod.start_session("Motion F")
+    assert len(mod.checker.index) == 1
+
+
+# --- regressions: the verdict model
+def test_evidence_model_applies_without_its_own_key(monkeypatch):
+    from app.brain.llm import AnthropicLLM
+    from app.evidence import llm as llm_module
+    monkeypatch.delenv("EVIDENCE_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("EVIDENCE_MODEL", "claude-sonnet-5-5")
+    brain = AnthropicLLM(client=object(), model="claude-haiku-5-5")
+    monkeypatch.setattr(llm_module, "make_llm", lambda: brain)
+    got = llm_module.make_verdict_llm()
+    assert got.model == "claude-sonnet-5-5" and got.name == "anthropic:claude-sonnet-5-5" and got.client is brain.client
+
+
+def test_without_evidence_model_verdicts_use_the_default_model_on_brains_client(monkeypatch):
+    from app.brain.llm import AnthropicLLM
+    from app.evidence import llm as llm_module
+    monkeypatch.delenv("EVIDENCE_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EVIDENCE_MODEL", raising=False)
+    brain = AnthropicLLM(client=object(), model="claude-haiku-5-5")
+    monkeypatch.setattr(llm_module, "make_llm", lambda: brain)
+    got = llm_module.make_verdict_llm()
+    assert got.model == llm_module.DEFAULT_VERDICT_MODEL and got.client is brain.client
+
+
+@pytest.mark.parametrize("evidence_model,llm_model,want", [
+    (None, "gpt-6-luna", "claude-opus-5-5"),             # no EVIDENCE_MODEL: the verdict default, whatever Brain uses
+    ("opus", "claude-sonnet-5-5", "claude-opus-5-5"),    # a Claude Code alias the API rejects: ignored
+    ("claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-5-5"),
+])
+def test_evidence_key_gets_a_valid_claude_model(monkeypatch, evidence_model, llm_model, want):
+    from app import config
+    from app.evidence import llm as llm_module
+    monkeypatch.setenv("EVIDENCE_ANTHROPIC_API_KEY", "test-key")
+    if evidence_model is None:
+        monkeypatch.delenv("EVIDENCE_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("EVIDENCE_MODEL", evidence_model)
+    monkeypatch.setattr(config, "LLM_MODEL", llm_model)
+    assert llm_module.make_verdict_llm().model == want
 
 # --- on-the-fly pre-research: brief, ResearchRequest, fact sheet
 PAGE = {"url": "https://gov.uk/bus", "title": "Bus statistics", "text": TEXT}

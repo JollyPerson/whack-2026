@@ -57,10 +57,19 @@ async def fake_research(bus, motion: str, brief: str = "", step: float = 0.2):
 
 
 async def run(bus):
+    pending: set[asyncio.Task] = set()     # this session's checks + research: a SessionStart cancels them
+
+    def spawn(coro) -> None:
+        t = asyncio.create_task(coro)
+        pending.add(t)
+        t.add_done_callback(pending.discard)
+
     async for ev in bus.subscribe("mock_evidence", {"Claim", "SessionStart", "ResearchRequest"}):
         if ev.event == "SessionStart":
-            asyncio.create_task(fake_research(bus, ev.motion, ev.brief))
+            for t in list(pending):        # a verdict for the previous session's claim must not land in this one
+                t.cancel()
+            spawn(fake_research(bus, ev.motion, ev.brief))
         elif ev.event == "ResearchRequest":
-            asyncio.create_task(fake_research(bus, ev.motion, ev.brief, step=0.6))
+            spawn(fake_research(bus, ev.motion, ev.brief, step=0.6))
         elif ev.checkable:
-            asyncio.create_task(check(bus, ev))
+            spawn(check(bus, ev))

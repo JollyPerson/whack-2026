@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import argparse
@@ -18,6 +17,15 @@ from faster_whisper import WhisperModel
 SAMPLE_RATE = 16000
 CHUNK_BYTES = 8192
 RING_CHUNKS = 160
+# A window's first words may be cut off mid-word: older words win there.
+HEAD_MARGIN = 0.4
+# The same word this soon after the previous one is one word heard twice.
+DUPLICATE_GAP = 0.3
+# Words with no sentence end after them, this long before the cutoff, are a
+# sentence anyway: the speaker trailed off or Whisper left out the period.
+TAIL_IDLE = 2.0
+# Ends in a period but rarely ends a sentence: "U.S.", "e.g.", "Dr.".
+ABBREVIATION = re.compile(r"(?:[a-z]\.){2,}|(?:mr|mrs|ms|dr|prof|st|vs|jr|sr)\.", re.IGNORECASE)
 
 
 class AudioBuffer:
@@ -60,15 +68,12 @@ class SentenceBuffer:
     def __init__(self):
         self.words = []
         self.committed_until = 0.0
+        self.last_committed = None
 
     @staticmethod
     def normalize_word(word):
         text = unicodedata.normalize("NFKC", word).lower()
         return re.sub(r"[^\w']", "", text)
-
-    # @staticmethod
-    # def is_sentence_end(word):
-    #     return bool(re.search(r'[.!?]["\')\]]*$', word.strip()))
 
     @staticmethod
     def is_sentence_end(text):
@@ -79,6 +84,10 @@ class SentenceBuffer:
         if cleaned.endswith("...") or cleaned.endswith("…"):
             return False
 
+        # Nor is an abbreviation: "The U.S. imported grain." is one claim.
+        if cleaned and ABBREVIATION.fullmatch(cleaned.split()[-1].lstrip("\"'([")):
+            return False
+
         return bool(re.search(r"[.!?][\"')\]]*\s*$", cleaned))
 
     @staticmethod
@@ -86,34 +95,56 @@ class SentenceBuffer:
         """Remove trailing three-dot or Unicode ellipsis."""
         return re.sub(r"(?:\.{3}|…)+\s*$", "", text).rstrip()
 
-    def add_words(self, new_words):
+    def add_words(self, new_words, window_start=None):
+        """Merge the words of one window into the uncommitted ones.
+
+        The newest window wins: it heard more audio around each word, so it
+        replaces older words from window_start + HEAD_MARGIN on. Before that,
+        where its first word may be cut off mid-word, the older words stay.
+        Without window_start, the first new word's start stands in for it.
+        """
+        fresh = []
+
         for new in new_words:
-            if new["end"] <= self.committed_until:
+            # Already emitted. The midpoint, not the end, so a re-heard last
+            # word that jitter pushed just past the boundary stays out.
+            if (new["start"] + new["end"]) / 2 <= self.committed_until:
                 continue
 
-            normalized = self.normalize_word(new["word"])
-
-            if not normalized and not self.is_sentence_end(new["word"]):
+            # Punctuation on its own: faster-whisper splits "%" off "57%" (and
+            # "%," or "%."), and only merges some marks back. Put it back on
+            # its word; with no word before it in this window, drop it.
+            if not self.normalize_word(new["word"]):
+                if fresh:
+                    fresh[-1]["word"] += new["word"]
+                    fresh[-1]["end"] = max(fresh[-1]["end"], new["end"])
                 continue
 
-            duplicate = None
+            fresh.append(dict(new))
 
-            # Avoid duplicating words from overlapping audio windows.
-            for old in self.words:
-                if (
-                    self.normalize_word(old["word"]) == normalized
-                    and abs(old["start"] - new["start"]) <= 0.18
-                ):
-                    duplicate = old
-                    break
+        if not fresh:
+            return
 
-            if duplicate is not None:
-                duplicate.update(new)
-            else:
-                self.words.append(new)
+        fresh.sort(key=lambda item: item["start"])
 
-        self.words.sort(key=lambda item: item["start"])
+        if window_start is None:
+            window_start = fresh[0]["start"]
 
+        kept = [old for old in self.words if old["start"] < window_start + HEAD_MARGIN]
+        splice = max([old["end"] for old in kept], default=self.committed_until)
+        fresh = [new for new in fresh if (new["start"] + new["end"]) / 2 > splice]
+
+        # The same word again right where the kept (or emitted) words end is
+        # one word heard twice with jittered timestamps.
+        previous = kept[-1] if kept else self.last_committed
+        if (
+            fresh and previous
+            and self.normalize_word(fresh[0]["word"]) == self.normalize_word(previous["word"])
+            and fresh[0]["start"] - previous["end"] < DUPLICATE_GAP
+        ):
+            fresh.pop(0)
+
+        self.words = sorted(kept + fresh, key=lambda item: item["start"])
 
 
     @staticmethod
@@ -137,16 +168,16 @@ class SentenceBuffer:
             "confidence": round(confidence, 3) if confidence is not None else None,
         }
 
-    # @staticmethod
-    # def make_sentence(words):
-    #     return {
-    #         "type": "sentence",
-    #         "start": round(words[0]["start"], 3),
-    #         "end": round(words[-1]["end"], 3),
-    #         "text": "".join(w["word"] for w in words).strip(),
-    #     }
+    def _commit(self, count):
+        """Take the first count words out as one sentence."""
+        sentence_words, self.words = self.words[:count], self.words[count:]
+        self.committed_until = sentence_words[-1]["end"]
+        self.last_committed = sentence_words[-1]
+        return self.make_sentence(sentence_words)
 
     def extract_sentences(self, cutoff):
+        """Emit the sentences that end by cutoff, and the words after the
+        last boundary once they end TAIL_IDLE before it."""
         emitted = []
 
         while True:
@@ -167,42 +198,22 @@ class SentenceBuffer:
             if boundary is None:
                 break
 
-            sentence_words = self.words[:boundary + 1]
-            sentence_end = sentence_words[-1]["end"]
-
-            if sentence_end > cutoff:
+            if self.words[boundary]["end"] > cutoff:
                 break
 
-            emitted.append(self.make_sentence(sentence_words))
+            emitted.append(self._commit(boundary + 1))
 
-            self.committed_until = sentence_end
-            self.words = self.words[boundary + 1:]
+        # Trailing off, cut off, or Whisper left out the period: once the
+        # speaker has been quiet a while it is a sentence of its own, not the
+        # start of their next sentence minutes later.
+        if self.words and self.words[-1]["end"] <= cutoff - TAIL_IDLE:
+            emitted.append(self._commit(len(self.words)))
 
-        return emitted
-
+        return [sentence for sentence in emitted if sentence["text"]]
 
     def flush(self):
         """Emit remaining sentences and any trailing fragment on shutdown."""
-
-        emitted = []
-
-        while self.words:
-            boundary = None
-
-            for i, word in enumerate(self.words):
-                if self.is_sentence_end(word["word"]):
-                    boundary = i
-                    break
-
-            if boundary is None:
-                emitted.append(self.make_sentence(self.words))
-                self.words = []
-            else:
-                sentence_words = self.words[:boundary + 1]
-                emitted.append(self.make_sentence(sentence_words))
-                self.words = self.words[boundary + 1:]
-
-        return emitted
+        return self.extract_sentences(float("inf"))
 
 
 def start_audio_capture(source_name, device, buffer):
@@ -268,11 +279,34 @@ def emit_sentence(sentence, source_name, output_file):
 
     line = json.dumps(event, ensure_ascii=False)
 
-    print(line, flush=True)
-
+    # The file first: on Ctrl+C the reader of stdout may be gone already.
     if output_file:
         output_file.write(line + "\n")
         output_file.flush()
+
+    try:
+        print(line, flush=True)
+    except OSError:
+        stdout_gone()
+
+
+def stdout_gone():
+    """The reader of stdout (tee, bridge.py) has exited: point stdout at
+    /dev/null, so later sentences and the flush at exit stop raising. The
+    transcript file still gets every sentence."""
+
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):
+        return
+
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, fd)
+    finally:
+        os.close(devnull)
+
+    print("stdout closed; sentences go to the transcript file only", file=sys.stderr)
 
 
 
@@ -285,6 +319,13 @@ def transcribe_source(model, source_name, state, args, output_file):
 
     if audio is None or len(audio) < SAMPLE_RATE:
         return
+
+    # Nothing new since the last run: parec delivers in bursts, and nothing
+    # at all once a mic is gone. The same audio decodes to the same words.
+    if window_end == state.get("transcribed_until"):
+        return
+
+    state["transcribed_until"] = window_end
 
     segments, info = model.transcribe(
         audio,
@@ -312,50 +353,7 @@ def transcribe_source(model, source_name, state, args, output_file):
                 "probability": word.probability,
             })
 
-    state["sentences"].add_words(new_words)
-
-    cutoff = window_end - args.holdback
-
-    for sentence in state["sentences"].extract_sentences(cutoff):
-        emit_sentence(sentence, source_name, output_file)
-
-
-# def transcribe_source(model, source_name, state, args, output_file):
-#     """Transcribe the latest window for one source."""
-
-#     audio, window_start, window_end = state["audio"].snapshot(
-#         args.window
-#     )
-
-#     if audio is None or len(audio) < SAMPLE_RATE:
-#         return
-
-#     segments, info = model.transcribe(
-#         audio,
-#         language="en",
-#         beam_size=3,
-#         word_timestamps=True,
-#         condition_on_previous_text=False,
-#         vad_filter=True,
-#         vad_parameters={
-#             "min_silence_duration_ms": 1200
-#         },
-#     )
-
-    new_words = []
-
-    for segment in segments:
-        if not segment.words:
-            continue
-
-        for word in segment.words:
-            new_words.append({
-                "word": word.word,
-                "start": window_start + word.start,
-                "end": window_start + word.end,
-            })
-
-    state["sentences"].add_words(new_words)
+    state["sentences"].add_words(new_words, window_start)
 
     cutoff = window_end - args.holdback
 
@@ -478,20 +476,21 @@ def main():
         )
 
     finally:
-        for name, state in states.items():
-            for sentence in state["sentences"].flush():
-                emit_sentence(sentence, name, output_file)
+        try:
+            for name, state in states.items():
+                for sentence in state["sentences"].flush():
+                    emit_sentence(sentence, name, output_file)
+        finally:
+            for process in processes.values():
+                process.terminate()
 
-        for process in processes.values():
-            process.terminate()
+            for process in processes.values():
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
-        for process in processes.values():
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-
-        output_file.close()
+            output_file.close()
 
 
 if __name__ == "__main__":
