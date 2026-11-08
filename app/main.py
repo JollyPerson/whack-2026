@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from app.bus import MAX_GAP_S, TIME_FIELDS, Bus, replay
 from app.config import FLAGS
-from app.schemas import BOOL_FLAGS, SCHEMA_VERSION, Control, ModuleStatus, SessionStart, parse_event
+from app.schemas import SCHEMA_VERSION, Control, ModuleStatus, SessionStart, parse_event
 
 log = logging.getLogger("main")
 ROOT = Path(__file__).resolve().parent.parent
@@ -120,12 +120,12 @@ async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
             delay = min(delay * 2, 10.0)
 
 
-STATE_FLAGS = BOOL_FLAGS | {"aggr"}   # kept in FLAGS (snapshot, /health); one-shots (force_next, veto, time) aren't
+ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAGS; every other flag is state
 
 
 async def flags_watcher(bus: Bus):
     async for ev in bus.subscribe("flags", {"Control"}):
-        if ev.flag in STATE_FLAGS:
+        if ev.flag not in ONE_SHOT_FLAGS:
             FLAGS[ev.flag] = ev.value
 
 

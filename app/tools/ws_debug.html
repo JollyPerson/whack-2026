@@ -79,8 +79,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};
 const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : null;
 const LABEL = {supported: 'ok', contradicted: 'bad', missing_context: 'warn', unverifiable: 'unk'};
 const RAW_MAX = 200, DECISIONS_MAX = 50;
-// state flags (kept, shown); one-shot commands (force_next, veto, time) are acted on by the brain, never stored
-const STATE_FLAGS = new Set(['tts', 'director', 'web_fallback', 'interims', 'agent_speaking', 'mute', 'aggr']);
+// one-shot commands (force_next, veto, time) are acted on by the brain, never stored; every other flag is state
+const ONE_SHOT_FLAGS = new Set(['force_next', 'veto', 'time']);
 
 // ------------------------------------------------------------------ state + the ONE reducer
 let S = null, MODULES = {}, ws = null, lastSeq = 0, snapSeq = 0, backoff = 500;
@@ -119,7 +119,7 @@ function apply(e, live) {
       S.decisions.push(e); S.decisions.splice(0, S.decisions.length - DECISIONS_MAX); break;
     case 'DirectorStatus': S.dstatus = e; break;
     case 'TTSState': S.tts = e; break;
-    case 'Control': if (STATE_FLAGS.has(e.flag)) S.flags[e.flag] = e.value; if (live) onControl(e); break;
+    case 'Control': if (!ONE_SHOT_FLAGS.has(e.flag)) S.flags[e.flag] = e.value; if (live) onControl(e); break;
     case 'Interjection':
       S.interjections.push(e);
       if (live && e.seq > snapSeq) speak(e);   // NEVER speak history: a refresh mid-debate must stay silent

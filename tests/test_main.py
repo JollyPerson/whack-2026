@@ -387,15 +387,17 @@ async def test_flags_watcher_persists_state_flags_only():
     await asyncio.sleep(0)
     try:
         sent = [("force_next", True), ("veto", "c3:correction"), ("time", "A"), ("mute", "on"), ("aggr", "4"),
-                ("tts", False), ("director", False), ("web_fallback", "off"), ("interims", 0), ("agent_speaking", 1)]
+                ("tts", False), ("director", False), ("web_fallback", "off"), ("interims", 0), ("agent_speaking", 1),
+                ("screen", "final")]   # a flag another module adds (D's final screen) is state too
         for flag, value in sent:
             b.publish(Control(flag=flag, value=value), src="test")
         for _ in range(20):
             await asyncio.sleep(0)
         assert not {"force_next", "veto", "time"} & set(FLAGS)
-        assert {k: FLAGS[k] for k in ("mute", "aggr", "tts", "director", "web_fallback", "interims", "agent_speaking")} \
+        assert {k: FLAGS[k] for k in ("mute", "aggr", "tts", "director", "web_fallback", "interims", "agent_speaking",
+                                      "screen")} \
             == {"mute": True, "aggr": 4, "tts": False, "director": False, "web_fallback": False, "interims": False,
-                "agent_speaking": True}
+                "agent_speaking": True, "screen": "final"}
         got = [seen.q.get_nowait() for _ in range(seen.q.qsize())]
         assert [(e.flag, e.value) for e in got[:3]] == sent[:3]
     finally:
