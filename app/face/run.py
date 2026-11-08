@@ -5,8 +5,9 @@ The routes in speech.py work without this (FACE=off). It adds two things:
   ?audio=1 tab's /face/tts request is usually already in flight; "candidates" also synthesises Director candidate/held
   lines (DirectorDecision.text) ahead of time, which hides TTS latency but costs ~10x the characters (a free
   ElevenLabs plan is 10,000 characters a month); "off" synthesises only on request;
-- the avatar's status dot: ModuleStatus(module="mate") goes up on its first poll and down after MATE_DOWN_S
-  without one, published only on change (nothing at all if Mate Engine never connects).
+- the avatars' status dots: ModuleStatus(module="mate") goes up on its first poll and down after MATE_DOWN_S
+  without one, published only on change (nothing at all if Mate Engine never connects). The side bots' avatars
+  (channels for/against) get their own dots, "mate_for" and "mate_against", by the same rule.
 Never returns.
 """
 from __future__ import annotations
@@ -20,6 +21,7 @@ from app.face.speech import MATE_DOWN_S, FaceState, state_for
 from app.schemas import ModuleStatus
 
 PRESYNTH_MODES = ("lines", "candidates", "off")
+MODULE = {"referee": "mate", "for": "mate_for", "against": "mate_against"}   # avatar channel -> its status dot
 
 
 def presynth_mode() -> str:
@@ -38,13 +40,15 @@ def line_of(ev, mode: str = "lines") -> str:
 
 
 def watch_mate(bus, st: FaceState, now: float) -> None:
-    alive = st.mate_alive(now)
-    if alive == st.mate_up or (st.mate_up is None and not alive):
-        return
-    st.mate_up = alive
-    bus.publish(ModuleStatus(module="mate", state="up" if alive else "down",
-                             detail="avatar polling /face/mate/next" if alive else
-                             f"no poll for {MATE_DOWN_S:g} s: is Mate Engine running?"), src="face")
+    for channel, mate in st.mates.items():
+        alive = mate.alive(now)
+        if alive == mate.up or (mate.up is None and not alive):
+            continue
+        mate.up = alive
+        path = "/face/mate/next" if channel == "referee" else f"/face/mate/next/{channel}"
+        bus.publish(ModuleStatus(module=MODULE[channel], state="up" if alive else "down",
+                                 detail=f"avatar polling {path}" if alive else
+                                 f"no poll for {MATE_DOWN_S:g} s: is Mate Engine running?"), src="face")
 
 
 async def run(bus):

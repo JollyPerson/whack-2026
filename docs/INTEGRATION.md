@@ -153,15 +153,17 @@ Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"
 - `stop`: `clear=true` (remove the bubble, close the mouth) on `Control` mute=true, `Control` director=false and
   `SessionStart`; `clear=false` (close the mouth, keep the bubble) on `Control` tts=false.
 - `dance` (`title`, `""` = the first available) and `dance_stop` come only from the operator routes
-  `POST /face/mate/dance {"title":""}` and `POST /face/mate/dance/stop`. They are not bus events: each is held
-  for up to 10 s and delivered once, to the next poll.
+  `POST /face/mate/dance {"title":"","channel":""}` and `POST /face/mate/dance/stop {"channel":""}` (`channel`:
+  one avatar, or `""`/absent for every one). They are not bus events: each is held for up to 10 s and delivered
+  once, to that channel's next poll.
 - **Channels (side bots).** `GET /face/mate/next/{channel}` takes the same query and returns the same payload, one
   avatar per channel. `referee` is exactly the route above (`/face/mate/next` = `/face/mate/next/referee`). `for` and
-  `against` carry only that side bot's lines: `BotLine{persona}` becomes `say` (`audio: ""`) plus `talk on`, and
-  `BotTalk{persona, on:false}` becomes `talk off`. `SessionStart`, `Control` mute=true and `Control` bots=false send
-  `stop` with `clear=true`. Any other channel is a 404. A Mate Engine instance picks its channel with `pollPath` in
-  its own `speech_bridge.json` (`"/face/mate/next/for"`); a `?channel=` query cannot work, because the client appends
-  `?after=` itself.
+  `against` carry only that side bot's lines: `BotLine{persona}` becomes `say` (`audio: ""`) plus `talk on` (dropped,
+  like an Interjection, if older than 4 s at delivery), and `BotTalk{persona, on:false}` becomes `talk off`.
+  `SessionStart`, `Control` mute=true and `Control` bots=false send `stop` with `clear=true`. Any other channel is a
+  404. Each channel has its own status dot (`ModuleStatus` `mate`, `mate_for`, `mate_against`), published only once
+  that avatar has polled. A Mate Engine instance picks its channel with `pollPath` in its own `speech_bridge.json`
+  (`"/face/mate/next/for"`); a `?channel=` query cannot work, because the client appends `?after=` itself.
 - Start with `after=-1`. Send back the `cursor` and `epoch` of the last reply. If `after<0`, the epoch differs, or
   `after` is ahead of the server (it restarted), the reply is immediate: `{"cursor": <now>, "cmds": []}`. Past events
   are never replayed. Otherwise the reply comes as soon as there is at least one command, or after `wait` seconds.
