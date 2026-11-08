@@ -3,7 +3,9 @@
 Indexes are built in advance (see preresearch.py), or on the fly from the stage's setup screen: a ResearchRequest
 (Motion + brief) builds and saves the index and its fact sheet without touching the running session, and the
 SessionStart that follows loads it, or waits for the build already in flight. A Motion nobody prepared is researched
-live in the background, and claims that arrive meanwhile go straight to the web.
+live in the background, and claims that arrive meanwhile go straight to the web. After the fast verdict, important claims can get a
+slower deep check in the background (deep.py), which publishes a second Verdict when it does better. A claim already
+settled on the Motion is answered from the verdict cache (cache.py) without checking it again.
 """
 from __future__ import annotations
 
@@ -16,7 +18,8 @@ from typing import Optional
 
 from app import config, latency
 from app.brain.llm import LLMInvalid, LLMRefusal
-from app.evidence import preresearch
+from app.evidence import deep, preresearch
+from app.evidence.cache import VerdictCache
 from app.evidence.checks import Guarded, Source
 from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
 from app.evidence.llm import make_verdict_llm
@@ -26,8 +29,11 @@ from app.schemas import Claim, FactSheet, ResearchProgress, SourceCard, Verdict
 
 log = logging.getLogger("evidence")
 
-TOP_K = 5
-INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 3.0))
+# Chunks shown to the verdict model. With vectors, 8 scored best on the eval (18/20 vs 16/20 at 5); BM25 alone does
+# better at 5, as extra keyword matches are mostly noise.
+TOP_K = int(os.environ.get("EVIDENCE_TOP_K", 5))
+TOP_K_WITH_VECTORS = int(os.environ.get("EVIDENCE_TOP_K_VECTORS", 8))
+INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 4.0))   # Opus verdicts: p95 about 3.3 s
 WEB_SEARCH_TIMEOUT_S = float(os.environ.get("EVIDENCE_WEB_TIMEOUT_S", 3.0))
 QUERY_EMBED_TIMEOUT_S = float(os.environ.get("EVIDENCE_EMBED_TIMEOUT_S", 1.0))   # then BM25 alone
 CONCURRENCY = int(os.environ.get("EVIDENCE_CONCURRENCY", 6))
@@ -71,9 +77,10 @@ class Checker:
                 vector = (await asyncio.wait_for(asyncio.to_thread(self.embedder.embed, [claim]), QUERY_EMBED_TIMEOUT_S))[0]
             except Exception as e:
                 log.warning("query embedding failed, using BM25: %r", e)
-        found = [Source(c["url"], c["title"], c["text"]) for c in index.search(claim, TOP_K, vector)]
+        k = TOP_K_WITH_VECTORS if vector is not None else TOP_K
+        found = [Source(c["url"], c["title"], c["text"]) for c in index.search(claim, k, vector)]
         seen = {s.text for s in facts}
-        return facts + [s for s in found if s.text not in seen][:TOP_K - len(facts) // 2]
+        return facts + [s for s in found if s.text not in seen][:k - len(facts) // 2]
 
     async def web_sources(self, claim: str) -> list[Source]:
         pages = await self.searcher.search(claim, kind="lite", results=5, max_chars=2500, timeout=WEB_SEARCH_TIMEOUT_S)
@@ -125,9 +132,14 @@ class EvidenceModule:
     def __init__(self, bus, llm=None, searcher=None, embedder=None):
         self.bus, self.llm, self.searcher, self.embedder = bus, llm, searcher, embedder
         self.checker = Checker(llm, searcher, embedder)
+        self.verdicts = VerdictCache()
         self.session = 0
         self.limit = asyncio.Semaphore(CONCURRENCY)
         self.tasks: set[asyncio.Task] = set()
+        self.deep_llm = deep.make_deep_llm(llm) if llm is not None else None
+        self.deep_limit = asyncio.Semaphore(deep.DEEP_CONCURRENCY)
+        self.deep_search_limit = asyncio.Semaphore(6)    # shared by every deep check: Exa allows 10 queries a second
+        self.deep_waiting = 0
         self.builds: dict[str, asyncio.Task] = {}   # index path -> build in flight (prepare and SessionStart share it)
 
     def _spawn(self, coro) -> asyncio.Task:
@@ -176,7 +188,9 @@ class EvidenceModule:
         def progress(stage, done, total, detail=""):
             if stage != "ready":            # "ready" only once the fact sheet is done too
                 self._progress(stage, done, total, detail, motion)
-        index = await preresearch.build_index(motion, self.searcher, self.llm, self.embedder, progress,
+        # No embedder for a build inside the app (live, or from the setup screen): embedding a big build takes 20+
+        # minutes on the server's single vCPU. The small BM25 build is what scored best without vectors anyway.
+        index = await preresearch.build_index(motion, self.searcher, self.llm, None, progress,
                                               deadline_s=deadline_s, brief=brief)
         facts = await preresearch.extract_facts(motion, index, self.llm, brief, progress=progress)
         if not len(index):                  # never cache an empty index: the next try should search again
@@ -217,6 +231,10 @@ class EvidenceModule:
         session = self.session
         # A local checker: after any await below, self.checker may already be a newer Motion's.
         checker = self.checker = Checker(self.llm, self.searcher, self.embedder, motion=motion)
+        self.verdicts = VerdictCache()
+        verdicts = await asyncio.to_thread(VerdictCache.for_motion, motion)
+        if session == self.session:
+            self.verdicts = verdicts
 
         def progress(stage: str, done: int, total: int, detail: str = "") -> None:
             if session == self.session:         # once a newer Motion starts, the research line is its own
@@ -249,7 +267,10 @@ class EvidenceModule:
             checker.set_facts(facts)
 
     async def handle_claim(self, claim: Claim) -> None:
-        session, checker = self.session, self.checker
+        session, checker, verdicts = self.session, self.checker, self.verdicts
+        if config.FLAGS.get("verdict_cache", True) and (hit := verdicts.lookup(claim.text)) is not None:
+            self._publish(claim, Outcome(hit.guarded, "cache", retrieved_at=time.time()))
+            return
         async with self.limit:
             try:
                 if claim.t_end > 1e9 and time.time() - claim.t_end > config.STALE_CLAIM_S:   # below 1e9 isn't a real clock time
@@ -264,10 +285,41 @@ class EvidenceModule:
                 outcome = Outcome(Guarded(explanation="The check failed."), via="error")
         if session != self.session:
             return                              # the debate moved on to a new Motion
+        self._publish(claim, outcome)
+        await asyncio.to_thread(verdicts.add, claim.text, outcome.guarded, outcome.via)
+        if self.deep_llm is not None and deep.enabled() and deep.wants_deep(claim.checkable, claim.importance):
+            self._spawn(self.deepen(claim, outcome, session, checker))
+
+    def _publish(self, claim: Claim, outcome: Outcome) -> None:
         verdict = to_verdict(claim, outcome)
         for e in verdict.evidence:
             self.bus.publish(SourceCard(claim_id=claim.id, url=e.url, title=e.title, snippet=e.quote), src="evidence")
         self.bus.publish(verdict, src="evidence")
+
+    async def deepen(self, claim: Claim, fast: Outcome, session: int, checker: Checker) -> None:
+        """The deep check for one claim. Publishes only if it beats the fast verdict and the Motion hasn't changed."""
+        if self.deep_waiting >= deep.DEEP_MAX_WAITING:
+            log.info("deep check skipped for %s: %d already waiting", claim.id, self.deep_waiting)
+            return
+        self.deep_waiting += 1
+        waiting = True
+        try:
+            async with self.deep_limit:
+                self.deep_waiting, waiting = self.deep_waiting - 1, False
+                checking = deep.DeepChecker(self.deep_llm, self.searcher, checker.motion, checker.index,
+                                            self.deep_search_limit, plan_llm=self.llm)
+                started = time.time()
+                guarded, sources = await asyncio.wait_for(checking.check(claim.text, fast.sources), deep.DEEP_TIMEOUT_S)
+        except Exception as e:                  # includes running out of time: the fast verdict stands
+            log.warning("deep check failed for %s: %r", claim.id, e)
+            return
+        finally:
+            if waiting:                         # cancelled before a slot came free
+                self.deep_waiting -= 1
+        if session != self.session or not deep.replaces(fast.guarded, guarded):
+            return
+        self._publish(claim, Outcome(guarded, "deep", sources, started))
+        await asyncio.to_thread(self.verdicts.add, claim.text, guarded, "deep")
 
     async def run(self) -> None:
         async for ev in self.bus.subscribe("evidence", {"Claim", "SessionStart", "ResearchRequest"}):

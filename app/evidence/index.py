@@ -14,7 +14,7 @@ import re
 import threading
 from collections import Counter
 from pathlib import Path
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Sequence
 
 import httpx
 
@@ -39,10 +39,12 @@ class FastEmbedEmbedder:
     def __init__(self, model: str = "BAAI/bge-small-en-v1.5"):
         from fastembed import TextEmbedding
         self.name = f"fastembed:{model}"
-        self.model = TextEmbedding(model)
+        # Keep the downloaded model in the cache volume, so a restarted container doesn't fetch it again.
+        self.model = TextEmbedding(model, cache_dir=os.environ.get("EVIDENCE_EMBED_CACHE", "cache/fastembed"))
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self.model.embed(texts)]
+        # Small batches: at 256, building an index peaked near 4 GB of memory, more than the server has.
+        return [v.tolist() for v in self.model.embed(texts, batch_size=32)]
 
 
 class OpenAIEmbedder:
@@ -76,8 +78,18 @@ def make_embedder() -> Optional[Embedder]:
     return None
 
 
+_SPOKEN = [(re.compile(r"(\d)\s*%"), r"\1 percent"), (re.compile(r"\bper\s+cent\b"), "percent"),
+           (re.compile(r"£\s*(\d)"), r"pounds \1"), (re.compile(r"(\d)\s*bn\b"), r"\1 billion"),
+           (re.compile(r"(\d)\s*m\b"), r"\1 million")]
+
+
 def tokens(text: str) -> list[str]:
-    return [t.rstrip(".,'-") for t in _WORD.findall(text.lower()) if t not in _STOP]
+    """Words for BM25. Written forms become spoken ones ("12%" -> "12 percent", "£3bn" -> "pounds 3 billion"), as
+    claims arrive as transcribed speech while sources are written."""
+    text = text.lower()
+    for pattern, spoken in _SPOKEN:
+        text = pattern.sub(spoken, text)
+    return [t.rstrip(".,'-") for t in _WORD.findall(text) if t not in _STOP]
 
 
 def chunk_text(text: str, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -132,10 +144,11 @@ class EvidenceIndex:
         q /= (np.linalg.norm(q) or 1.0)
         return [int(i) for i in np.argsort(-(self.vectors @ q))[:depth]]
 
-    def search(self, query: str, k: int = 5, query_vector=None) -> list[dict]:
-        """Top k chunks, with at most two from one page so one long page can't fill the prompt."""
+    def search(self, query: str, k: int = 5, query_vector=None, also: Sequence[str] = ()) -> list[dict]:
+        """Top k chunks, with at most two from one page so one long page can't fill the prompt.
+        Each of `also` (other phrasings of the query) adds its own BM25 ranking to the fusion."""
         depth = max(50, k * 10)
-        rankings = [self._bm25_ranked(query)[:depth]]
+        rankings = [self._bm25_ranked(q)[:depth] for q in (query, *also)]
         if query_vector is not None and self.vectors is not None and len(self.chunks):
             try:
                 rankings.append(self._vector_ranked(query_vector, depth))

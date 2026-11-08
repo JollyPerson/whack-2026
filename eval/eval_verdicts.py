@@ -6,6 +6,7 @@
   python -m eval.eval_verdicts --layer verdict --runs 3       # model comparison on saved evidence, web off
   python -m eval.eval_verdicts --layer verdict                # regression check
   python -m eval.eval_verdicts --layer full                   # headline: index, then web. Reported separately
+  python -m eval.eval_verdicts --layer deep                   # full, then the background deep check on every claim
   python -m eval.eval_verdicts --layer verdict --holdout      # fifth Motion. Once, after tuning ends
 
 Set EVIDENCE_INDEX_DIR to the saved copy of the indexes so a rebuild can't move the score.
@@ -33,7 +34,8 @@ from app.evidence import preresearch  # noqa: E402
 from app.evidence.checks import Guarded, Source, normalise, quote_in_source  # noqa: E402
 from app.evidence.index import EvidenceIndex, make_embedder  # noqa: E402
 from app.evidence.llm import make_verdict_llm  # noqa: E402
-from app.evidence.run import Checker, INDEX_LLM_TIMEOUT_S  # noqa: E402
+from app.evidence.deep import DEEP_TIMEOUT_S, DeepChecker, make_deep_llm, replaces  # noqa: E402
+from app.evidence.run import Checker, INDEX_LLM_TIMEOUT_S, Outcome  # noqa: E402
 from app.evidence.search import make_search  # noqa: E402
 from app.evidence.verdicts import judge  # noqa: E402
 
@@ -233,6 +235,37 @@ async def run_full_once(rows: list[dict], llm, searcher, embedder, cache: dict) 
     return out
 
 
+async def run_deep_once(rows: list[dict], llm, searcher, embedder, cache: dict) -> list[Result]:
+    """The full check, then the deep check, keeping what the live module would publish last. Latency is the fast
+    verdict's, as that's the one the moderator can speak on time."""
+    deep_llm, limit, search_limit = make_deep_llm(llm), asyncio.Semaphore(4), asyncio.Semaphore(6)
+
+    async def one(r: dict) -> tuple[Result, str]:
+        async with limit:
+            checker = Checker(llm, searcher, embedder, _load_index(r["motion"], cache), r["motion"])
+            start = time.perf_counter()
+            try:
+                fast = await checker.check(r["text"], web=searcher is not None)
+            except Exception as e:
+                fast = Outcome(Guarded(explanation=f"error: {e!r}"), via="error")
+            fast_ms, final = (time.perf_counter() - start) * 1000, fast
+            try:
+                deeper = DeepChecker(deep_llm, searcher, r["motion"], checker.index, search_limit, plan_llm=llm)
+                guarded, sources = await asyncio.wait_for(deeper.check(r["text"], fast.sources), DEEP_TIMEOUT_S)
+                if replaces(fast.guarded, guarded):
+                    final = Outcome(guarded, "deep", sources)
+            except Exception as e:
+                print(f"  deep check failed for {r['gid']}: {e!r}")
+            return audit(r, final.guarded, final.sources, fast_ms, final.via), fast.guarded.label
+
+    pairs = await asyncio.gather(*(one(r) for r in rows))
+    changed = [(res, before) for res, before in pairs if res.via == "deep"]
+    fixed = [res.gid for res, before in changed if before != res.gold and res.label == res.gold]
+    broke = [res.gid for res, before in changed if before == res.gold and res.label != res.gold]
+    print(f"deep replaced {len(changed)} verdicts: fixed {len(fixed)} {fixed}, broke {len(broke)} {broke}")
+    return [res for res, _ in pairs]
+
+
 def log_run(layer: str, model: str, m: dict, failures: list[str], note: str) -> None:
     new = not RESULTS.exists()
     with RESULTS.open("a") as f:
@@ -243,8 +276,42 @@ def log_run(layer: str, model: str, m: dict, failures: list[str], note: str) -> 
                 f"{len(m['swaps_at_speaking_confidence'])}\t{p}\t{not failures}\t{note}\n")
 
 
-async def layer_scored(args, rows: list[dict]) -> int:
+class Paced:
+    """Spaces calls to a rate-limited model and retries when the server says to slow down. The wait for a slot
+    isn't counted against a call's timeout, so verdicts still get their full time, but reported latency includes
+    the waits. EVAL_LLM_PER_MINUTE=6 suits Kimi K2.6 on Canopy Wave (1 a second, 6 a minute)."""
+
+    def __init__(self, llm, per_minute: float):
+        self.llm, self.gap = llm, 60.0 / per_minute
+        self.name = getattr(llm, "name", "llm")
+        self.next_at, self.lock = 0.0, asyncio.Lock()
+
+    async def _slot(self) -> None:
+        async with self.lock:
+            wait = self.next_at - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self.next_at = time.monotonic() + self.gap
+
+    async def complete_json(self, *args, **kwargs):
+        for attempt in range(4):
+            await self._slot()
+            try:
+                return await self.llm.complete_json(*args, **kwargs)
+            except Exception as e:
+                if "429" not in str(e) or attempt == 3:
+                    raise
+                await asyncio.sleep(self.gap)
+
+
+def make_eval_llm():
     llm = make_verdict_llm()
+    per_minute = float(os.environ.get("EVAL_LLM_PER_MINUTE", 0) or 0)
+    return Paced(llm, per_minute) if llm is not None and per_minute > 0 else llm
+
+
+async def layer_scored(args, rows: list[dict]) -> int:
+    llm = make_eval_llm()
     if llm is None:
         raise SystemExit("No verdict model configured: set a key in .env")
     saved, cache, searcher, embedder = {}, {}, None, None
@@ -258,8 +325,12 @@ async def layer_scored(args, rows: list[dict]) -> int:
         searcher, embedder = make_search(), make_embedder()
     failed, corrects = False, []
     for n in range(args.runs):
-        results = await (run_verdict_once(rows, llm, saved) if args.layer == "verdict"
-                         else run_full_once(rows, llm, searcher, embedder, cache))
+        if args.layer == "verdict":
+            results = await run_verdict_once(rows, llm, saved)
+        elif args.layer == "deep":
+            results = await run_deep_once(rows, llm, searcher, embedder, cache)
+        else:
+            results = await run_full_once(rows, llm, searcher, embedder, cache)
         m = score(results)
         failures = gate_failures(m, args.holdout)
         corrects.append(m["correct"])
@@ -276,7 +347,7 @@ async def layer_scored(args, rows: list[dict]) -> int:
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Score Evidence against the labelled claims")
     ap.add_argument("--gold", type=Path, default=GOLD)
-    ap.add_argument("--layer", choices=("retrieval", "verdict", "full"), default="verdict")
+    ap.add_argument("--layer", choices=("retrieval", "verdict", "full", "deep"), default="verdict")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--holdout", action="store_true", help="score the fifth Motion instead of the main set")
     ap.add_argument("--check", action="store_true", help="only check the gold set's shape")

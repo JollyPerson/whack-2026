@@ -54,6 +54,8 @@ FLAGS: dict = {
     "tts": True,             # D: speak interjections
     "director": True,        # B: allow interjections at all
     "web_fallback": True,    # C: allow slow web search
+    "verdict_cache": True,   # C: answer a claim already settled on this Motion from cache/verdicts, without checking it again
+    "deep_check": False,     # C: second, slower check in the background (about 30 s), as a via="deep" Verdict. Off until it beats the fast check on Opus (on Kimi it fixed 0, broke 1)
     "interims": True,        # D: show interim text
     "agent_speaking": False, # set by the browser around TTS playback (echo guard)
 }

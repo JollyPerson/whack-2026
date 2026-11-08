@@ -463,11 +463,11 @@ def test_anthropic_client_built_directly_validates_its_model(no_creds):
     no_creds.setattr(config, "LLM_MODEL", "claude-opus-5-5")
     llm = L.AnthropicLLM(client=object())
     assert llm.model == "claude-opus-5-5" and llm.fallbacks
-    from app.evidence.llm import make_verdict_llm
+    from app.evidence.llm import DEFAULT_VERDICT_MODEL, make_verdict_llm
     no_creds.setattr(config, "LLM_MODEL", "gpt-6-luna")
     no_creds.delenv("EVIDENCE_MODEL", raising=False)
     no_creds.setenv("EVIDENCE_ANTHROPIC_API_KEY", "sk-ant-test")
-    assert make_verdict_llm().model == L.ANTHROPIC_DEFAULT_MODEL
+    assert make_verdict_llm().model == DEFAULT_VERDICT_MODEL
     no_creds.setenv("EVIDENCE_MODEL", "claude-sonnet-5-5")
     assert make_verdict_llm().model == "claude-sonnet-5-5"
 

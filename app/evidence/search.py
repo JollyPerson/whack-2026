@@ -18,11 +18,14 @@ class ExaSearch:
         self.exclude_domains = exclude_domains or []
 
     async def search(self, query: str, kind: str = "auto", results: int = 10, max_chars: int = 4000,
-                     timeout: float = 10.0) -> list[dict]:
-        """Pages as {url, title, text}. kind is "auto" for pre-research and "lite" for the live fallback."""
+                     timeout: float = 10.0, include_domains: Optional[list[str]] = None) -> list[dict]:
+        """Pages as {url, title, text}. kind is "auto" for pre-research and "lite" for the live fallback.
+        include_domains limits results to those sites (and their subdomains)."""
         body: dict = {"query": query, "type": kind, "numResults": results, "userLocation": "GB",
                       "contents": {"text": {"maxCharacters": max_chars}}}
-        if self.exclude_domains:
+        if include_domains:
+            body["includeDomains"] = include_domains
+        elif self.exclude_domains:
             body["excludeDomains"] = self.exclude_domains
         r = await self.client.post(EXA_URL, headers=self.headers, json=body, timeout=timeout)
         r.raise_for_status()
