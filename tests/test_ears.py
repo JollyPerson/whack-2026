@@ -271,3 +271,25 @@ def test_ctrl_c_with_stdout_gone_still_flushes_every_source_and_stops_capture(mo
     ears.main()
     assert [json.loads(line)["source"] for line in transcript.read_text().splitlines()] == ["mic1", "mic2"]
     assert len(procs) == 2 and all(p.terminated and p.waited for p in procs)
+
+
+# ----------------------------------------------------------------------------- runstt.sh
+def test_runstt_runs_from_any_directory(tmp_path):
+    # A copy, so tee writes its events.jsonl next to the copy and never over the recorded ears/events.jsonl.
+    import os
+    import shutil
+    import subprocess
+    here = tmp_path / "ears"
+    here.mkdir()
+    shutil.copy2(ROOT / "ears" / "runstt.sh", here / "runstt.sh")
+    (tmp_path / "bin").mkdir()
+    uv = tmp_path / "bin" / "uv"
+    uv.write_text('#!/usr/bin/env bash\nprintf \'{"type": "sentence", "cwd": "%s", "args": "%s"}\\n\' "$PWD" "$*"\n')
+    uv.chmod(0o755)
+    r = subprocess.run(["./ears/runstt.sh"], cwd=tmp_path, capture_output=True, text=True, timeout=20,
+                       env={**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}"})
+    assert r.returncode == 0, r.stderr
+    line = json.loads(r.stdout)
+    assert line["cwd"] == str(here)
+    assert line["args"].startswith("run python ears.py --source mic1=")
+    assert (here / "events.jsonl").read_text() == r.stdout
