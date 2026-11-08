@@ -76,6 +76,7 @@ _NUM = r"[£$€]?\d[\d,.]*\d?"
 _FIGURE = re.compile(rf"{_NUM}(?:\s?(?:-|–|to)\s?{_NUM}|/\d+)?"            # a range ("20-30%", "20 to 30%") or "1/3"
                      r"(?:\s?%|\s?(?:per ?cent|percent|million|billion|trillion|bn|m|k)\b)?", re.I)
 _YEAR = re.compile(r"(?:19|20)\d\d")
+_DATE = re.compile(r"\b\d{1,4}([/-])\d{1,2}\1\d{1,4}\b|\b(?:19|20)\d\d-(?:0[1-9]|1[0-2])\b")   # 8/11/2026, 2026-11
 _ODD = re.compile(r"[#@<>{}\[\]\\|*_~`]")
 _QUOTES = "\"'“”‘’`"
 _OK_HIGH = set("’‘“”—–…€")
@@ -174,14 +175,25 @@ def _finish(text: str) -> str:
 
 def figure(text: str) -> str:
     """The first figure in a claim as said ("40%", "£3 billion", "20-30%", "1/3"), or "". A bare year is not a
-    figure."""
-    for m in _FIGURE.finditer(text or ""):
+    figure, nor a date, nor a "fraction" over 1 ("24/7")."""
+    for m in _FIGURE.finditer(_DATE.sub(" ", text or "")):
         f = re.sub(r"\.?\s*%", "%", m.group(0).strip().rstrip(".,"))   # STT's "6 %" and "6.%" are "6%"
+        if "/" in f and not _fraction(f):
+            continue
         years = all(_YEAR.fullmatch(n) for n in _DIGITS.findall(f)) and \
             not re.search(r"[^\d\s,.–-]", re.sub(r"\bto\b", "", f))
         if any(ch.isdigit() for ch in f) and not years:                  # nor is a span of years ("2010 to 2019")
             return f
     return ""
+
+
+def _fraction(f: str) -> bool:
+    """"1/3" and "2/3" are figures; "24/7" (over 1) and "1/365" (a denominator past 100) are not."""
+    try:
+        a, b = (float(x.replace(",", "")) for x in re.findall(r"\d[\d,.]*", f)[:2])
+    except ValueError:
+        return False
+    return 0 < a < b <= 100
 
 
 # ----------------------------------------------------------------------------- sourced rebut

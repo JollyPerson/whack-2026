@@ -1451,6 +1451,11 @@ async def test_two_claims_queued_behind_a_bubble_with_the_llm_down_get_different
     ("Wages rose in 2019.", ""),
     ("It costs £3bn a year.", "£3bn"),
     ("Unemployment is 6% in the UK.", "6%"),
+    ("Two thirds, 2/3 of firms, would close.", "2/3"),
+    ("Shops open 24/7 now charge 5% more.", "5%"),          # not a fraction
+    ("On 8/11/2026 prices rose 5%.", "5%"),                 # a date is not a figure
+    ("Since 2026-11-08 prices rose 5%.", "5%"),
+    ("The 2026-11 data show 5%.", "5%"),                    # nor a year and a month
 ])
 def test_the_figure_a_template_quotes_survives_stt_spacing_ranges_and_fractions(text, fig):
     assert lines.figure(text) == fig
