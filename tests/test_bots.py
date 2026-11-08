@@ -311,26 +311,69 @@ async def test_a_sourced_verdict_wins_over_every_knowledge_line(check):
     assert (b.kind, b.sourced) == ("rebut", True)
 
 
-@pytest.mark.parametrize("check,label,kind", [
-    (misleading_check(0.99), "supported", "followup"),         # a supported sourced Verdict is never "true, but"
-    (false_check(0.99), "supported", "followup"),
-    (surprising_check(0.99), "supported", "followup"),         # sourced and supported: no unsourced concede either
-    (surprising_check(0.99), "contradicted", "followup"),      # capped, but it still disagrees: no concede
-    (false_check(0.99), "contradicted", "challenge"),          # capped, and it agrees
-    (misleading_check(0.99), "missing_context", "challenge"),
-    (surprising_check(0.99), "unverifiable", "concede"),
+CAPPED = ["capped"]
+
+
+@pytest.mark.parametrize("check,verdict,kind", [
+    (misleading_check(0.99), dict(label="supported"), "followup"),      # supported and sourced: never "true, but"
+    (false_check(0.99), dict(label="supported"), "followup"),
+    (surprising_check(0.99), dict(label="supported"), "followup"),      # sourced and supported: no unsourced concede
+    (surprising_check(0.99), dict(label="contradicted", guard_notes=CAPPED), "followup"),   # capped, still disagrees
+    (misleading_check(0.99), dict(label="contradicted", guard_notes=CAPPED), "followup"),   # "true, but" grants it
+    (false_check(0.99), dict(label="contradicted", guard_notes=CAPPED), "challenge"),       # capped, and it agrees
+    (misleading_check(0.99), dict(label="missing_context", guard_notes=CAPPED), "challenge"),
+    (surprising_check(0.99), dict(label="unverifiable", evidence=[]), "concede"),
 ])
-async def test_a_knowledge_line_never_contradicts_the_claims_verdict(check, label, kind):
+async def test_a_knowledge_line_never_contradicts_the_claims_verdict(check, verdict, kind):
     bots, out, clock = make(check=FakeLLM(check=check))
-    capped = label in ("contradicted", "missing_context")
-    bots.handle(V("c1", label=label, guard_notes=["capped"] if capped else [],
-                  evidence=[] if label == "unverifiable" else ONS))
+    bots.handle(V("c1", **verdict))
     bots.handle(C("c1", text=ULEZ))
     await settle(bots)
     [b] = said(out)
     assert b.kind == kind and not b.sourced
-    if label == "supported":
+    if lines.supported(bots.verdicts["c1"]):
         assert b.text in lines.GRANTED
+    if kind == "followup":
+        assert "(unsourced)" not in b.text
+
+
+@pytest.mark.parametrize("check,label,kind", [
+    (false_check(0.99), "supported", "challenge"),
+    (misleading_check(0.99), "supported", "challenge"),
+    (misleading_check(0.99), "contradicted", "challenge"),
+    (surprising_check(0.99), "contradicted", "concede"),
+    (surprising_check(0.99), "missing_context", "concede"),
+])
+async def test_knowledge_drops_a_line_against_every_verdict_label_it_would_contradict(check, label, kind):
+    """Every DISAGREES entry, even "supported", which the bus never brings this far (a supported Verdict always has
+    evidence, so it cancels the check first)."""
+    bots, out, clock = make()
+    claim, res = C("c1", text=ULEZ), writer_mod.Check(**check)
+    assert bots.knowledge(claim, res, Verdict.model_construct(claim_id="c1", label=label, evidence=[])) == \
+        (kind, None, f"the Verdict says {label}")
+    got, text, why = bots.knowledge(claim, res, None)
+    assert (got, why) == (kind, "") and text.endswith(" (unsourced)")
+
+
+@pytest.mark.parametrize("check,verdict,kind,log", [
+    (false_check(), dict(), "rebut", "likely_false 0.95 -> not fired: sourced verdict"),
+    (surprising_check(), dict(guard_notes=CAPPED), "followup",
+     "surprising_true 0.90 -> not fired: the Verdict says contradicted"),
+    (misleading_check(), dict(label="supported"), "followup", "misleading 0.90 -> not fired: supported verdict"),
+    (misleading_check(), dict(label="missing_context", guard_notes=CAPPED), "challenge", "misleading 0.90 -> fired "
+                                                                                         "challenge"),
+])
+async def test_a_verdict_that_comes_in_while_the_check_outlasts_the_wait_still_wins(caplog, check, verdict, kind, log):
+    caplog.set_level(logging.INFO, logger="bots")
+    bots, out, clock = make(check=FakeLLM(check=check, delay=0.3))     # the check (0.3 s) outlasts the wait (0.05 s)
+    bots.handle(C("c1", text=ULEZ))
+    await asyncio.sleep(0.15)
+    assert "c1" not in bots.waiting and not said(out)
+    bots.handle(V("c1", **verdict))
+    await settle(bots, 1.0)
+    [b] = said(out)
+    assert b.kind == kind and b.sourced == (kind == "rebut")
+    assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [f"bots: check c1: {log}"]
 
 
 def test_one_fact_line_per_claim_across_rebut_challenge_and_concede():

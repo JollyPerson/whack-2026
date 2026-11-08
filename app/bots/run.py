@@ -39,8 +39,9 @@ from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, Event, ModuleS
 
 log = logging.getLogger("bots")
 CHECK_KIND = {"likely_false": "challenge", "misleading": "challenge", "surprising_true": "concede"}
-DISAGREES = {"likely_false": {"supported"}, "misleading": {"supported"},   # check assessment -> Verdict labels
-             "surprising_true": {"contradicted", "missing_context"}}     # it would contradict
+DISAGREES = {"likely_false": {"supported"},                     # check assessment -> the Verdict labels it would
+             "misleading": {"supported", "contradicted"},         # contradict ("true, but" grants the figure)
+             "surprising_true": {"contradicted", "missing_context"}}
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
@@ -191,28 +192,25 @@ class Bots:
         if checkable and important and self.writer.checker is not None:
             check = self.spawn(self.writer.check(c, self.motion))
         verdict = await self.wait_verdict(c.id, config.BOTS_VERDICT_WAIT_S) if checkable else None
-        granted = lines.supported(verdict)
         to = dict(persona=persona, target=c.speaker, claim_id=c.id)
-        if verdict is not None and lines.sourced(verdict):
-            text = lines.rebut(c, verdict, self.said)
-            if text:
-                if check:
-                    check.cancel()
-                    log_check(c.id, finished(check), "not fired: sourced verdict")
-                self.queue(session, text=text, kind="rebut", sourced=True, evidence=list(verdict.evidence), **to)
+        if self.rebutted(c, verdict, check, session, to):
+            return
+        if check is not None and not lines.supported(verdict):
+            res = await check
+            verdict = self.verdicts.get(c.id)             # the check can outlast the wait: a later Verdict still wins
+            if self.rebutted(c, verdict, check, session, to):
                 return
-        if check is not None:
-            if granted:
-                check.cancel()
-                log_check(c.id, finished(check), "not fired: supported verdict")
-            else:
-                res = await check
+            if not lines.supported(verdict):
                 kind, text, why = self.knowledge(c, res, verdict)
                 fired = bool(text) and self.queue(session, text=text, kind=kind, **to)
                 log_check(c.id, res, f"fired {kind}" if fired else
                           f"not fired: {why or 'not queued (already said, or paused)'}")
                 if fired:
                     return
+        if check is not None and lines.supported(verdict):
+            check.cancel()
+            log_check(c.id, finished(check), "not fired: supported verdict")
+        granted = lines.supported(verdict)
         if not important:
             return
         raw = await self.writer.followup(c, self.motion, persona, granted, tuple(self.said))
@@ -223,6 +221,18 @@ class Bots:
             text = lines.followup(c, self.said, granted)
         if text:
             self.queue(session, text=text, kind="followup", **to)
+
+    def rebutted(self, c: Claim, verdict: Optional[Verdict], check: Optional[asyncio.Task], session: int,
+                 to: dict) -> bool:
+        """Queue the rebut a sourced Verdict allows; it beats Claude's check (cancelled, logged). True if it did."""
+        text = lines.rebut(c, verdict, self.said) if verdict is not None else None
+        if not text:
+            return False
+        if check is not None:
+            check.cancel()
+            log_check(c.id, finished(check), "not fired: sourced verdict")
+        self.queue(session, text=text, kind="rebut", sourced=True, evidence=list(verdict.evidence), **to)
+        return True
 
     def knowledge(self, c: Claim, res: Any, verdict: Optional[Verdict]) -> tuple[str, Optional[str], str]:
         """The fact line Claude's own-knowledge check `res` allows for `c`: (kind, text or None, why not)."""
