@@ -431,6 +431,24 @@ async def test_wrong_clock_t_end_falls_back_to_ts(t_end):
     assert pub[0].t_end == T and pub[0].marks["speech_end"] == T
 
 
+async def test_constant_clock_offset_is_not_staleness():
+    """ears/bridge.py stamps t_end with the ears host's clock: 6-30 s behind the server made every sentence
+    'stale' (inside CLOCK_SKEW_S, beyond CLAIM_STALE_S), so the LLM was never called all session."""
+    now = [T]
+    llm = StubLLM({"claims": []})
+    ex, _, _ = make(llm, clock=lambda: now[0])
+    for i in range(3):
+        t = T + 5 * i
+        now[0] = t + 0.5
+        await ex.extract(Utterance(id=f"u{i}", speaker="A", text="Unemployment is 6 percent.", t_start=t - 12,
+                                   t_end=t - 10, ts=t))
+    assert len(llm.calls) == 3 and ex.stats["by_cause"]["stale"] == 0
+    now[0] = T + 40.5                                            # a real backlog on top of the offset still counts
+    await ex.extract(Utterance(id="u9", speaker="A", text="Unemployment is 6 percent.", t_start=T + 18,
+                               t_end=T + 20, ts=T + 40))
+    assert len(llm.calls) == 3 and ex.stats["by_cause"]["stale"] == 1
+
+
 def test_speakers_buffer_independently():
     ex, _, _ = make()
     ex.assemble(utt("our figures show that", speaker="A", uid="a1"), T)

@@ -49,6 +49,7 @@ FRAG_PAUSE_S, FRAG_PAUSE_FINALS_S = 1.0, 2.0
 FRAG_MAX_AGE_S, FRAG_MAX_WORDS = 8.0, 40      # hard caps: nothing is held longer / bigger than this
 INTERIM_LIVE_S = 5.0                          # an interim this recent from the speaker -> the shorter timers
 CLOCK_SKEW_S = 30.0                           # |t_end - ts| beyond this: t_end is on another clock, use ts
+LAG_WINDOW = 20                               # finals per speaker whose least (ts - t_end) is their clock offset
 MIN_CALL_S = 0.3                              # no LLM call with less left than this (or half CLAIM_TIMEOUT_S)
 LLM_MAX_TOKENS = 400
 WARMUP_TIMEOUT_S = 15.0            # first call compiles the schema; give it room
@@ -594,6 +595,7 @@ class ClaimExtractor:
         self._interims: dict[str, tuple] = {}          # speaker -> (time, (id, text)) of their last interim
         self._held: dict[str, float] = {}              # released unit id -> seconds the assembler sat on it
         self._sides: dict[str, str] = {}               # fallback side assignment if the argmap can't say
+        self._lags: dict[str, deque] = {}              # speaker -> recent (ts - t_end) of their finals
         self._motion = ""
         self._sem: Optional[asyncio.Semaphore] = None
         self._sem_loop: Any = None
@@ -604,7 +606,7 @@ class ClaimExtractor:
     # ------------------------------------------------------------------ session
     def reset(self) -> None:
         self.gen += 1
-        for d in (self._buf, self._interims, self._held, self._sides):
+        for d in (self._buf, self._interims, self._held, self._sides, self._lags):
             d.clear()
 
     async def warmup(self, motion: str) -> None:
@@ -839,8 +841,17 @@ class ClaimExtractor:
         return str(getattr(self.argmap, "motion", "") or self._motion or "")
 
     def _age(self, u: Utterance) -> float:
+        """Seconds since the speech ended, less the least lag of the speaker's recent finals: ears/bridge.py stamps
+        t_end on the ears host's clock, and a constant offset (inside CLOCK_SKEW_S) is not staleness. A backlog
+        building on top of it still is. Only ever lowers the age: fail open, i.e. call the LLM."""
         t = _speech_end(u)
-        return self.clock() - t if t else 0.0
+        if not t:
+            return 0.0
+        if u.ts:
+            lags = self._lags.setdefault(u.speaker, deque(maxlen=LAG_WINDOW))
+            lags.append(u.ts - t)
+            t += max(0.0, min(lags))
+        return self.clock() - t
 
     def _note_latency(self, ms: float) -> None:
         self._lat.append(ms)
