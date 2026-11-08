@@ -11,7 +11,8 @@ so the same events with the same `now`s always give the same decisions (interjec
 
 Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause (speech, then
 a pause, since the last line), G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips
-G4-G7 only: the referee never talks over a human or itself, and never twice without a human pause in between.
+G4-G7 only (for whatever ranks first; Control(time) for its own line, ranked first): the referee never talks over
+a human or itself, and never twice without a human pause in between.
 Dry spell: once the debate has run dry_first_s (25 s) from its first Utterance with no Interjection, and after
 that every min_gap_s since the last one, a canned "dry" line to the room becomes a candidate. It skips only G4,
 is held once nobody has spoken for dry_quiet_s, ranks below any real candidate, has no claim_id, and its wording depends on whether a figure was heard yet.
@@ -116,6 +117,7 @@ class State:
     figure_heard: bool = False                        # a statistic Claim has been made (picks the dry wording)
     tts_until: float = NEG
     force_until: float = NEG
+    force_key: Optional[str] = None                   # Control(time): the line its force is for (None = any)
     last_log: dict = field(default_factory=dict)      # key -> (action, reason): log transitions only
 
 
@@ -344,7 +346,7 @@ def _on_control(st: State, ev: Control, out: list, now: float) -> None:
     elif f == "agent_speaking":
         _tts(st, truthy(v), now)
     elif f == "force_next":
-        st.force_until = now + st.cfg.force_window_s if truthy(v) else NEG
+        st.force_until, st.force_key = (now + st.cfg.force_window_s if truthy(v) else NEG), None
     elif f == "aggr":
         st.aggr = clamp_aggr(v, st.aggr)
         st.cfg = level_cfg(st.aggr, st.cfg)
@@ -353,8 +355,9 @@ def _on_control(st: State, ev: Control, out: list, now: float) -> None:
     elif f == "time":
         spk = _resolve_speaker(st, v)
         if spk is not None:
-            _add(st, Cand(f"time:{spk}:{now:.0f}", "time", spk, side_of(st, spk), 1.0, 1.0, now), out, now)
-            st.force_until = now + st.cfg.force_window_s
+            key = f"time:{spk}:{now:.0f}"
+            _add(st, Cand(key, "time", spk, side_of(st, spk), 1.0, 1.0, now), out, now)
+            st.force_until, st.force_key = now + st.cfg.force_window_s, key
 
 
 def _veto(st: State, v: Any, out: list, now: float) -> None:
@@ -410,15 +413,17 @@ def try_fire(st: State, now: float) -> list[Event]:
     if not _paused_since(st, now, last):                                     # G3: a human must pause again
         return out
     forced = now < st.force_until
+    first = st.force_key if forced else None                                 # Control(time): its own line
     for cd in st.pending.values():
         cd.score = _score(st, cd, now)
-    for cd in sorted(st.pending.values(), key=lambda cd: _rank(st, cd)):
-        why = None if forced else _gate(st, cd, now, last)
+    for cd in sorted(st.pending.values(), key=lambda cd: (cd.key != first, _rank(st, cd))):
+        skip = forced and st.force_key in (None, cd.key)
+        why = None if skip else _gate(st, cd, now, last)
         if why is None and (st.muted or st.director_off):
             why = "muted_would_fire"
         if why is None:
             text = _text(st, cd, now)
-            _log(st, out, cd, "fired", "forced" if forced else "ok", text)
+            _log(st, out, cd, "fired", "forced" if skip else "ok", text)
             return out + [_fire(st, cd, now, text)]
         _log(st, out, cd, "held", why, _text(st, cd, now) if why == "muted_would_fire" else "")
         if why == "muted_would_fire":
@@ -500,7 +505,7 @@ def _spent(st: State, key: Optional[str], kind: str, cid: Optional[str], target:
     st.fires.append((now, target, side, kind))
     if kind in PRESSURE and target is not None:
         st.pressure[target] += 1
-    st.force_until = NEG
+    st.force_until, st.force_key = NEG, None
 
 
 def restore_fired(st: State, ij: Interjection) -> None:

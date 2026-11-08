@@ -807,3 +807,16 @@ def test_a_pause_with_no_speech_since_the_last_line_never_reopens_the_floor():
     assert d.status(48).blocked == "awaiting_pause"
     _, o = run(ev + talk("A", 40, 41) + [(42, P("A", 42))])     # a human speaks and pauses: the next line may come
     assert fired(o) == [(6, "correction", "A", "c1"), (42, "correction", "A", "c2")]
+
+
+def test_time_call_is_what_its_force_window_fires():
+    """Control(time) forces the time line, not whichever candidate outscores it (the call was then dropped stale)."""
+    ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
+          + talk("B", 7, 15) + [(14, C("c2", "B", 14, imp=1.0)), (14.5, V("c2", "contradicted", .99)),
+                                (15, Control(flag="time", value="B")), (15.5, P("B", 15.5))] + ticks(15.5, 65))
+    _, o = run(ev)
+    assert fired(o)[:2] == [(6, "correction", "A", "c1"), (15.5, "time", "B", None)]
+    assert ("time:B:15", "fired", "forced") in logs(o) and ("time:B:15", "dropped", "stale_ttl") not in logs(o)
+    # a later force_next is the operator's "say whatever is next": the stronger correction goes first
+    _, o = run(ev[:-len(ticks(15.5, 65))] + [(15.2, Control(flag="force_next"))])
+    assert fired(o)[1][1:] == ("correction", "B", "c2")
