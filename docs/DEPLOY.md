@@ -81,6 +81,8 @@ embedding them takes hours on this server's single vCPU, and copied in. The depl
 `EVIDENCE_EMBEDDER=none`, so a Motion missing from the folder gets a small BM25 index rather than tying up the CPU.
 `/srv/cache/evidence` keeps the older BM25 indexes for a rollback to an image from before the switch.
 `/srv/cache/fastembed` holds the embedding model, so the app doesn't download it on start.
+`/srv/cache/verdicts` holds the verdict cache, one file per Motion (see `app/evidence/README.md`). Delete a
+Motion's file to forget its verdicts: `exec app sh -c 'rm /srv/cache/verdicts/<name>.jsonl'`.
 
 To add or rebuild one with vectors, build it on a laptop with a Python 3.12 venv (see `app/evidence/README.md`),
 then copy it in:

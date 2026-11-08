@@ -9,7 +9,9 @@ import pytest
 
 from app.bus import Bus
 from app import config
+from app.evidence import cache as cache_module
 from app.evidence import deep, preresearch
+from app.evidence.cache import VerdictCache
 from app.evidence import run as run_module
 from app.evidence.checks import CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in, quote_in_source
 from app.evidence.index import EvidenceIndex, chunk_text, tokens
@@ -25,6 +27,12 @@ QUOTE = "fell by 27% between 2010 and 2020"
 def no_deep_check(monkeypatch):
     """The deep check runs in the background after each verdict; tests that want it turn it back on."""
     monkeypatch.setitem(config.FLAGS, "deep_check", False)
+
+
+@pytest.fixture(autouse=True)
+def verdict_cache_in_tmp(tmp_path, monkeypatch):
+    """Never read or write the real cache/verdicts folder."""
+    monkeypatch.setattr(cache_module, "CACHE_DIR", tmp_path / "verdicts")
 
 
 def raw(**kw):
@@ -485,6 +493,73 @@ async def test_deep_verdict_from_an_old_session_is_dropped(monkeypatch):
     await sub.__anext__()
     await asyncio.gather(*mod.tasks)
     assert sub.q.empty()
+
+
+# --- verdict cache
+def settled(label="supported", confidence=0.9, **kw):
+    return apply_guards(raw(label=label, confidence=confidence, **kw), "Bus use outside London fell by 27%", SRC)
+
+
+CLAIM = "Bus use outside London fell by 27% between 2010 and 2020"
+
+
+def test_cache_matches_a_rephrasing_with_the_same_figures_only():
+    cache = VerdictCache()
+    assert cache.add(CLAIM, settled(), "index")
+    assert cache.lookup("bus use outside of London fell by 27% between 2010 and 2020").guarded.label == "supported"
+    assert cache.lookup("Bus use outside London fell by 30% between 2010 and 2020") is None    # other figure
+    assert cache.lookup("Bus use outside London did not fall by 27% between 2010 and 2020") is None
+    assert cache.lookup("Rail fares rose by 27% between 2010 and 2020") is None
+
+
+@pytest.mark.parametrize("g", [settled(label="unverifiable"), settled(confidence=0.3), settled(quote="not in the source")])
+def test_cache_only_keeps_verdicts_worth_repeating(g):
+    cache = VerdictCache()
+    assert not cache.add(CLAIM, g, "index") and len(cache) == 0
+
+
+def test_cache_persists_per_motion_and_newer_verdicts_win():
+    first = VerdictCache.for_motion("Motion")
+    first.add(CLAIM, settled(confidence=0.7), "index")
+    first.add(CLAIM, settled(label="contradicted", confidence=0.8), "deep")
+    reloaded = VerdictCache.for_motion("Motion")
+    assert len(reloaded) == 1 and reloaded.lookup(CLAIM).guarded.label == "contradicted"
+    assert reloaded.lookup(CLAIM).guarded.evidence[0].quote == QUOTE
+    assert VerdictCache.for_motion("Another motion").lookup(CLAIM) is None
+
+
+def test_cache_skips_a_bad_line():
+    VerdictCache.for_motion("Motion").add(CLAIM, settled(), "index")
+    path = preresearch.index_path("Motion", cache_module.CACHE_DIR).with_suffix(".jsonl")
+    path.write_text("not json\n" + path.read_text())
+    assert VerdictCache.for_motion("Motion").lookup(CLAIM) is not None
+
+
+async def test_module_answers_a_repeated_claim_from_the_cache_without_checking():
+    bus = Bus()
+    sub = bus.subscribe("t", {"Verdict"})
+    llm = FakeLLM(raw())
+    mod = EvidenceModule(bus, llm)
+    await mod.start_session("Motion")
+    mod.checker.index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    await mod.handle_claim(claim(text=CLAIM))
+    await mod.handle_claim(claim(id="c2", text="bus use outside London fell by 27% between 2010 and 2020"))
+    first, second = await sub.__anext__(), await sub.__anext__()
+    assert (first.via, second.via) == ("index", "cache") and second.label == "supported" and second.evidence
+    assert llm.calls == 1
+    again = EvidenceModule(Bus(), FakeLLM(raw()))
+    await again.start_session("Motion")
+    assert again.verdicts.lookup(CLAIM) is not None      # a later debate on the Motion
+
+
+async def test_module_checks_again_when_the_cache_is_off(monkeypatch):
+    monkeypatch.setitem(config.FLAGS, "verdict_cache", False)
+    llm = FakeLLM(raw())
+    mod = EvidenceModule(Bus(), llm)
+    mod.checker.index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    await mod.handle_claim(claim(text=CLAIM))
+    await mod.handle_claim(claim(id="c2", text=CLAIM))
+    assert llm.calls == 2
 
 
 def test_normalise_only_forgives_typography():

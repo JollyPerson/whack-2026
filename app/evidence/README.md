@@ -6,6 +6,7 @@ Owner: Harkaran (`JollyPerson`), issue #15. Consumes `Claim` and `SessionStart`.
 |---|---|
 | `run.py` | Checks each Claim against the index, then the web, and publishes the result |
 | `deep.py` | The background deep check, which can publish a second Verdict about 30 s later |
+| `cache.py` | The verdict cache: a claim already settled on the Motion gets the same Verdict at once |
 | `checks.py` | Quote verification, numeric comparison and the confidence cap |
 | `verdicts.py` | The verdict prompt and schema |
 | `index.py` | Chunks, BM25 and optional vectors |
@@ -43,6 +44,17 @@ The holdout Motion went from 1/5 to 3/5 on the last setup. More pages only help 
 ## Other models
 
 Evidence uses whatever `make_llm()` builds when there's no Anthropic key for it, so any OpenAI-compatible server works through `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_API_KEY` and `OPENAI_MODEL`. That switches claim extraction too. Kimi K2.6 on Canopy Wave answers a verdict in about 2.5 s, but its key allows 1 request a second and 6 a minute: enough for the eval with `EVAL_LLM_PER_MINUTE=5.5`, which spaces calls and retries on HTTP 429, and not enough for a live debate.
+
+## Verdict cache
+
+A claim already settled on the Motion, in this debate or an earlier one, is answered at once with the stored Verdict (`via="cache"`), without searching or calling the model. That makes repeats instant and gives the same claim the same Verdict every time.
+
+- **Storage:** one JSON-lines file per Motion in `cache/verdicts/` (`EVIDENCE_VERDICT_CACHE_DIR`). On the server that's `/srv/cache/verdicts` in the `cache` volume, so it survives restarts and deploys.
+- **Matching:** a claim matches a stored one when it has exactly the same figures and shares at least 70% of its words, the argument map's duplicate threshold. "Fell 27%" never reuses a verdict for "fell 30%", and "did not fall" doesn't match "fell".
+- **What's kept:** only Verdicts worth repeating: not unverifiable, with a quote the guard verified, and confidence of at least 0.6 (`EVIDENCE_CACHE_MIN_CONF`). A later, better Verdict for the same claim, such as a deep check's, replaces the stored one.
+- **Forgetting:** delete the Motion's file to drop a wrong verdict. The operator can turn the cache off with the `verdict_cache` flag.
+
+A wrong verdict that gets stored is repeated until its file is deleted, so check the cache after a test debate.
 
 ## Deep check
 

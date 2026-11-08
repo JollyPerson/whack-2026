@@ -2,7 +2,8 @@
 
 Indexes are built in advance (see preresearch.py). A Motion without one is researched live in the background, and
 claims that arrive meanwhile go straight to the web. After the fast verdict, important claims get a slower deep
-check in the background (deep.py), which publishes a second Verdict when it does better.
+check in the background (deep.py), which publishes a second Verdict when it does better. A claim already settled
+in an earlier debate on the Motion is answered from the verdict cache (cache.py) without checking it again.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from typing import Optional
 
 from app import config, latency
 from app.evidence import deep, preresearch
+from app.evidence.cache import VerdictCache
 from app.evidence.checks import Guarded, Source
 from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
 from app.evidence.llm import make_verdict_llm
@@ -102,6 +104,7 @@ class EvidenceModule:
     def __init__(self, bus, llm=None, searcher=None, embedder=None):
         self.bus, self.llm, self.searcher, self.embedder = bus, llm, searcher, embedder
         self.checker = Checker(llm, searcher, embedder)
+        self.verdicts = VerdictCache()
         self.session = 0
         self.limit = asyncio.Semaphore(CONCURRENCY)
         self.tasks: set[asyncio.Task] = set()
@@ -122,6 +125,10 @@ class EvidenceModule:
         self.session += 1
         session = self.session
         self.checker = Checker(self.llm, self.searcher, self.embedder, motion=motion)
+        self.verdicts = VerdictCache()
+        verdicts = await asyncio.to_thread(VerdictCache.for_motion, motion)
+        if session == self.session:
+            self.verdicts = verdicts
         path = preresearch.index_path(motion)
         if path.with_suffix(".json").exists():
             self.checker.index = await asyncio.to_thread(EvidenceIndex.load, path)
@@ -143,7 +150,10 @@ class EvidenceModule:
             await asyncio.to_thread(index.save, path)
 
     async def handle_claim(self, claim: Claim) -> None:
-        session, checker = self.session, self.checker
+        session, checker, verdicts = self.session, self.checker, self.verdicts
+        if config.FLAGS.get("verdict_cache", True) and (hit := verdicts.lookup(claim.text)) is not None:
+            self._publish(claim, Outcome(hit.guarded, "cache", retrieved_at=time.time()))
+            return
         async with self.limit:
             try:
                 if claim.t_end > 1e9 and time.time() - claim.t_end > config.STALE_CLAIM_S:   # below 1e9 isn't a real clock time
@@ -159,6 +169,7 @@ class EvidenceModule:
         if session != self.session:
             return                              # the debate moved on to a new Motion
         self._publish(claim, outcome)
+        await asyncio.to_thread(verdicts.add, claim.text, outcome.guarded, outcome.via)
         if self.deep_llm is not None and deep.enabled() and deep.wants_deep(claim.checkable, claim.importance):
             self._spawn(self.deepen(claim, outcome, session, checker))
 
@@ -191,6 +202,7 @@ class EvidenceModule:
         if session != self.session or not deep.replaces(fast.guarded, guarded):
             return
         self._publish(claim, Outcome(guarded, "deep", sources, started))
+        await asyncio.to_thread(self.verdicts.add, claim.text, guarded, "deep")
 
     async def run(self) -> None:
         async for ev in self.bus.subscribe("evidence", {"Claim", "SessionStart"}):
