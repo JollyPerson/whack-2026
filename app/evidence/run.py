@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app import config, latency
+from app.brain.llm import LLMError, LLMTimeout
 from app.evidence import preresearch
 from app.evidence.checks import Guarded, Source
 from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
@@ -47,9 +48,9 @@ class Checker:
     async def retrieve(self, claim: str) -> list[Source]:
         if not self.index or not len(self.index):
             return []
-        vector = None
-        if self.embedder is not None and self.index.vectors is not None:
-            try:
+        vector, index = None, self.index
+        if self.embedder is not None and index.vectors is not None and getattr(self.embedder, "name", None) == index.embedder_name:
+            try:                                # another model's vectors would be meaningless, or the wrong size
                 vector = (await asyncio.wait_for(asyncio.to_thread(self.embedder.embed, [claim]), QUERY_EMBED_TIMEOUT_S))[0]
             except Exception as e:
                 log.warning("query embedding failed, using BM25: %r", e)
@@ -64,19 +65,27 @@ class Checker:
     async def check(self, claim: str, web: bool = True) -> Outcome:
         if self.llm is None:
             return Outcome(Guarded(explanation="No verdict model is configured."))
-        outcome = Outcome(Guarded(explanation="No source settles this."))
+        outcome, failed = Outcome(Guarded(explanation="No source settles this.")), None
         sources = await self.retrieve(claim)
         outcome.retrieved_at = time.time()
         if sources:
-            outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
+            try:
+                outcome = await self._judged(claim, sources, "index", outcome.retrieved_at)
+            except LLMTimeout:
+                raise                           # too little of the budget is left for the web
+            except LLMError as e:               # a refusal or a cut-short answer: other sources may still settle it
+                log.warning("index verdict failed, trying the web: %r", e)
+                failed = e
         if outcome.guarded.label == "unverifiable" and web and self.searcher is not None:
             try:
                 web_found = await self.web_sources(claim)
             except Exception as e:
                 log.warning("web fallback failed: %r", e)
-                return outcome
+                web_found = []
             if web_found:
-                outcome = await self._judged(claim, web_found, "web", outcome.retrieved_at)
+                return await self._judged(claim, web_found, "web", outcome.retrieved_at)
+        if failed is not None:
+            raise failed                        # nothing else answered: still a failed check, not "unverifiable"
         return outcome
 
     async def _judged(self, claim: str, sources: list[Source], via: str, retrieved_at: Optional[float]) -> Outcome:

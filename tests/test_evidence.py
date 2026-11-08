@@ -392,7 +392,7 @@ async def test_slow_query_embedding_falls_back_to_bm25(monkeypatch):
             time.sleep(.2)
             return [[1.0, 0.0, 0.0]]
     np = pytest.importorskip("numpy")
-    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"))
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "slow")
     found = await Checker(None, embedder=Slow(), index=index).retrieve("bus use in London")
     assert found[0].url.endswith("/0")
 
@@ -522,3 +522,56 @@ def test_openai_embedder_reuses_one_connection(monkeypatch):
     embedder = index_module.OpenAIEmbedder("k")
     assert embedder.embed(["a"]) == [[0.0]] and embedder.embed(["a", "b"]) == [[0.0], [1.0]]
     assert len(made) == 1 and len(sent) == 2 and sent[0].headers["authorization"] == "Bearer k"
+
+
+# --- regressions: the check flow
+class NamedEmbedder:
+    def __init__(self, name, vector):
+        self.name, self.vector, self.calls = name, vector, 0
+
+    def embed(self, texts):
+        self.calls += 1
+        return [self.vector for _ in texts]
+
+
+async def test_index_built_by_another_embedder_answers_from_bm25():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}],
+                          np.ones((1, 4), dtype="float32") / 2, "fastembed:BAAI/bge-small-en-v1.5")
+    web, other = FakeSearch(), NamedEmbedder("openai:text-embedding-3-small", [1.0] * 6)
+    out = await Checker(FakeLLM(raw()), web, embedder=other, index=index).check("Bus use outside London fell")
+    assert out.via == "index" and out.guarded.label == "supported" and web.calls == 0 and other.calls == 0
+
+
+async def test_matching_embedder_is_used_for_the_query():
+    np = pytest.importorskip("numpy")
+    index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"), "same")
+    same = NamedEmbedder("same", [0.0, 1.0, 0.0])
+    found = await Checker(None, embedder=same, index=index).retrieve("zzz unrelated")
+    assert same.calls == 1 and found[0].url.endswith("/1")
+
+
+async def test_index_model_error_still_tries_the_web():
+    from app.brain.llm import LLMInvalid
+    web = FakeSearch([{"url": "https://ons.gov.uk/a", "title": "ONS", "text": TEXT}])
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    llm = FakeLLM(LLMInvalid("stop_reason=max_tokens"), raw())
+    out = await Checker(llm, web, index=index).check("Bus use outside London fell")
+    assert out.via == "web" and out.guarded.label == "supported" and web.calls == 1
+
+
+@pytest.mark.parametrize("web_on", [True, False])
+async def test_index_model_error_with_no_web_answer_is_still_an_error(web_on):
+    from app.brain.llm import LLMRefusal
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    with pytest.raises(LLMRefusal):
+        await Checker(FakeLLM(LLMRefusal("no")), FakeSearch([]), index=index).check("Bus use outside London fell", web=web_on)
+
+
+async def test_index_model_timeout_does_not_spend_the_rest_on_the_web():
+    from app.brain.llm import LLMTimeout
+    web = FakeSearch([{"url": "https://ons.gov.uk/a", "title": "ONS", "text": TEXT}])
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    with pytest.raises(LLMTimeout):
+        await Checker(FakeLLM(LLMTimeout("slow"), raw()), web, index=index).check("Bus use outside London fell")
+    assert web.calls == 0
