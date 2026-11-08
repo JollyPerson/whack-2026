@@ -79,9 +79,9 @@ function page(search = '') {
   Object.assign(w, new Function(...names, src + '\nreturn {apply, draw, state: () => ({S, banner})};')(...names.map(n => env[n])));
   w.el = el;
   w.ws = () => w.sockets[w.sockets.length - 1];
-  w.connect = (events = [], modules = {}) => { // open the socket the page made and send its Snapshot
+  w.connect = (events = [], modules = {}, flags = {}) => { // open the socket the page made and send its Snapshot
     w.ws().open();
-    w.ws().msg({event: 'Snapshot', last_seq: seq, flags: {}, modules, events});
+    w.ws().msg({event: 'Snapshot', last_seq: seq, flags, modules, events});
   };
   w.live = e => { w.ws().msg({seq: ++seq, ts: w.now(), ...e}); };   // a live event from the server
   w.snap = e => ({seq: ++seq, ts: w.now(), ...e});                  // an event for the next Snapshot
@@ -222,6 +222,92 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   q.key('b');
   check('bots switch: B sends Control bots=false', q.ws().sent.some(m => same(m, {op: 'control', flag: 'bots', value: false})),
     q.ws().sent);
+}
+// The verdict card: [class, text] of every node under #verdict, depth first.
+const verdict = p => { const walk = n => [[n.className, n.textContent], ...n.children.flatMap(walk)];
+                       return p.el('verdict').children.flatMap(walk); };
+const has = (parts, cls, text) => parts.some(([c, t]) => c === cls && t === text);
+const WIN = 'MMD-Conqueror', LOSE = 'MMD-Lost One_s Weeping', DRAW = 'MMD-皆大欢喜-卜逻desu';
+const RESULT = {event: 'DebateResult', winner: 'prop', margin: 'clear', headline: 'Priya wins on the evidence.',
+  scores: {prop: {factuality: 8, evidence_use: 7.5, overall: 7.5}, opp: {factuality: 5, evidence_use: 6, overall: 5.25}},
+  report: 'logs/summaries/20261108-run-summary.md', dances: {for: WIN, against: LOSE}, music: {for: true, against: false},
+  dance_s: 30, via: 'llm'};
+const SESSION = {event: 'SessionStart', motion: 'Ban cars', speakers: {A: {name: 'Priya', side: 'prop'}, B: {name: 'Tom', side: 'opp'}}};
+{ // 11. the final screen: "Judging…" after the click, then the verdict card; never on the live screen
+  const p = page(''); p.connect([p.snap(SESSION)], {judge: 'real'}); p.draw();
+  check('verdict: hidden on the live screen', p.el('verdict').hidden);
+  p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
+  check('verdict: "Judging…" after the Final screen click', !p.el('verdict').hidden
+    && p.el('verdict').className === 'verdict judging' && has(verdict(p), 'winner pulse', 'Judging…'), verdict(p));
+  p.live(RESULT); p.draw();
+  const parts = verdict(p);
+  check('verdict: the winner in its side colour, revealed live', p.el('verdict').className === 'verdict prop reveal'
+    && has(parts, 'winner', 'Proposition wins') && has(parts, 'names', 'Priya') && has(parts, 'margin', 'Clear margin'),
+    [p.el('verdict').className, parts]);
+  check('verdict: overall scores per side', same(parts.filter(([c]) => c === 'prop' || c === 'opp').slice(0, 2),
+    [['prop', ''], ['opp', '']]) && has(parts, '', '7.5') && has(parts, '', '5.3') && has(parts, '', 'Proposition'), parts);
+  check('verdict: headline and one compact row per criterion, without overall', has(parts, 'headline', 'Priya wins on the evidence.')
+    && same(parts.filter(([c]) => ['name', 'prop', 'opp'].includes(c)).slice(-6),
+            [['name', 'Factuality'], ['prop', '8'], ['opp', '5'], ['name', 'Evidence use'], ['prop', '7.5'], ['opp', '6']]),
+    parts);
+  check('verdict: each bot\'s dance, music only for the winner', has(parts, 'dance prop', `For bot dances: ${WIN}`)
+    && has(parts, 'music', ' ♪') && has(parts, 'dance opp', `Against bot dances: ${LOSE}`)
+    && parts.filter(([c]) => c === 'music').length === 1, parts);
+  check('verdict: the report path, no formula note for an LLM verdict',
+    has(parts, 'meta', 'Full summary: logs/summaries/20261108-run-summary.md'), parts);
+  const kept = p.el('verdict').children[0];
+  p.advance(3000); p.draw();
+  check('verdict: an unchanged result is not rebuilt', p.el('verdict').children[0] === kept);
+  p.live({event: 'Control', flag: 'screen', value: 'live'}); p.draw();
+  check('verdict: hidden again on the live screen', p.el('verdict').hidden && p.el('final').hidden);
+  p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
+  check('verdict: still there on the next Final screen', !p.el('verdict').hidden && p.el('verdict').children[0] === kept);
+  p.live({event: 'SessionStart', motion: 'Next motion'}); p.draw();
+  check('verdict: a new debate clears it', p.el('verdict').hidden);
+}
+{ // 12. "Judging…" only while a judge could answer: the judge module runs, and not forever
+  const p = page(''); p.connect([p.snap(SESSION)]); p.live({event: 'Control', flag: 'screen', value: 'final'}); p.draw();
+  check('judging: not without the judge module', p.el('verdict').hidden && !p.el('final').hidden);
+  const q = page(''); q.connect([q.snap(SESSION)], {judge: 'real'}); q.live({event: 'Control', flag: 'screen', value: 'final'});
+  q.advance(119000); q.draw();
+  const before = !q.el('verdict').hidden;
+  q.advance(2000); q.draw();
+  check('judging: gives up after JUDGING_MAX_S', before && q.el('verdict').hidden, {before});
+  q.live(RESULT); q.draw();
+  check('judging: a late verdict still shows', !q.el('verdict').hidden && has(verdict(q), 'winner', 'Proposition wins'));
+}
+{ // 13. a refreshed tab (Snapshot) of a real recorded debate shows the verdict at once, without the reveal animation
+  const golden = Deno.readTextFileSync(Deno.args[0].replace(/app\/face\/static\/app\.js$/, 'fixtures/golden_run.jsonl'))
+    .split('\n').filter(Boolean).map(l => JSON.parse(l));
+  const p = page('');
+  p.connect([...golden.map(e => p.snap(e)), p.snap({event: 'Control', flag: 'screen', value: 'final'}),
+             p.snap({...RESULT, winner: 'draw', margin: '', headline: 'Too close to call.', dances: {for: DRAW, against: DRAW},
+                     music: {for: false, against: false}, via: 'formula'})], {judge: 'real'}, {screen: 'final'});
+  p.draw();
+  const parts = verdict(p);
+  check('snapshot: shown at once, no animation', !p.el('verdict').hidden && p.el('verdict').className === 'verdict draw', p.el('verdict').className);
+  check('snapshot: a draw, no names, both bots dance the same title in silence', has(parts, 'winner', 'Draw')
+    && !parts.some(([c]) => c === 'names') && has(parts, 'margin', 'Too close to call')
+    && has(parts, 'dance prop', `For bot dances: ${DRAW}`) && has(parts, 'dance opp', `Against bot dances: ${DRAW}`)
+    && !parts.some(([c]) => c === 'music'), parts);
+  check('snapshot: the formula noted, after the report path', has(parts, 'meta',
+    'Full summary: logs/summaries/20261108-run-summary.md · Decided by the scorecard formula'), parts);
+  check('snapshot: the rest of the final screen is drawn', p.el('final-prop').innerHTML.includes('Priya')
+    && p.el('final-opp').innerHTML.includes('Tom'), p.el('final-prop').innerHTML.slice(0, 200));
+}
+{ // 14. model text stays text; a missing title, side or score is left out, never "undefined"
+  const evil = '<img src=x onerror=alert(1)>';
+  const p = page(''); p.connect([p.snap(SESSION), p.snap({event: 'Control', flag: 'screen', value: 'final'}),
+    p.snap({event: 'DebateResult', winner: evil, margin: evil, headline: evil, scores: {prop: {[evil]: evil, overall: 6}},
+            report: evil, dances: {for: evil}, music: {}, via: 'llm'})], {}, {screen: 'final'});
+  p.draw();
+  const parts = verdict(p);
+  check('escaping: every string lands as text', has(parts, 'headline', evil) && has(parts, 'name', evil)
+    && has(parts, 'prop', evil) && has(parts, 'dance prop', `For bot dances: ${evil}`) && has(parts, 'meta', `Full summary: ${evil}`)
+    && ![...p.els.values(), ...p.made].some(n => n.innerHTML.includes('<img')), parts);
+  check('escaping: an unknown winner is a draw; gaps are dashes', p.el('verdict').className === 'verdict draw'
+    && has(parts, 'winner', 'Draw') && has(parts, 'opp', '–') && has(parts, '', '–')
+    && !parts.some(([c, t]) => /undefined|null|NaN/.test(t)) && !parts.some(([c]) => c === 'dance opp'), parts);
 }
 console.log(failures ? `${failures} FAILED` : 'all passed');
 Deno.exit(failures ? 1 : 0);
