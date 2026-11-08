@@ -118,6 +118,14 @@ class EchoGuard:
     def is_echo(self, u: Utterance, now: float) -> bool:
         return self.classify(u, now) == "echo"
 
+    def _stopped(self, ts: float, now: float) -> float:
+        """When our TTS of the line published at `ts` stopped: the end of the first speaking window that began
+        after it, `now` while it is still playing, else `ts` (D never reported playing it)."""
+        end = next((b for a, b in self.windows if a >= ts), None)
+        if end is None and self.speaking_since is not None and self.speaking_since >= ts:
+            end = now
+        return ts if end is None else end
+
     def classify(self, u: Utterance, now: float) -> str:
         """Returns "echo" (drop), "floor" (Director/pauses only, never extracted) or "speech"."""
         if self.speaking_since is not None and now - self.speaking_since > self.cap_s:
@@ -134,9 +142,9 @@ class EchoGuard:
             # Under 2 content words ("hold on", or the first interim of our own echo): echo if every word is ours,
             # else a human claiming the floor. Too short to be a claim: floor tracking only, no extraction/argmap.
             return "echo" if any(words <= s for s in said) else "floor"
-        if len(words) >= 3:
+        if len(words) >= 3:     # after the fact: TTS start-up, the line's audio and STT latency all come first
             for ts, said in self.said:
-                if now - ts <= self.window_s and len(words & said) / len(words) >= self.overlap:
+                if now - self._stopped(ts, now) <= self.window_s and len(words & said) / len(words) >= self.overlap:
                     return "echo"
         return "speech"
 

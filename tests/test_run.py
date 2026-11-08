@@ -101,6 +101,22 @@ def test_echo_guard_while_speaking_drops_only_our_words():
     assert e.speaking_since is None                                      # the 15 s cap still applies
 
 
+def test_echo_guard_after_the_fact_window_counts_from_when_our_tts_stopped():
+    """The 10 s after-the-fact window ran from publish(): TTS start-up, the line's audio and STT latency used it
+    up, so our own words came back as a debater's speech (into the map, extraction and the floor model)."""
+    e = EchoGuard()
+    e.spoke("Point of fact: the ONS contradicts that. Details on screen.", T0)
+    e.speaking(True, T0 + 3)
+    e.speaking(False, T0 + 8)
+    c = lambda text, a, b: e.classify(U("A", text, a, b, ts=b + .1), b + .1)          # noqa: E731
+    assert c("the ONS contradicts that details on screen", T0 + 8.7, T0 + 10.5) == "echo"
+    assert c("Details on screen.", T0 + 10.5, T0 + 11) == "echo"
+    assert c("the ONS contradicts that", T0 + 18, T0 + 18.9) == "speech"              # 10.5 s after it stopped
+    e.spoke("For the record, that checks out. Source: the ONS.", T0 + 30)             # D never reported playing it
+    assert c("that checks out source the ONS", T0 + 39, T0 + 39.9) == "echo"
+    assert c("that checks out source the ONS", T0 + 40, T0 + 41) == "speech"
+
+
 def test_pause_synth_waits_longer_until_interims_are_seen():
     ps = PauseSynth("auto", gap=1.2)
     ps.on_utterance(U("A", "x", T0, T0 + 3), T0 + 3.3)              # finals only: max(6, 3 + 1.2)
