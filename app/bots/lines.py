@@ -319,7 +319,7 @@ def followup(claim: Any, used: Iterable[str] = (), granted: bool = False) -> Opt
 
 def nudge(topic: Any = "", text: str = "", used: Iterable[str] = ()) -> Optional[str]:
     """'Still waiting on the cost point.' `topic` is our own claim's topic; `text` its claim text (its figures)."""
-    t = voice.clean(topic)
+    t = _ARTICLE.sub("", voice.clean(topic))       # "the cost" -> "the cost point", not "the the cost point"
     t = " ".join(t.split()[:4]) if t else ""
     used = {u.lower() for u in used}
     for tpl in NUDGE:

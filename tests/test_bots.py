@@ -1386,3 +1386,8 @@ async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides(
     clock.t += 10
     bots.tick()
     assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c3")]
+
+
+def test_a_nudge_topic_that_starts_with_an_article_is_not_doubled():
+    assert lines.nudge("the minimum wage") == "Still waiting on the minimum wage point."
+    assert lines.nudge("The cost of living") == "Still waiting on the cost of living point."
