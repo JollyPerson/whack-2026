@@ -121,6 +121,10 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
     out += _table(["Side", "Speakers", "Speaking time", "Share", "Words"],
                   [[SIDE_LABEL[s], ", ".join(sides[s]["speakers"]) or "unknown", _mmss(sides[s]["speaking_s"]),
                     f"{sides[s]['share']:.0%}", sides[s]["words"]] for s in SIDES])
+    other = card.get("unassigned") or {}
+    if other.get("speakers"):
+        out += ["", f"Also heard, on neither side and not counted: {', '.join(other['speakers'])} "
+                    f"({other['words']} words)."]
     out.append("")
 
     out += ["## Scorecard", "", "Computed in code from the session's record, the same way for both sides.", ""]

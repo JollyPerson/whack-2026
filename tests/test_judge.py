@@ -239,9 +239,32 @@ def test_saying_nothing_checkable_does_not_pay():
 
 
 def test_unknown_speakers_alternate_prop_then_opp():
+    """Without debaters in SessionStart (or when none of its ids ever speaks), sides go as the Director's do."""
     rec = sc.collect([SessionStart(motion="m"), U("u1", "X", "hello there"), U("u2", "Y", "hi"),
                       U("u3", "X", "again")])
     assert rec.sides == {"X": "prop", "Y": "opp"}
+    rec = sc.collect([SessionStart(motion="m", speakers=SPEAKERS), U("u1", "spk1", "hello there"),
+                      U("u2", "spk2", "hi")])                                    # ears chose other ids
+    assert rec.sides == {"A": "prop", "B": "opp", "spk1": "prop", "spk2": "opp"}
+
+
+async def test_a_speaker_not_in_session_start_is_on_neither_side():
+    rec = sc.collect([SessionStart(motion="m", speakers={**SPEAKERS, "chair": SpeakerInfo(name="Ann")}),
+                      U("u0", "chair", "Welcome everyone to tonight's debate", 0.5, 3),
+                      U("u1", "A", "Prop opens", 4, 6), U("u2", "B", "Opp replies", 7, 9),
+                      C("c1", "chair", None)])                                   # no side: counted for nobody
+    assert rec.sides == {"A": "prop", "B": "opp"}
+    card = sc.scorecard(rec)
+    assert card["sides"]["prop"]["words"] == 2 and card["sides"]["prop"]["speakers"] == ["Alice Archer"]
+    assert card["sides"]["prop"]["claims"] == card["sides"]["opp"]["claims"] == 0
+    assert card["unassigned"] == {"speakers": ["Ann"], "words": 5}
+    assert {"id": "chair", "name": "Ann", "side": None} in card["speakers"]
+    llm = FakeLLM()
+    await writer.decide(llm, rec, card)
+    user = llm.calls[0][1]
+    assert "Ann: Welcome everyone" in user and "Ann (" not in user and "on neither side" in user
+    md = report.render(rec, card, writer.from_formula(card, "test"), {}, {}, 30.0, T0)
+    assert "Also heard, on neither side and not counted: Ann (5 words)." in md
 
 
 # ----------------------------------------------------------------------------- Claude's verdict

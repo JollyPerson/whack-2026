@@ -4,8 +4,10 @@ collect(events) -> Record: the current session (from the last SessionStart on), 
 keeps it: the latest final revision of each Utterance, the latest Claim per id and Verdict per claim, the newest
 ArgMapSnapshot, and every BotLine and Interjection once.
 
-scorecard(record) -> dict. Per side (prop/opp; a speaker's side comes from SessionStart.speakers, else Claim.side, else
-the argument map, else the side with fewer speakers so far, Prop first):
+scorecard(record) -> dict. Per side (prop/opp; a speaker's side comes from SessionStart.speakers. When it names the
+debaters and they spoke, anyone else (a chair, a stray diarization label) is on neither side: not counted, and named
+without a side in the transcript (scorecard()["unassigned"]). Otherwise, as the Director does: Claim.side, else the
+argument map, else the side with fewer speakers so far, Prop first):
 - speaking_s, words, utterances: final Utterances (t_end - t_start, else words / WORDS_PER_S)
 - claims, checkable: the side's Claims (checkable, and not a value or prediction)
 - verdicts: the sourced Verdicts on the side's claims by label. Confidence below LOW_CONF counts as unverifiable,
@@ -134,6 +136,10 @@ def _assign_sides(rec: Record) -> None:
             if info.name:
                 rec.names[spk] = info.name
             hints.append((spk, info.side))
+    listed = {spk for spk, side in hints if norm_side(side) and spk}
+    if listed and any(u.speaker in listed for u in rec.utterances):
+        rec.sides.update((spk, norm_side(side)) for spk, side in hints if spk in listed)
+        return                                       # the debaters are named: nobody else is on a side
     hints += [(c.speaker, c.side) for c in rec.claims.values()]
     if rec.snapshot is not None:
         hints += list((getattr(rec.snapshot, "speakers", None) or {}).items())
@@ -252,8 +258,12 @@ def scorecard(rec: Record) -> dict:
         st["share"] = round(st["speaking_s"] / talk, 2)
         st["criteria"] = criteria(st)
         st["overall"] = overall(st["criteria"])
+    others = [s for s in dict.fromkeys(u.speaker for u in rec.utterances) if s not in rec.sides]
     return {"motion": rec.motion,
-            "speakers": [{"id": s, "name": rec.name(s), "side": sd} for s, sd in rec.sides.items()],
+            "speakers": [{"id": s, "name": rec.name(s), "side": sd} for s, sd in rec.sides.items()]
+                        + [{"id": s, "name": rec.name(s), "side": None} for s in others],
+            "unassigned": {"speakers": [rec.name(s) for s in others],
+                           "words": sum(len(u.text.split()) for u in rec.utterances if u.speaker in others)},
             "sides": sides, "system": system_balance(sides, banter, room), "formula": formula(sides)}
 
 

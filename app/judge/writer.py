@@ -242,6 +242,9 @@ def intervention_lines(rec: Record, limit: int = INTERVENTIONS) -> list[str]:
 def prompt(rec: Record, card: dict) -> str:
     people = "; ".join(f"{SIDE_LABEL[s]} ({s}): {', '.join(card['sides'][s]['speakers']) or 'unknown'}"
                        for s in SIDES)
+    others = (card.get("unassigned") or {}).get("speakers")
+    if others:
+        people += f"; also heard, on neither side (a chair or similar; not scored): {', '.join(others)}"
     lines, cut = transcript(rec)
     note = f" ({cut} lines from the middle omitted for length)" if cut else ""
     return "\n".join([
