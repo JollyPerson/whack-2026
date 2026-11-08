@@ -9,9 +9,9 @@ so the same events with the same `now`s always give the same decisions (interjec
     Director.status(now)      DirectorStatus heartbeat ("why is it silent?")
   -> [Interjection (what the referee says), DirectorDecision (state transitions, for the log panel)]
 
-Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause,
-G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips G4-G7 only: the
-referee never talks over a human or itself, and never twice without a human pause in between.
+Gates, in order, on every event and tick: G0 TTL, G1 own TTS, G2 floor open, G3 fresh human pause (speech, then
+a pause, since the last line), G4 threshold, G5 cooldown, G6 budget, G7 balance streak, then mute. force_next skips
+G4-G7 only: the referee never talks over a human or itself, and never twice without a human pause in between.
 Dry spell: once the debate has run dry_first_s (25 s) from its first Utterance with no Interjection, and after
 that every min_gap_s since the last one, a canned "dry" line to the room becomes a candidate. It skips only G4,
 is held once nobody has spoken for dry_quiet_s, ranks below any real candidate, has no claim_id, and its wording depends on whether a figure was heard yet.
@@ -202,6 +202,12 @@ def floor_open(st: State, now: float) -> bool:
 def _latest_pause(st: State, now: float) -> float:
     ts = [_paused_at(st, s, now) for s in {*st.last_speech, *st.last_pause}]
     return max([t for t in ts if t is not None], default=NEG)
+
+
+def _paused_since(st: State, now: float, last: float) -> bool:
+    """G3: a human spoke after `last` (our previous line) and paused since. A Pause with no speech before it
+    (e.g. the ears reacting to our own echo, which the brain dropped) is not a human pause."""
+    return max(st.last_speech.values(), default=NEG) > last and _latest_pause(st, now) > last
 
 
 # ----------------------------------------------------------------------------- inputs
@@ -401,7 +407,7 @@ def try_fire(st: State, now: float) -> list[Event]:
     if not st.pending or now < st.tts_until or not floor_open(st, now):      # G1, G2
         return out
     last = st.fires[-1][0] if st.fires else NEG
-    if _latest_pause(st, now) <= last:                                       # G3: a human must pause again
+    if not _paused_since(st, now, last):                                     # G3: a human must pause again
         return out
     forced = now < st.force_until
     for cd in st.pending.values():
@@ -528,7 +534,7 @@ def status(st: State, now: float) -> DirectorStatus:
     ranked = sorted(((cd, _score(st, cd, now)) for cd in st.pending.values()), key=lambda x: _rank(st, *x))
     fl, busy, muted = floor_open(st, now), now < st.tts_until, st.muted or st.director_off
     blocked = ("nothing_pending" if not ranked else "own_tts" if busy else "floor_closed" if not fl else
-               "awaiting_pause" if _latest_pause(st, now) <= (last if last is not None else NEG) else
+               "awaiting_pause" if not _paused_since(st, now, last if last is not None else NEG) else
                "muted" if muted else "")
     return DirectorStatus(
         floor_open=fl, tts_busy=busy, muted=muted, aggr=st.aggr,

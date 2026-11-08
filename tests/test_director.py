@@ -795,3 +795,15 @@ def test_judgement_word_in_numeric_unit_is_never_spoken():
     assert voice.ok(text) and text == "Point of fact: the ONS contradicts that. Details on screen."
     v["numeric"]["unit"] = "deaths"
     assert voice.render("correction", verdict=v) == "Point of fact: the ONS puts that at 4 deaths, not 6 deaths."
+
+
+def test_a_pause_with_no_speech_since_the_last_line_never_reopens_the_floor():
+    """The referee's own echo makes the bridge send Pause(A) with no new human speech: that is not a human pause."""
+    ev = talk("A", 0, 5) + [(4, C("c1", "A", 4, imp=1.0)), (4, C("c2", "A", 4, imp=1.0, canon="k2")),
+                            (5, V("c1", "contradicted", .95)), (5, V("c2", "contradicted", .95)), (6, P("A", 6)),
+                            (14, P("A", 14))] + ticks(6, 48)
+    d, o = run(ev)
+    assert fired(o) == [(6, "correction", "A", "c1")]
+    assert d.status(48).blocked == "awaiting_pause"
+    _, o = run(ev + talk("A", 40, 41) + [(42, P("A", 42))])     # a human speaks and pauses: the next line may come
+    assert fired(o) == [(6, "correction", "A", "c1"), (42, "correction", "A", "c2")]
