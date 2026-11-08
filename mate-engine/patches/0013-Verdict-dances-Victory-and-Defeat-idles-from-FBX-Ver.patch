@@ -1,7 +1,7 @@
 From 1d6e0881c5d372eb11f68a08a3d18fba2764400a Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 09:10:57 +0000
-Subject: [PATCH 13/13] Verdict dances: Victory and Defeat idles from FBX
+Subject: [PATCH 13/14] Verdict dances: Victory and Defeat idles from FBX
  (VerdictDanceCli)
 
 VerdictDanceCli.Build turns humanoid animation FBX files (Mixamo's Victory

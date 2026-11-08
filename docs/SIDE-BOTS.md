@@ -66,7 +66,7 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
    - The bots stop.
    - The judge writes `logs/summaries/<run>-summary.md` (and `.json`), and the verdict card appears.
    - The winner's bot plays the `Victory` idle (with music, if its bundle has any), and the loser's bot the
-     `Defeat` idle in silence. A draw makes both dance `MMD-皆大欢喜-卜逻desu`.
+     `Defeat` idle in silence. A draw makes both play `Default Dance` (Mate Engine's own default dance).
    - The dances stop after 30 s, or at the next debate.
 
 ## Settings worth knowing
@@ -102,9 +102,8 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
     by Undream AI (MIT).
 - **Verdict dances.** "Victory" and "Defeat" are built from [Mixamo](https://www.mixamo.com) animations (Adobe;
   royalty-free in projects, not redistributable as animation files) with `VerdictDanceCli`; they are not included
-  here. The draw dance, "MMD-皆大欢喜-卜逻desu", comes from the Mate Engine community's CustomDances collection; its
-  motion and song belong to their original MMD creators and the collection's contributors, and it is not
-  redistributed here.
+  here. The winner's "Victory" carries "California Gurls" (Katy Perry; © Capitol Records) as its music, taken from a community dance bundle for this local demo and not redistributed. The draw dance, "Default Dance", is Mate Engine's own `PET_DANCING` animation
+  (© Shiny), built locally with `VerdictDanceCli --clip`.
 - **Speech to text.** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) by SYSTRAN (MIT), running OpenAI's
   [Whisper](https://github.com/openai/whisper) models (MIT).
 - **Language models.** [Claude](https://www.anthropic.com/claude) by Anthropic, through the Anthropic API.

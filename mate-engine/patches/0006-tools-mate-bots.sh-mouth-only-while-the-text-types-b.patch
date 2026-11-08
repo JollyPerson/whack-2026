@@ -1,7 +1,7 @@
 From fc558b11763225c1284c75c9e89d3b148079391b Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 05:18:12 +0000
-Subject: [PATCH 06/13] tools/mate-bots.sh: mouth only while the text types,
+Subject: [PATCH 06/14] tools/mate-bots.sh: mouth only while the text types,
  bubble up for hold_s
 
 The bots' speech_bridge.json now sets mouthWithText, so each avatar's

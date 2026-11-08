@@ -1,7 +1,7 @@
 From 8aae74d78ef39e1b7b4b494aa1a24484089375d1 Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 06:05:39 +0000
-Subject: [PATCH 11/13] Mock server: dances with on/seconds, verdict,
+Subject: [PATCH 11/14] Mock server: dances with on/seconds, verdict,
  older-server mode
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

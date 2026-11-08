@@ -136,7 +136,7 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
   verdict: a replayed Final screen click never starts a second judgement.
 - **Verdict dances.** The `DebateResult` makes both side bots dance on their Mate Engine channels (see
   [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot plays `Victory` with its music,
-  the loser's `Defeat` without (Mixamo idles, looping in place); on a draw both do `MMD-皆大欢喜-卜逻desu`, silently. The titles are
+  the loser's `Defeat` without (Mixamo idles, looping in place); on a draw both do `Default Dance` (Mate Engine's own default dance), silently. The titles are
   the dance files' names in Mate Engine's `CustomDances` (matched case-insensitively) and are shown on screen.
   `JUDGE_MUSIC=winner|none|both` picks who gets music; the dances stop after `JUDGE_DANCE_S` (30 s) or at the next
   debate. Tunables: the `JUDGE_*` names in `app/config.py` and `.env.example`.

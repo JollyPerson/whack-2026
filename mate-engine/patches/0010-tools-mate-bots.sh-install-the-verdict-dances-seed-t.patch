@@ -1,7 +1,7 @@
 From 349b9710e104d843612d94049328e259ad428e8a Mon Sep 17 00:00:00 2001
 From: Tong <zhengtong0611@gmail.com>
 Date: Sun, 8 Nov 2026 06:05:39 +0000
-Subject: [PATCH 10/13] tools/mate-bots.sh: install the verdict dances, seed
+Subject: [PATCH 10/14] tools/mate-bots.sh: install the verdict dances, seed
  their music volume
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

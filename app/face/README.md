@@ -95,7 +95,7 @@ and clears the bots' bubbles. The button appears only when the `bots` module run
 
 **Verdict dances.** A `DebateResult` makes both side bots dance (the referee's avatar doesn't). The winner's bot dances
 `JUDGE_DANCE_WIN` (default `Victory`, a Mixamo idle) with its music, and the loser's bot dances `JUDGE_DANCE_LOSE`
-(`Defeat`) with no sound. On a draw both dance `JUDGE_DANCE_DRAW` (`MMD-皆大欢喜-卜逻desu`), silently with
+(`Defeat`) with no sound. On a draw both dance `JUDGE_DANCE_DRAW` (`Default Dance`, Mate Engine's own dance), silently with
 `JUDGE_MUSIC=winner`. Mate Engine matches each title to a dance file's name in its CustomDances, ignoring case; a
 title it can't find plays its first dance. Each dance stops after `JUDGE_DANCE_S` (30 s), sent as the command's
 `seconds`, or at the next `SessionStart`, which sends `dance_stop` to both bots. While a bot dances, its `BotLine`s

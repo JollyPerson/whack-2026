@@ -79,7 +79,7 @@ JUDGE_SUMMARY_WAIT_S = _env("JUDGE_SUMMARY_WAIT_S", 15.0)   # after the click, w
 JUDGE_DIR = _env("JUDGE_DIR", "logs/summaries")          # <run>-summary.md + .json
 JUDGE_DANCE_WIN = _env("JUDGE_DANCE_WIN", "Victory")    # Mixamo "Victory" idle (mate-engine/README.md)
 JUDGE_DANCE_LOSE = _env("JUDGE_DANCE_LOSE", "Defeat")   # Mixamo "Defeat" idle
-JUDGE_DANCE_DRAW = _env("JUDGE_DANCE_DRAW", "MMD-皆大欢喜-卜逻desu")       # both bots, on a draw
+JUDGE_DANCE_DRAW = _env("JUDGE_DANCE_DRAW", "Default Dance")                # both bots, on a draw: Mate Engine's own dance
 JUDGE_DANCE_S = _env("JUDGE_DANCE_S", 30.0)              # the dances stop after this long (or at the next SessionStart)
 JUDGE_MUSIC = _env("JUDGE_MUSIC", "winner")              # winner | none | both (a draw with "winner": silent)
 

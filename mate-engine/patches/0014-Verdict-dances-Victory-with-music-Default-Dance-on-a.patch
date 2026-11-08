@@ -1,0 +1,364 @@
+From 7fc330415067470783c9b7fb8db22396af6b30d1 Mon Sep 17 00:00:00 2001
+From: Tong <zhengtong0611@gmail.com>
+Date: Sun, 8 Nov 2026 09:25:53 +0000
+Subject: [PATCH 14/14] Verdict dances: Victory with music, Default Dance on a
+ draw
+
+VerdictDanceCli entries can now take --audio <file> (the dance's music,
+instead of the silent track) and --clip <project .anim> (a humanoid clip
+already in the project) as well as --fbx. Victory is rebuilt with a song so
+the winner's bot dances to it, and the draw dance is now 'Default Dance',
+Mate Engine's own PET_DANCING animation. The launcher and the mock default
+to it; the README documents both options and the credits.
+---
+ .../Editor/VerdictDanceCli.cs                 | 151 ++++++++++++------
+ Assets/MATE ENGINE - Referee/README.md        |  39 +++--
+ tools/mate-bots.sh                            |   4 +-
+ tools/mock_mate_server.py                     |   4 +-
+ 4 files changed, 134 insertions(+), 64 deletions(-)
+
+diff --git a/Assets/MATE ENGINE - Referee/Editor/VerdictDanceCli.cs b/Assets/MATE ENGINE - Referee/Editor/VerdictDanceCli.cs
+index ad00171..947e1fd 100644
+--- a/Assets/MATE ENGINE - Referee/Editor/VerdictDanceCli.cs	
++++ b/Assets/MATE ENGINE - Referee/Editor/VerdictDanceCli.cs	
+@@ -1,13 +1,18 @@
+-// Turns humanoid animation FBX files (e.g. Mixamo "Victory" / "Defeated" idles) into dance bundles the custom dance
+-// player loads from StreamingAssets/CustomDances, one <name>.unity3d per FBX:
++// Turns humanoid animations into dance bundles the custom dance player loads from StreamingAssets/CustomDances, one
++// <name>.unity3d per entry. An entry is a source (--fbx <file> or --clip <project .anim>), an optional --audio <file>,
++// and is closed by its --name:
+ //   Unity -batchmode -quit -projectPath <project> -executeMethod VerdictDanceCli.Build \
+-//     --fbx /path/Victory.fbx --name Victory [--fbx /path/Defeat.fbx --name Defeat ...] --out <dir> \
+-//     [--silence 60] [--target StandaloneLinux64]
+-// Each FBX is imported as Humanoid (avatar from its own skeleton), its clip made a looping, in-place clip (root motion
+-// baked into the pose) and saved as a standalone .anim, so the bundle holds no mesh. A silent audio track of --silence
+-// seconds (default 60) goes in the same bundle: without audio the player would restart a short idle every few seconds
+-// (it auto-advances at the clip's end), with it the idle loops smoothly until the bridge's timer stops it.
+-// The FBX files are copied into a temporary folder under Assets and deleted afterwards. Exits 1 on any failure.
++//     --fbx /path/Victory.fbx --audio /path/song.wav --name Victory \
++//     --fbx /path/Defeat.fbx --name Defeat \
++//     --clip "Assets/MATE ENGINE - Animations/PET_DANCING/PET_DANCING.anim" --name "Default Dance" \
++//     --out <dir> [--silence 60] [--target StandaloneLinux64]
++// An FBX (e.g. a Mixamo "Victory" / "Defeated" idle) is imported as Humanoid (avatar from its own skeleton), its clip made
++// a looping, in-place clip (root motion baked into the pose); a --clip is a humanoid clip already in the project (e.g.
++// Mate Engine's own default dance). Either way the clip is saved as a standalone looping .anim, so the bundle holds no
++// mesh. The bundle's audio is the --audio file (the dance's music; the bridge plays or mutes it), or else a silent track
++// of --silence seconds (default 60): without audio the player would restart a short idle every few seconds (it
++// auto-advances at the clip's end), with it the idle loops smoothly until the bridge's timer stops it.
++// FBX and audio files are copied into a temporary folder under Assets and deleted afterwards. Exits 1 on any failure.
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
+@@ -36,35 +41,88 @@ public static class VerdictDanceCli
+     static bool Run()
+     {
+         string[] args = Environment.GetCommandLineArgs();
+-        var fbx = Values(args, "--fbx");
+-        var names = Values(args, "--name");
++        var entries = Entries(args);
+         string outDir = Value(args, "--out");
+         float silence = float.TryParse(Value(args, "--silence") ?? "60", System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var s) ? s : 60f;
+         BuildTarget target = BuildTarget.StandaloneLinux64;
+         string targetName = Value(args, "--target");
+         if (targetName != null && !Enum.TryParse(targetName, true, out target)) return Fail("unknown --target '" + targetName + "'");
+-        if (fbx.Count == 0 || fbx.Count != names.Count) return Fail("give one --name per --fbx");
++        if (entries == null) return Fail("each entry is --fbx <file> or --clip <Assets/...anim>, optionally --audio <file>, then --name <title>");
++        if (entries.Count == 0) return Fail("nothing to build: give --fbx or --clip, then --name");
+         if (string.IsNullOrEmpty(outDir)) return Fail("--out is required");
+         if (silence < 1f || silence > 600f) return Fail("--silence must be 1-600 seconds");
+ 
+         if (!AssetDatabase.IsValidFolder(TempDir)) AssetDatabase.CreateFolder("Assets", "_VerdictDanceBuild");
+         var builds = new List<AssetBundleBuild>();
+-        for (int i = 0; i < fbx.Count; i++)
++        foreach (var e in entries)
+         {
+-            string name = names[i];
++            string name = e.Name;
+             if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return Fail("bad --name '" + name + "'");
+-            if (!File.Exists(fbx[i])) return Fail("no file " + fbx[i]);
++            if (e.Audio != null && !File.Exists(e.Audio)) return Fail("no audio file " + e.Audio);
++            AnimationClip clip;
++            string source;
++            if (e.Clip != null)
++            {
++                clip = AssetDatabase.LoadAssetAtPath<AnimationClip>(e.Clip);
++                if (clip == null) return Fail("no AnimationClip at " + e.Clip + " (a path under Assets/)");
++                if (!clip.humanMotion) return Fail(e.Clip + " is not a humanoid clip");
++                source = Path.GetFileName(e.Clip);
++            }
++            else
++            {
++                clip = ImportFbx(e.Fbx, name, out string error);
++                if (clip == null) return Fail(error);
++                source = Path.GetFileName(e.Fbx);
++            }
++
++            var copy = UnityEngine.Object.Instantiate(clip);
++            copy.name = name;
++            var settings = AnimationUtility.GetAnimationClipSettings(copy);
++            settings.loopTime = true;
++            AnimationUtility.SetAnimationClipSettings(copy, settings);
++            string anim = TempDir + "/" + name + ".anim";
++            AssetDatabase.CreateAsset(copy, anim);
+ 
++            string audio;
++            if (e.Audio != null)
++            {
++                audio = TempDir + "/" + name + "_audio" + Path.GetExtension(e.Audio).ToLowerInvariant();
++                File.Copy(e.Audio, audio, true);
++            }
++            else
++            {
++                audio = TempDir + "/" + name + "_silence.wav";
++                WriteSilentWav(audio, silence);
++            }
++            AssetDatabase.ImportAsset(audio, ImportAssetOptions.ForceSynchronousImport);
++            var audioClip = AssetDatabase.LoadAssetAtPath<AudioClip>(audio);
++            if (audioClip == null) return Fail("could not import audio " + (e.Audio ?? audio));
++
++            builds.Add(new AssetBundleBuild { assetBundleName = name.ToLowerInvariant().Replace(' ', '_') + ".unity3d", assetNames = new[] { anim, audio } });
++            Debug.Log("VerdictDanceCli: " + name + " <- " + source + " (" + copy.length.ToString("0.00") + " s, loops, " +
++                      (e.Audio != null ? "music " + Path.GetFileName(e.Audio) + " " + audioClip.length.ToString("0.0") + " s"
++                                       : silence.ToString("0") + " s silent track") + ")");
++        }
++        AssetDatabase.SaveAssets();
++        return BuildBundles(builds, entries, outDir, target);
++    }
++
++    // FBX -> its humanoid clip, imported looping and in place; null (and error) if it isn't a humanoid animation.
++    static AnimationClip ImportFbx(string fbx, string name, out string error)
++    {
++        error = null;
++        if (!File.Exists(fbx)) { error = "no file " + fbx; return null; }
++        {
+             string model = TempDir + "/" + name + ".fbx";
+-            File.Copy(fbx[i], model, true);
++            File.Copy(fbx, model, true);
+             AssetDatabase.ImportAsset(model, ImportAssetOptions.ForceSynchronousImport);
+             var importer = (ModelImporter)AssetImporter.GetAtPath(model);
+             importer.animationType = ModelImporterAnimationType.Human;
+             importer.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
+             importer.importAnimation = true;
+             var clipSettings = importer.defaultClipAnimations;
+-            if (clipSettings.Length == 0) return Fail(fbx[i] + " has no animation take");
++            if (clipSettings.Length == 0) { error = fbx + " has no animation take"; return null; }
+             foreach (var c in clipSettings)
+             {
+                 c.loopTime = true;
+@@ -77,28 +135,15 @@ public static class VerdictDanceCli
+ 
+             var assets = AssetDatabase.LoadAllAssetsAtPath(model);
+             var avatar = assets.OfType<Avatar>().FirstOrDefault();
+-            if (avatar == null || !avatar.isValid || !avatar.isHuman) return Fail(fbx[i] + ": no valid humanoid avatar (is it a humanoid rig?)");
++            if (avatar == null || !avatar.isValid || !avatar.isHuman) { error = fbx + ": no valid humanoid avatar (is it a humanoid rig?)"; return null; }
+             var clip = assets.OfType<AnimationClip>().FirstOrDefault(a => !a.name.StartsWith("__preview__", StringComparison.Ordinal));
+-            if (clip == null || !clip.humanMotion) return Fail(fbx[i] + ": no humanoid animation clip");
+-
+-            var copy = UnityEngine.Object.Instantiate(clip);
+-            copy.name = name;
+-            var settings = AnimationUtility.GetAnimationClipSettings(copy);
+-            settings.loopTime = true;
+-            AnimationUtility.SetAnimationClipSettings(copy, settings);
+-            string anim = TempDir + "/" + name + ".anim";
+-            AssetDatabase.CreateAsset(copy, anim);
+-
+-            string wav = TempDir + "/" + name + "_silence.wav";
+-            WriteSilentWav(wav, silence);
+-            AssetDatabase.ImportAsset(wav, ImportAssetOptions.ForceSynchronousImport);
+-
+-            builds.Add(new AssetBundleBuild { assetBundleName = name.ToLowerInvariant() + ".unity3d", assetNames = new[] { anim, wav } });
+-            Debug.Log("VerdictDanceCli: " + name + " <- " + Path.GetFileName(fbx[i]) + " (" + copy.length.ToString("0.00") + " s, loops, " +
+-                      silence.ToString("0") + " s silent track)");
++            if (clip == null || !clip.humanMotion) { error = fbx + ": no humanoid animation clip"; return null; }
++            return clip;
+         }
+-        AssetDatabase.SaveAssets();
++    }
+ 
++    static bool BuildBundles(List<AssetBundleBuild> builds, List<Entry> entries, string outDir, BuildTarget target)
++    {
+         string buildDir = Path.Combine(Path.GetTempPath(), "VerdictDanceCli-" + Guid.NewGuid().ToString("N"));
+         Directory.CreateDirectory(buildDir);
+         try
+@@ -106,10 +151,10 @@ public static class VerdictDanceCli
+             var manifest = BuildPipeline.BuildAssetBundles(buildDir, builds.ToArray(), BuildAssetBundleOptions.ChunkBasedCompression, target);
+             if (manifest == null) return Fail("BuildAssetBundles failed (is " + target + " build support installed?)");
+             Directory.CreateDirectory(outDir);
+-            for (int i = 0; i < names.Count; i++)
++            for (int i = 0; i < entries.Count; i++)
+             {
+                 string built = Path.Combine(buildDir, builds[i].assetBundleName);
+-                string dest = Path.Combine(outDir, names[i] + ".unity3d");   // the player's dance title is the file name
++                string dest = Path.Combine(outDir, entries[i].Name + ".unity3d");   // the player's dance title is the file name
+                 File.Copy(built, dest, true);
+                 Debug.Log("VerdictDanceCli: wrote " + dest + " (" + new FileInfo(dest).Length / 1024 + " KB)");
+             }
+@@ -130,17 +175,33 @@ public static class VerdictDanceCli
+         w.Write(new byte[samples * 2]);
+     }
+ 
+-    static string Value(string[] args, string flag)
++    sealed class Entry { public string Fbx, Clip, Audio, Name; }
++
++    // --fbx/--clip and --audio collect into the entry that the next --name closes; null if an entry is malformed.
++    static List<Entry> Entries(string[] args)
+     {
+-        int i = Array.IndexOf(args, flag);
+-        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
++        var list = new List<Entry>();
++        var cur = new Entry();
++        for (int i = 0; i + 1 < args.Length; i++)
++        {
++            string v = args[i + 1];
++            switch (args[i])
++            {
++                case "--fbx": if (cur.Fbx != null || cur.Clip != null) return null; cur.Fbx = v; i++; break;
++                case "--clip": if (cur.Fbx != null || cur.Clip != null) return null; cur.Clip = v; i++; break;
++                case "--audio": if (cur.Audio != null) return null; cur.Audio = v; i++; break;
++                case "--name":
++                    if (cur.Fbx == null && cur.Clip == null) return null;
++                    cur.Name = v; list.Add(cur); cur = new Entry(); i++; break;
++            }
++        }
++        return cur.Fbx == null && cur.Clip == null && cur.Audio == null ? list : null;
+     }
+ 
+-    static List<string> Values(string[] args, string flag)
++    static string Value(string[] args, string flag)
+     {
+-        var list = new List<string>();
+-        for (int i = 0; i + 1 < args.Length; i++) if (args[i] == flag) list.Add(args[i + 1]);
+-        return list;
++        int i = Array.IndexOf(args, flag);
++        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+     }
+ 
+     static bool Fail(string msg)
+diff --git a/Assets/MATE ENGINE - Referee/README.md b/Assets/MATE ENGINE - Referee/README.md
+index a870809..a5b81d9 100644
+--- a/Assets/MATE ENGINE - Referee/README.md	
++++ b/Assets/MATE ENGINE - Referee/README.md	
+@@ -115,8 +115,9 @@ Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"
+ 
+ So after a debate the winner's side bot dances with its music and the loser's dances in silence, both for `dance_s`.
+ The winner's bot plays "Victory" and the loser's "Defeat": Mixamo idles turned into dance bundles with
+-`VerdictDanceCli` (below), looping in place for the whole `dance_s`. On a draw both dance "MMD-皆大欢喜-卜逻desu" from
+-the community collection. The titles are the server's `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE` / `JUDGE_DANCE_DRAW`.
++`VerdictDanceCli` (below), looping in place for the whole `dance_s`; "Victory" carries a song ("California Gurls"), so
++the winner's bot dances to it. On a draw both play "Default Dance", Mate Engine's own default dance (`PET_DANCING`),
++silently. The titles are the server's `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE` / `JUDGE_DANCE_DRAW`.
+ 
+ **Older servers.** `JsonUtility` reads a missing field as `false` or `0`, so on its own a `dance` from a server that
+ predates this extension would look like "silent, to the end". The bridge therefore looks at the whole response: a
+@@ -214,19 +215,26 @@ with "Zombie Dance" and "Motion-DoodleDance"), so they need no re-export.
+   with code 1 on failure.
+ 
+ **Verdict dances from FBX (`VerdictDanceCli`)**
+-- Turns humanoid animation FBX files (for example Mixamo's "Victory" and "Defeated" idles, downloaded as FBX) into
+-  `<name>.unity3d` bundles for `StreamingAssets/CustomDances/`, one per FBX:
++- Turns humanoid animations into `<name>.unity3d` bundles for `StreamingAssets/CustomDances/`, one per entry. An entry
++  is a source, `--fbx <file>` (for example Mixamo's "Victory" and "Defeated" idles, downloaded as FBX) or `--clip
++  <Assets/...anim>` (a humanoid clip already in the project), then an optional `--audio <wav|ogg|mp3>` (the dance's
++  music), closed by `--name`:
+ 
+   ```bash
+   ~/Unity/Hub/Editor/6000.2.6f2/Editor/Unity -batchmode -quit -projectPath "$PWD" -logFile verdict.log \
+-    -executeMethod VerdictDanceCli.Build --fbx "/path/X Bot@Victory.fbx" --name Victory \
+-    --fbx "/path/X Bot@Defeat.fbx" --name Defeat --out <dance-library>/Verdict [--silence 60]
++    -executeMethod VerdictDanceCli.Build \
++    --fbx "/path/X Bot@Victory.fbx" --audio "/path/California Gurls.wav" --name Victory \
++    --fbx "/path/X Bot@Defeat.fbx" --name Defeat \
++    --clip "Assets/MATE ENGINE - Animations/PET_DANCING/PET_DANCING.anim" --name "Default Dance" \
++    --out <dance-library>/Verdict [--silence 60]
+   ```
+ - Each FBX is imported as Humanoid, and its clip becomes a looping, in-place clip (root motion baked into the pose)
+-  saved as a standalone `.anim`, so no mesh goes into the bundle. A silent track of `--silence` seconds goes with it:
+-  without audio the player would restart a short idle every few seconds; with it the idle loops smoothly until the
+-  bridge's timer stops it. The FBX files are copied into a temporary folder under Assets and removed afterwards.
+-- The title is the file name (`Victory`, `Defeat`), which is what `JUDGE_DANCE_WIN` / `JUDGE_DANCE_LOSE` name.
++  saved as a standalone `.anim`, so no mesh goes into the bundle. The bundle's audio is the `--audio` file, or else a
++  silent track of `--silence` seconds: without audio the player would restart a short idle every few seconds; with it
++  the idle loops smoothly until the bridge's timer stops it (use music at least `dance_s` long). FBX and audio files
++  are copied into a temporary folder under Assets and removed afterwards.
++- The title is the file name (`Victory`, `Defeat`, `Default Dance`), which is what `JUDGE_DANCE_WIN` /
++  `JUDGE_DANCE_LOSE` / `JUDGE_DANCE_DRAW` name.
+ 
+ **Autoplay test hook**
+ - Usage: `--dance-autoplay <title>` (or `MEX_DANCE_AUTOPLAY=<title>`). `'*'` (quoted, so the shell does not expand it) means the first dance.
+@@ -280,7 +288,7 @@ sends one text-only line every 12 s to each in turn, and `POST /say?channel=for&
+ Dances: `POST /dance?channel=for&title=...[&on=1][&seconds=20]`, `POST /dance_stop?channel=for` (`all`: every
+ channel), and `POST /verdict?winner=prop|opp|draw[&seconds=30][&music=winner|none|both]`, which sends what the debate
+ server sends for a `DebateResult`: the winner's bot (`prop` is `for`, `opp` is `against`) dances "Victory" with
+-its music, the loser's "Defeat" in silence, and on a draw both dance "MMD-皆大欢喜-卜逻desu" (silent
++its music, the loser's "Defeat" in silence, and on a draw both dance "Default Dance" (silent
+ with `music=winner`; `win`, `lose`, `draw` override the titles). Like the server, every command carries `on` and
+ `seconds`; `--legacy` leaves `seconds` out, to try an older server.
+ 
+@@ -304,7 +312,7 @@ mouth moves only while it types, and the bubble stays until `talk off` plus `lin
+ - PIDs in `<persona>/pid`, stopped with SIGTERM by PID; `status` shows whether each is alive and its last bridge lines;
+ - with the verdict dances installed: `start` (or `dances` on its own) copies the titles in `DANCES` (default: the
+   server's `JUDGE_DANCE_WIN`, `JUDGE_DANCE_LOSE` and `JUDGE_DANCE_DRAW`, or their defaults "Victory",
+-  "Defeat" and "MMD-皆大欢喜-卜逻desu") from `DANCE_LIBRARY` (searched with its subfolders) into
++  "Defeat" and "Default Dance") from `DANCE_LIBRARY` (searched with its subfolders) into
+   the build's `StreamingAssets/CustomDances/`, skips files already there and names any title it cannot find. A
+   rebuild may drop them; the next `start` puts them back. `DANCE_VOLUME` (default 0.4) is the winner's music volume.
+ 
+@@ -359,9 +367,10 @@ no-rebuild fallback). No scene, prefab or project setting is changed: everything
+ - **Programs that talk to the bridge** use only the HTTP protocol above. They contain no Mate Engine code.
+ - **Verdict dances.** "Victory" and "Defeat" are built from [Mixamo](https://www.mixamo.com) animations (Adobe;
+   royalty-free for use in projects, not for redistribution as animation files), so the bundles are not included here:
+-  build them with `VerdictDanceCli`. The draw dance, "MMD-皆大欢喜-卜逻desu" (`tools/mate-bots.sh` copies it into a
+-  local build), comes from the Mate Engine community's CustomDances collection. Its motion and music belong to their
+-  creators: the original MMD motion and song authors, and the collection's
++  build them with `VerdictDanceCli`. The winner's "Victory" carries "California Gurls" (Katy Perry; © Capitol Records) as its music, taken from a community dance bundle for this local demo and not redistributed. The draw dance, "Default Dance", is Mate Engine's own
++  `PET_DANCING` animation (© Shiny, a Mate Engine asset), built locally with `VerdictDanceCli --clip`. Community dances
++  from the CustomDances collection, if you add any, belong to their creators: the original MMD motion and song
++  authors, and the collection's
+   contributors (folders such as Yongqisang and Xenophn). They are **not** included in this repository or any build we
+   publish. Get them from that collection and point `DANCE_LIBRARY` at it.
+ - **Made for** whack-2026 ([JollyPerson/whack-2026](https://github.com/JollyPerson/whack-2026)), the debate server
+diff --git a/tools/mate-bots.sh b/tools/mate-bots.sh
+index 4e7cd58..5dfa56a 100755
+--- a/tools/mate-bots.sh
++++ b/tools/mate-bots.sh
+@@ -38,7 +38,7 @@
+ #   DANCE_VOLUME              volume of a dance played with its music on, 0-1 (default 0.4; the player's own is 0.5)
+ #   DANCES                    verdict dance titles (file names without extension, any case), separated by ';'
+ #                             (default: the server's JUDGE_DANCE_WIN;JUDGE_DANCE_LOSE;JUDGE_DANCE_DRAW, or their
+-#                             defaults "Victory;Defeat;MMD-皆大欢喜-卜逻desu")
++#                             defaults "Victory;Defeat;Default Dance")
+ #   DANCE_LIBRARY             folder searched, with its subfolders, for DANCES' .unity3d or .me files
+ #                             (default /home/dabest/claudesandbox/dances/CustomDances)
+ #   VERBOSE=1                 log every poll and every mouth change in player.log
+@@ -58,7 +58,7 @@ LINGER=${LINGER:-0}
+ FPS=${FPS:-30}
+ VERBOSE=${VERBOSE:-0}
+ DANCE_VOLUME=${DANCE_VOLUME:-0.4}
+-DANCES=${DANCES:-${JUDGE_DANCE_WIN:-Victory};${JUDGE_DANCE_LOSE:-Defeat};${JUDGE_DANCE_DRAW:-MMD-皆大欢喜-卜逻desu}}
++DANCES=${DANCES:-${JUDGE_DANCE_WIN:-Victory};${JUDGE_DANCE_LOSE:-Defeat};${JUDGE_DANCE_DRAW:-Default Dance}}
+ DANCE_LIBRARY=${DANCE_LIBRARY:-/home/dabest/claudesandbox/dances/CustomDances}
+ EXE=MateEngineX.x86_64
+ 
+diff --git a/tools/mock_mate_server.py b/tools/mock_mate_server.py
+index 2a69db4..70fd0bd 100755
+--- a/tools/mock_mate_server.py
++++ b/tools/mock_mate_server.py
+@@ -17,7 +17,7 @@ A poll gets only its own channel's commands. Pick an instance's channel with "po
+   POST /verdict?winner=prop|opp|draw[&seconds=30][&music=winner|none|both][&win=..&lose=..&draw=..]
+                                             the server's DebateResult: the winner's bot (prop -> for, opp -> against)
+                                             dances "Victory" with its music on, the loser's "Defeat"
+-                                            silently; a draw: both "MMD-皆大欢喜-卜逻desu" (silent with music=winner)"""
++                                            silently; a draw: both "Default Dance" (silent with music=winner)"""
+ import json, secrets, sys, threading, time
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, urlparse
+@@ -28,7 +28,7 @@ SCRIPT = [(1, "say", {"text": "Referee here: that figure is out of date. The lat
+ BOT_LINES = [("for", "ONS says 4.2%, not 6%. Try again."), ("against", "Source for that 40%?"),
+              ("for", "You still haven't answered our point on rents."), ("against", "Bold claim. Evidence, please.")]
+ CHANNELS = ("referee", "for", "against")
+-DANCES = {"win": "Victory", "lose": "Defeat", "draw": "MMD-皆大欢喜-卜逻desu"}  # JUDGE_DANCE_*
++DANCES = {"win": "Victory", "lose": "Defeat", "draw": "Default Dance"}  # JUDGE_DANCE_*
+ LEGACY = "--legacy" in sys.argv[1:]
+ events, cond = [], threading.Condition()  # events[i] = (channel or "all", cmd) has seq i + 1
+ ids = iter(range(1, 1_000_000))
