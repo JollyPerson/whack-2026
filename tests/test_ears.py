@@ -217,3 +217,57 @@ def test_flush_emits_the_finished_sentences_and_the_fragment_after_them():
     assert texts(sb, 0.0) == []
     assert [s["text"] for s in sb.flush()] == ["One.", "Two more.", "Three"]
     assert sb.words == []
+
+
+# ----------------------------------------------------------------------------- output and shutdown
+class ClosedPipe:
+    """stdout once tee / bridge.py has exited (Ctrl+C reaches the whole pipeline)."""
+
+    def write(self, s):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_closed_stdout_does_not_lose_the_sentence_from_the_transcript(monkeypatch):
+    monkeypatch.setattr(sys, "stdout", ClosedPipe())
+    out = io.StringIO()
+    ears.emit_sentence({"start": 1.0, "end": 2.0, "text": "Last words."}, "mic1", out)
+    assert json.loads(out.getvalue()) == {"type": "sentence", "source": "mic1", "start": 1.0, "end": 2.0,
+                                          "text": "Last words."}
+
+
+class FakeParec:
+    def __init__(self):
+        self.terminated = self.waited = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        self.waited = True
+
+    def kill(self):
+        pass
+
+
+def test_ctrl_c_with_stdout_gone_still_flushes_every_source_and_stops_capture(monkeypatch, tmp_path):
+    transcript = tmp_path / "transcript.jsonl"
+    procs = []
+
+    def interrupt(_):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys, "argv", ["ears.py", "--source", "mic1=dev1", "--source", "mic2=dev2",
+                                      "--output", str(transcript)])
+    monkeypatch.setattr(sys, "stdout", ClosedPipe())
+    monkeypatch.setattr(ears, "WhisperModel", lambda *a, **kw: object())
+    monkeypatch.setattr(ears, "start_audio_capture", lambda *a: procs.append(FakeParec()) or procs[-1])
+    monkeypatch.setattr(ears, "transcribe_source", lambda *a: None)
+    monkeypatch.setattr(ears, "time", types.SimpleNamespace(monotonic=lambda: 0.0, sleep=interrupt))
+    monkeypatch.setattr(ears.SentenceBuffer, "flush",
+                        lambda self: [{"start": 1.0, "end": 2.0, "text": "Unfinished"}])
+    ears.main()
+    assert [json.loads(line)["source"] for line in transcript.read_text().splitlines()] == ["mic1", "mic2"]
+    assert len(procs) == 2 and all(p.terminated and p.waited for p in procs)

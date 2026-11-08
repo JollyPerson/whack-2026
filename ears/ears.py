@@ -279,11 +279,34 @@ def emit_sentence(sentence, source_name, output_file):
 
     line = json.dumps(event, ensure_ascii=False)
 
-    print(line, flush=True)
-
+    # The file first: on Ctrl+C the reader of stdout may be gone already.
     if output_file:
         output_file.write(line + "\n")
         output_file.flush()
+
+    try:
+        print(line, flush=True)
+    except OSError:
+        stdout_gone()
+
+
+def stdout_gone():
+    """The reader of stdout (tee, bridge.py) has exited: point stdout at
+    /dev/null, so later sentences and the flush at exit stop raising. The
+    transcript file still gets every sentence."""
+
+    try:
+        fd = sys.stdout.fileno()
+    except (OSError, ValueError, AttributeError):
+        return
+
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, fd)
+    finally:
+        os.close(devnull)
+
+    print("stdout closed; sentences go to the transcript file only", file=sys.stderr)
 
 
 
@@ -453,20 +476,21 @@ def main():
         )
 
     finally:
-        for name, state in states.items():
-            for sentence in state["sentences"].flush():
-                emit_sentence(sentence, name, output_file)
+        try:
+            for name, state in states.items():
+                for sentence in state["sentences"].flush():
+                    emit_sentence(sentence, name, output_file)
+        finally:
+            for process in processes.values():
+                process.terminate()
 
-        for process in processes.values():
-            process.terminate()
+            for process in processes.values():
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
-        for process in processes.values():
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-
-        output_file.close()
+            output_file.close()
 
 
 if __name__ == "__main__":
