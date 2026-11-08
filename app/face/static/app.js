@@ -433,24 +433,22 @@ function drawFinal() {
   }).join('') || '<p class="empty">The referee stayed silent.</p>') + '</div>');
 }
 // Each side bot's latest line, under its side's colour. The strip stays hidden until a bot has spoken (bots off: no
-// change). Model text, so textContent only. "AI knowledge" = an unsourced challenge or concede; a sourced rebut names
-// its source.
+// change). Drawn by BotCard (botcard.js, shared with the stage): the bot's name, "AI knowledge" on an unsourced
+// challenge or concede, the line, and a source card (title, domain, quote) for a sourced line. Model text, so
+// textContent only.
 function drawBots() {
   $('bots').hidden = !Object.keys(S.bots).length || S.flags.screen === 'final';
-  for (const [persona, label] of Object.entries(BOTS)) {
+  for (const persona of Object.keys(BOTS)) {
     const box = $(`bot-${persona}`), b = S.bots[persona], key = b ? b.e.id : '';
     if (box.dataset.key === key) continue;    // unchanged: no rebuild, no animation
     box.dataset.key = key;
     const n = document.createElement('div');
-    const part = (tag, cls, text) => { const x = n.appendChild(document.createElement(tag)); x.className = cls; x.textContent = text; };
     n.className = b && b.live ? 'line enter' : 'line';
-    part('b', 'who', label);
-    if (!b) part('span', 'text empty', 'Nothing yet');
+    if (b) BotCard.fill(n, b.e, persona);
     else {
-      const e = b.e, ev = e.sourced && e.kind === 'rebut' && (e.evidence || [])[0];
-      if (!e.sourced && (e.kind === 'challenge' || e.kind === 'concede')) part('span', 'tag', 'AI knowledge');
-      part('span', 'text', e.text);
-      if (ev && (ev.title || host(ev.url))) part('span', 'src', `Source: ${ev.title || host(ev.url)}`);
+      for (const [tag, cls, text] of [['b', 'who', BotCard.NAMES[persona]], ['span', 'text empty', 'Nothing yet']]) {
+        const x = n.appendChild(document.createElement(tag)); x.className = cls; x.textContent = text;
+      }
     }
     box.replaceChildren(n);
   }

@@ -10,6 +10,7 @@ Dev loop: `./run.sh dev-d` (no keys needed). Protocol reference: `app/tools/ws_d
 | `/?audio=1` | The one tab that speaks. Click **Enable audio** once, because browsers block speech until the page has had a click |
 | `/?admin=1&audio=1` | Both, for a single demo laptop |
 | `/stage` centre + final | The middle lane shows **how the sides relate**: Flip the chameleon pops up for a U-turn (Then/Now quotes, leaning towards the side that changed its story), Dove flies in from the side that conceded a point, and agreements and corrections collect under **Common ground**. **⚖ Final verdict** (or the dashboard's Final screen) switches every tab to the legal scales: one weight per claim that checked out, a cracked weight per U-turn, the beam tipped by each side's evidence score, then the summary's agreed and still-disputed points. **Back to live** returns |
+| `/stage` side bots | With `BOTS=real`, each side bot's latest line sits on its **team's** half as a speech card: the **For bot** (Prop's second) on the Proposition half, the **Against bot** (Opp's second) on the Opposition half. Same names, side colours, "AI knowledge" tag and source card as the dashboard's strip (both drawn by `static/botcard.js`). Each card is hidden until its bot has spoken, so with the bots off the stage is unchanged; a refreshed tab shows the latest lines at once, without the pop-in, and a new debate clears them |
 | `/stage` | Opens on a **setup screen** (motion, brief, speaker names): "Research this debate" pre-researches it with a progress bar, then "Start debate" starts the session with the brief. During the debate the brief sits under the motion. Two-sided character view: each fact check pops a character onto the side that made the claim (Sunny = supported, Grumble = contradicted, Professor Hoot = missing context), with a sign and a speech bubble giving the context and source. Display only, it never speaks. Takes `?theme=light`; `?all=1` also shows unverifiable checks (Shrug the ghost). Click a past check to bring it back |
 | `/?theme=light` | Light theme, for a projector that washes out dark screens. Combines with the others |
 
@@ -83,13 +84,18 @@ Each Mate Engine instance polls its own channel, set with `pollPath` in its own 
 `/face/mate/next/for` or `/face/mate/next/against` (`/face/mate/next/referee` is the route above; any other channel is
 a 404). A bot's channel carries only its own `BotLine`s, as a text-only bubble with the mouth open, and `BotTalk`
 closes the mouth after the line's `hold_s`. `SessionStart`, mute and the `bots` flag going off clear its bubble. The
-referee's lines never reach a bot's channel, and bot lines never reach the referee's. Each channel has its own dot
+referee's lines never reach a bot's channel, and bot lines never reach the referee's. A sourced line (a `rebut` with
+its Verdict's `evidence`) gets a short second line in the bubble naming its source, like a stage character's sign:
+`— the ONS: Labour market overview` (`voice.source_name` plus the page title without its site suffix; at most 8 words
+and 60 characters, plain text, no URL). `BotLine.text` itself is unchanged; an unsourced `challenge` or `concede` keeps
+its "(unsourced)" ending and gets no source line. Each channel has its own dot
 (`mate_for`, `mate_against`), shown only once that avatar has polled. Dances take an optional `"channel"`:
 `-d '{"title":"","channel":"for"}'`; without one (or `""`), every avatar dances, and `dance/stop` likewise.
 
-The dashboard shows a **For / Against strip** above the panels with each bot's latest line, in its side's colour. An
-unsourced `challenge` or `concede` (Claude's own knowledge) is tagged **AI knowledge**, and a sourced `rebut` names
-its source. The strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown
+The dashboard shows a **For / Against strip** above the panels with each bot's latest line, labelled **For bot** /
+**Against bot** in its side's colour. An unsourced `challenge` or `concede` (Claude's own knowledge) is tagged **AI
+knowledge**, and a sourced line shows a small **source card**: the page title, its domain and the quote. `/stage`
+shows the same card on each team's half (`static/botcard.js` draws both). The strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown
 on the final screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(flag="bots")`: off stops new lines
 and clears the bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
 

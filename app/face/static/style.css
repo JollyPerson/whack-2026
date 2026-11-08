@@ -128,7 +128,13 @@ i.unverifiable { color: var(--unk); } i.checking { color: var(--pend); }
 .bot .text { font-weight: 600; }
 .bot .text.empty { font-weight: 400; }
 .bot .tag { padding: 0 .5em; border-radius: 1em; font-size: .75em; font-weight: 700; color: var(--warn); outline: 1px solid var(--warn); outline-offset: -1px; white-space: nowrap; }
-.bot .src { color: var(--mute); font-size: .8em; }
+/* a sourced line's source card (botcard.js; the stage draws the same parts): title, domain, the quote */
+.bot .srccard { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 0 .6em; align-items: baseline; margin: .2em 0 .1em;
+  padding: .15em .6em; border-left: 2px solid var(--side); border-radius: 0 4px 4px 0; background: var(--raise); font-size: .8em; }
+.bot .src-title { font-weight: 600; }
+.bot .src-title::before { content: '📄 '; }
+.bot .src-domain { color: var(--mute); }
+.bot .src-quote { flex-basis: 100%; font-style: italic; color: var(--mute); }
 
 /* ---------- the referee speaks ---------- */
 #banner { position: fixed; left: 1.2em; right: 1.2em; bottom: 3.2em; z-index: 5; padding: .7em 1.1em; border: 2px solid var(--pend); border-radius: 10px; background: var(--raise); box-shadow: 0 12px 40px rgb(0 0 0 / .5); animation: enter .25s ease-out; }

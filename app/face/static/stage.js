@@ -1,6 +1,7 @@
 'use strict';
 // Stage view: proposition on the left, opposition on the right. Each Verdict pops a character (stage-cast.js)
 // onto the side that made the claim, holding a sign, with a speech bubble that gives the context and the source.
+// With the side bots on, each bot's latest line sits on its team's half (stage-bots.js: hidden until a bot speaks).
 // Protocol (Snapshot + seq + reconnect) follows the reference client app/tools/ws_debug.html.
 // The setup screen ("New debate") takes a motion + brief, sends a ResearchRequest so Evidence researches it before the
 // debate, shows progress and the key facts found, then starts the session with the brief. During the debate the brief
@@ -38,6 +39,7 @@ function reset() {
     u.queue = []; u.active = null; u.history = [];
   }
   Centre.reset();
+  Bots.reset();
 }
 function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionStart said otherwise
   if (!(spk in S.sides)) S.sides[spk] = Object.keys(S.sides).length % 2 ? 'opp' : 'prop';
@@ -66,6 +68,7 @@ function apply(e, live) {
     case 'Claim': sideOf(e.speaker); S.claims.set(e.id, e); if (S.verdicts.has(e.id)) onVerdict(e.id, live); break;
     case 'Verdict': S.verdicts.set(e.claim_id, e); onVerdict(e.claim_id, live); break;
     case 'Consistency': case 'DebateSummary': case 'Control': Centre.apply(e, live); break;
+    case 'BotLine': Bots.apply(e, live); break;
   }
 }
 
@@ -207,6 +210,7 @@ function draw() {
     }).join(''));
   }
   Centre.draw();
+  Bots.draw();
 }
 setInterval(() => { if (S) draw(); }, 2000);   // ages "checking…" between events
 

@@ -1,7 +1,11 @@
 """The side bots' avatar channels: /face/mate/next/{referee|for|against}, their dances and status dots. All offline."""
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -289,3 +293,94 @@ def test_operator_dances_take_optional_music_and_seconds(make_client):
     c.post("/face/mate/dance", json={"title": "PET_DANCING_01", "channel": "for"})
     assert poll(c, "for", cur, ep)["cmds"] == [dance(WIN, on=True, seconds=13), dance("PET_DANCING_01", seconds=0)]
     assert c.post("/face/mate/dance", json={"seconds": -1}).status_code == 422
+
+
+# ----------------------------------------------------------------------------- citations in the bots' bubbles
+ONS = {"url": "https://www.ons.gov.uk/employment/x", "title": "Labour market overview - Office for National Statistics",
+       "quote": "The unemployment rate was 4.2%."}
+
+
+def test_a_sourced_line_names_its_source_on_a_second_line(make_client, tmp_path):
+    """Like a stage character's sign: "— <source name>: <short title>" under the line. BotLine.text is unchanged
+    (the bus, the log and the dashboard keep it as it was), and the referee's channel never sees any of it."""
+    c = make_client()
+    _with_tts(c, tmp_path, [])
+    cur, ep = resync(c)
+    text = "The ONS says 4.2%, not 6%. Try again."
+    ev = line("for", "b-0001", text, kind="rebut", target="B", sourced=True, evidence=[ONS])
+    assert c.post("/publish", json=ev).status_code == 200
+    say = poll(c, "for", cur, ep)["cmds"][0]
+    assert say["op"] == "say" and say["text"] == f"{text}\n— the ONS: Labour market overview"
+    assert [e for e in c.get("/debug/history").json() if e["event"] == "BotLine"][0]["text"] == text
+    assert poll(c, None, cur, ep)["cmds"] == []                 # the referee's channel: unchanged, no bot line
+
+
+def test_unsourced_lines_keep_their_text_and_tag(make_client, tmp_path):
+    """An AI-knowledge challenge or concede keeps "(unsourced)" and gets no source line, even if it carries
+    evidence; a line marked sourced with no evidence is its text alone."""
+    c = make_client()
+    _with_tts(c, tmp_path, [])
+    cur, ep = resync(c)
+    lines = [line("against", "b-0001", "It was 3%, not 30%. (unsourced)", kind="challenge", evidence=[ONS]),
+             line("against", "b-0002", "Annoyingly, that checks out. (unsourced)", kind="concede"),
+             line("against", "b-0003", "Source for that 40%?", sourced=True)]
+    for ev in lines:
+        assert c.post("/publish", json=ev).status_code == 200
+    says = [x["text"] for x in poll(c, "against", cur, ep)["cmds"] if x["op"] == "say"]
+    assert says == [ev["text"] for ev in lines]
+
+
+def _bl(evidence, sourced=True, text="Try again."):
+    return BotLine(persona="for", text=text, kind="rebut", sourced=sourced, evidence=evidence)
+
+
+def test_the_source_line_is_short_plain_text():
+    long_title = "A very long report title about the economics of congestion charging in many cities worldwide"
+    cases = {
+        "— the WHO: Air quality": [{"url": "https://www.who.int/a", "title": "Air quality | WHO"}],
+        "— the ONS": [{"url": "https://ons.gov.uk/a", "title": ""}],                 # no title: the name alone
+        "— Snopes": [{"url": "https://x.org/a", "title": "That claim is false - Snopes"}],   # no judgement words
+        "— A very long report title about the economics…": [{"url": "https://x.org/a", "title": long_title}],
+        "— Congestion charge": [{"url": "https://foo.example/a", "title": "Congestion charge"}],   # said once
+        "— the BBC": [{"url": "https://bbc.co.uk/a", "title": "see https://bbc.co.uk/news/x"}],   # never a URL
+        "": [{"url": "", "title": ""}],
+    }
+    for want, ev in cases.items():
+        assert speech.cite(ev) == want, ev
+    for ev in ([{"url": "https://ons.gov.uk/a", "title": long_title}],
+               [{"url": "https://x.org/a", "title": "Supercalifragilistic" * 6}],
+               [{"url": "https://x.org/a", "title": "Pneumonoultramicroscopic silicovolcanoconiosis " * 4}]):
+        got = speech.cite(ev)
+        name_and_title = got.removeprefix("— ").replace(":", "")
+        assert len(got) <= speech.CITE_MAX_CHARS and len(name_and_title.split()) <= speech.CITE_MAX_WORDS, got
+        assert got.endswith("…") and "http" not in got and "\n" not in got, got
+    assert speech.bot_text(_bl([ONS])) == "Try again.\n— the ONS: Labour market overview"
+    assert speech.bot_text(_bl([ONS], sourced=False)) == "Try again."
+    assert speech.bot_text(_bl([])) == "Try again."
+
+
+# ----------------------------------------------------------------------------- the shared show: bots on /stage
+STATIC = Path(__file__).resolve().parent.parent / "app/face/static"
+
+
+def test_stage_and_dashboard_load_the_shared_bot_card():
+    """index.html and stage.html load botcard.js before the scripts that use it; the stage has one bot card per
+    half, hidden until a bot speaks."""
+    index, stage = (STATIC / "index.html").read_text(), (STATIC / "stage.html").read_text()
+    scripts = lambda html: re.findall(r'<script src="/static/([\w-]+\.js)"', html)
+    assert scripts(index) == ["botcard.js", "app.js"]
+    assert scripts(stage) == ["botcard.js", "stage-cast.js", "stage-centre.js", "stage-bots.js", "stage.js"]
+    for side in ("prop", "opp"):
+        half = stage.split(f'<section id="{side}"')[1].split("</section>")[0]
+        assert '<div class="botcard" hidden' in half
+
+
+@pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run the stage")
+def test_stage_js_bot_cards():
+    """The whole stage against a fake DOM: each bot's latest line on its team's half, with the source card or the
+    "AI knowledge" tag, as text only, hidden with no bot line, and shown without animation from a Snapshot
+    (tests/js/stage_bots.js)."""
+    files = [str(STATIC / f) for f in re.findall(r'<script src="/static/([\w-]+\.js)"', (STATIC / "stage.html").read_text())]
+    r = subprocess.run(["deno", "run", "--allow-read", str(STATIC.parent.parent.parent / "tests/js/stage_bots.js"), *files],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr

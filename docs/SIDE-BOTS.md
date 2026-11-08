@@ -6,7 +6,7 @@ Two Mate Engine avatars stand beside the projected dashboard:
 
 Each listens to the **opponent** (two microphones → ears → claims) and heckles them in a text speech bubble. A bubble
 can be:
-- a sourced fact check;
+- a sourced fact check, with its source under it (see "Where the lines appear");
 - a confident AI-knowledge challenge, always tagged "(unsourced)";
 - a "True, but…" for a misrepresented figure;
 - a grudging concession of a surprising truth;
@@ -20,6 +20,19 @@ both bots dance. The winner dances with music, the loser in silence.
 
 How it works and what each event means: `README.md` ("Side bots", "Debate summary and verdict dances"),
 `docs/CONTRACTS.md` (BotLine, BotTalk, DebateResult) and `docs/INTEGRATION.md` (Mate Engine channels).
+
+## Where the lines appear
+One shared show: every line appears on the avatar, the dashboard and the stage, with the same names, side colours and
+tags. Each surface works without the others.
+- **Avatar bubble** (Mate Engine). The line as written. A sourced line adds a short second line naming its source, like
+  the stage characters' signs: `— the ONS: Labour market overview` (at most 8 words, plain text, no link). An
+  AI-knowledge line keeps its "(unsourced)" ending.
+- **Dashboard** (`/`). The For / Against strip above the panels: **For bot** in the Proposition's colour,
+  **Against bot** in the Opposition's. An unsourced challenge or concede is tagged **AI knowledge**; a sourced line
+  shows a source card (page title, domain, the quote).
+- **Stage** (`/stage`). Each bot's latest line as a speech card on its team's half: the For bot on the Proposition
+  half, the Against bot on the Opposition half, with the same tag and source card. The cards stay hidden until a bot
+  speaks, so with `BOTS` off the stage looks exactly as before.
 
 ## What you need
 - **A Linux laptop.** Tested on Arch with KDE Plasma (Wayland with XWayland), an i5-10310U and an Intel iGPU. Each
@@ -57,7 +70,8 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
    - The launcher also copies the three verdict dances into the build.
    - `place` re-positions the windows for another screen size (`FOR_GEOM`, `AGAINST_GEOM`); `stop` ends both.
 4. **Dashboard.** Open `http://127.0.0.1:8000/?admin=1` full screen behind the avatars. Start the debate from the
-   motion picker, which declares A = Prop and B = Opp.
+   motion picker, which declares A = Prop and B = Opp. Or put `http://127.0.0.1:8000/stage` behind them instead: it
+   shows the bots' lines on each team's half alongside the fact-check characters.
 5. **During the debate.**
    - Bubbles appear as soon as a line is ready: each bot at most once every `BOTS_MIN_GAP_S` (10 s).
    - In admin, **B** toggles the bots and **M** mutes everything.
