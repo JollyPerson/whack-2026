@@ -11,10 +11,10 @@ import pytest
 from app import config
 from app.brain import claims as C
 from app.brain.claims import ClaimExtractor
-from app.brain.llm import LLMRefusal
+from app.brain.llm import LLMInvalid, LLMRefusal
 from app.brain.prompts import OUTPUT_SCHEMA, SYSTEM_PROMPT
 from app.bus import load_jsonl
-from app.schemas import Claim, Pause, Utterance
+from app.schemas import Claim, Pause, SessionStart, SpeakerInfo, Utterance
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "fake_debate.jsonl"
 T = 1000.0
@@ -165,6 +165,19 @@ def test_json_mode_shape_variants():
     out = {"claims": [{"text": "That figure is wrong.", "type": "fact", "checkable": True, "importance": 2,
                        "links": [{"to": "c3", "rel": "attack"}, {"to": "c4", "rel": "Support"}]}]}
     assert C.drafts_from_llm(out, {"c3", "c4"})[0].links == [("c3", "attacks"), ("c4", "supports")]
+    one_link = {"claims": [{"text": "That is wrong.", "links": {"to": "c3", "rel": "attacks"}}]}   # not a list
+    assert C.drafts_from_llm(one_link, {"c3"})[0].links == [("c3", "attacks")]
+
+
+@pytest.mark.parametrize("items", [["Crime rose 9% last year."], [{"claim": "Crime rose 9% last year."}],
+                                   [{"text": ""}], [None, 3]])
+def test_claims_list_with_no_usable_item_is_invalid_not_empty(items):
+    """JSON mode only hints the schema: a list of strings (or of objects without "text") read as 'no claims',
+    with no heuristic fallback and nothing counted. An empty list still means 'no claim'."""
+    with pytest.raises(LLMInvalid):
+        C.drafts_from_llm({"claims": items}, set())
+    assert C.drafts_from_llm({"claims": {}}, set()) == []                     # JSON mode's "none": still none
+    assert C.drafts_from_llm({"claims": items + [one("Crime rose 9%.")]}, set())[0].text == "Crime rose 9%."
 
 
 # ----------------------------------------------------------------------------- fallbacks
@@ -181,6 +194,7 @@ async def test_timeout_falls_back_to_heuristic(monkeypatch):
     ({"nope": 1}, "invalid"),
     ("{not json", "invalid"),
     ({"claims": "lots"}, "invalid"),
+    ({"claims": ["Bus use outside London has fallen by a third since 2010."]}, "invalid"),
     (LLMRefusal("declined"), "refusal"),
     (RuntimeError("socket closed"), "error"),
 ])
@@ -212,6 +226,25 @@ async def test_concurrency_is_bounded(monkeypatch):
     text = " ".join(f"Sentence number {i} has enough words." for i in range(5))
     await ex.extract(utt(text))
     assert len(llm.calls) == 5 and llm.peak == 2
+
+
+async def test_queue_wait_counts_against_the_budget_not_the_provider(monkeypatch):
+    """Waiting for a slot used to start a full-budget call that wait_for then cut off: tokens paid, a 'timeout'
+    blamed on the provider and the queue wait recorded as model latency."""
+    monkeypatch.setattr(config, "CLAIM_CONCURRENCY", 1)
+    monkeypatch.setattr(config, "CLAIM_TIMEOUT_S", 1.0)
+    llm = StubLLM({"claims": []}, delay=0.2)
+    ex, _, pub = make(llm)
+    await ex.extract(utt("Bus use fell by a third last decade. Air pollution causes 40,000 early deaths a year."))
+    assert len(llm.calls) == 2 and llm.calls[0]["timeout"] > 0.9 and llm.calls[1]["timeout"] < 0.85
+    assert ex.stats["by_cause"]["timeout"] == 0 and pub == []
+    monkeypatch.setattr(config, "CLAIM_TIMEOUT_S", 0.5)
+    llm = StubLLM({"claims": []}, delay=0.4)
+    ex, _, pub = make(llm)
+    await ex.extract(utt("Bus use fell by a third last decade. Air pollution causes 40,000 early deaths a year."))
+    assert len(llm.calls) == 1                                   # 0.1 s left after the queue: no doomed call
+    assert ex.stats["by_cause"]["timeout"] == 1 and [c.source for c in pub] == ["heuristic"]
+    assert ex.stats["p95_ms"] < 480                              # the one real call, not call + queue
 
 
 # ----------------------------------------------------------------------------- generation guard / dedupe
@@ -398,6 +431,24 @@ async def test_wrong_clock_t_end_falls_back_to_ts(t_end):
     assert pub[0].t_end == T and pub[0].marks["speech_end"] == T
 
 
+async def test_constant_clock_offset_is_not_staleness():
+    """ears/bridge.py stamps t_end with the ears host's clock: 6-30 s behind the server made every sentence
+    'stale' (inside CLOCK_SKEW_S, beyond CLAIM_STALE_S), so the LLM was never called all session."""
+    now = [T]
+    llm = StubLLM({"claims": []})
+    ex, _, _ = make(llm, clock=lambda: now[0])
+    for i in range(3):
+        t = T + 5 * i
+        now[0] = t + 0.5
+        await ex.extract(Utterance(id=f"u{i}", speaker="A", text="Unemployment is 6 percent.", t_start=t - 12,
+                                   t_end=t - 10, ts=t))
+    assert len(llm.calls) == 3 and ex.stats["by_cause"]["stale"] == 0
+    now[0] = T + 40.5                                            # a real backlog on top of the offset still counts
+    await ex.extract(Utterance(id="u9", speaker="A", text="Unemployment is 6 percent.", t_start=T + 18,
+                               t_end=T + 20, ts=T + 40))
+    assert len(llm.calls) == 3 and ex.stats["by_cause"]["stale"] == 1
+
+
 def test_speakers_buffer_independently():
     ex, _, _ = make()
     ex.assemble(utt("our figures show that", speaker="A", uid="a1"), T)
@@ -411,6 +462,33 @@ async def test_filler_sentences_are_dropped():
     ex, _, _ = make(llm)
     await ex.extract(utt("Thank you. Can I just finish my point? Okay. Inflation is 4%."))
     assert len(llm.calls) == 1 and "SENTENCE [PROP]: Inflation is 4%." in llm.calls[0]["user"]
+
+
+async def test_earlier_in_turn_skips_the_units_own_fragments():
+    """A unit joined from several finals has its LAST utterance's id, so its own opening fragment showed up as
+    EARLIER IN THIS TURN and pushed the sentence that really came before out of the 2-sentence window."""
+    from app.brain.argmap import ArgMap
+    amap = ArgMap()
+    amap.reset(SessionStart(motion="Ban cars", speakers={"A": SpeakerInfo(side="prop"), "B": SpeakerInfo(side="opp")}))
+    llm = StubLLM({"claims": []})
+    ex = ClaimExtractor(amap, lambda ev: ev, llm, clock=lambda: T + 0.5)
+
+
+    async def say(*texts):
+        for text in texts:
+            u = utt(text, uid=f"u{len(amap.utt_turn)}", t_end=T - 5 + len(amap.utt_turn))
+            amap.on_utterance(u)
+            for unit in ex.assemble(u, u.t_end):
+                await ex.extract(unit)
+        return llm.calls[-1]["user"].split("\n")[-2:]
+
+    assert await say("Car journeys are up. Bus use fell by a third last decade.",
+                     "Air pollution causes around 40,000", "early deaths every year in the UK.") == [
+        "EARLIER IN THIS TURN [PROP]: Car journeys are up. Bus use fell by a third last decade.",
+        "SENTENCE [PROP]: Air pollution causes around 40,000 early deaths every year in the UK."]
+    earlier, sent = await say("Road traffic is", "the biggest single source", "of nitrogen dioxide in cities.")
+    assert sent == "SENTENCE [PROP]: Road traffic is the biggest single source of nitrogen dioxide in cities."
+    assert "Road traffic" not in earlier and "single source" not in earlier          # never its own fragments
 
 
 # ----------------------------------------------------------------------------- sides
@@ -453,6 +531,14 @@ async def test_warmup():
 def test_heuristic_types(text, typ, checkable):
     d = C.heuristic_drafts(text, "prop")
     assert [(x.type, x.checkable) for x in d] == [(typ, checkable)]
+
+
+def test_heuristic_drops_bare_numeric_echo_questions():
+    """'Forty thousand?' shouted over the speaker became an important, checkable statistic claim."""
+    for q in ("Forty thousand?", "Ten percent?", "40,000?", "Is it 40%?", "Twice as many?"):
+        assert C.heuristic_drafts(q, "opp") == [], q
+    assert [d.type for d in C.heuristic_drafts("Didn't the IFS say that?", "opp")] == ["attribution"]
+    assert [d.type for d in C.heuristic_drafts("So 40% of journeys are by car?", "opp")] == ["statistic"]
 
 
 def test_heuristic_cleaning_and_filters():
