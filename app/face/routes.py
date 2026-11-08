@@ -6,6 +6,7 @@ POST /face/replay       one-click fallback: the recorded debate re-drives the ru
 POST /face/replay/stop  stops it.
 GET  /stage             the two-sided character view (static/stage.html).
 GET  /arena             the full-screen backdrop the two side-bot avatars stand on (static/arena.html).
+GET  /mic, WS /mic/ws   a phone's browser as a debater's microphone (PHONE_MICS=A,B): see phone_mic.py.
 /face/tts, /face/mate/* the referee's voice and the Mate Engine avatar bridge: see speech.py.
 """
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from app.face.phone_mic import router as phone_router
 from app.face.speech import router as speech_router
 from app.mocks import mock_ears
 from app.schemas import Control, ModuleStatus
@@ -24,6 +26,7 @@ from app.schemas import Control, ModuleStatus
 log = logging.getLogger("face")
 router = APIRouter()
 router.include_router(speech_router)
+router.include_router(phone_router)
 
 
 async def _drive(bus, fixture, speed: float) -> None:

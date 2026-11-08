@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Debate Referee · Phone mic</title>
+<!-- A phone's browser as a debater's microphone. Served at /mic?ch=A|B by app/face/phone_mic.py; the server needs
+     PHONE_MICS=A,B. Over USB: adb reverse tcp:8000 tcp:8000, then http://localhost:8000/mic?ch=A on the phone.
+     URL params: ?ch=A|B · ?agc=0 (phone's auto gain off) · ?token=<MIC_TOKEN>. Always connects to its own host. -->
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0d1117; --panel: #161b22; --raise: #21262d; --line: #30363d;
+  --fg: #f0f3f6; --mute: #a3adb8;
+  --prop: #4493f8; --opp: #d9772b;
+  --ok: #3fb950; --bad: #ff6b6b; --warn: #e3b341; --unk: #8b949e;
+  --side: var(--unk);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { min-height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 18px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column; align-items: center; min-height: 100vh;
+  padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--side) 18%, transparent), transparent 45%);
+}
+body.A { --side: var(--prop); } body.B { --side: var(--opp); }
+main { width: 100%; max-width: 30em; display: flex; flex-direction: column; gap: 1em; }
+h1, p { margin: 0; }
+.eyebrow { color: var(--mute); font-size: .72em; letter-spacing: .08em; text-transform: uppercase; text-align: center; }
+.side { text-align: center; padding: .4em 0 .2em; }
+.letter { font-size: 5.5em; line-height: 1; font-weight: 800; color: var(--side); }
+.side-name { font-size: 1.7em; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; color: var(--side); }
+.sub { color: var(--mute); font-size: .9em; }
+#toggle {
+  width: 100%; min-height: 4.2em; border: 0; border-radius: 1em; cursor: pointer;
+  font: inherit; font-size: 1.5em; font-weight: 750; color: #0d1117; background: var(--side);
+  touch-action: manipulation;
+}
+#toggle.on { background: var(--raise); color: var(--fg); outline: 2px solid var(--side); }
+#toggle:disabled { opacity: .5; }
+.meter { position: relative; height: 1.6em; border-radius: .8em; background: var(--raise); overflow: hidden; }
+.meter i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ok); transition: width 60ms linear; }
+.meter i.hot { background: var(--warn); } .meter i.clip { background: var(--bad); }
+.meter span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: .8em; font-variant-numeric: tabular-nums; }
+.state { display: flex; align-items: center; gap: .5em; justify-content: center; font-size: .95em; }
+.dot { display: inline-block; width: .7em; height: .7em; border-radius: 50%; background: var(--unk); flex: none; }
+.state.live .dot { background: var(--ok); } .state.connecting .dot, .state.retrying .dot { background: var(--warn); }
+.state.error .dot { background: var(--bad); }
+.stats { text-align: center; color: var(--mute); font-size: .8em; font-variant-numeric: tabular-nums; }
+.error { border: 1px solid var(--bad); background: color-mix(in srgb, var(--bad) 14%, var(--panel)); border-radius: .7em;
+  padding: .7em .9em; font-size: .95em; overflow-wrap: anywhere; }
+.tips { color: var(--mute); font-size: .85em; padding-left: 1.2em; margin: 0; }
+.pick { display: grid; gap: 1em; }
+.pick a { display: block; text-align: center; text-decoration: none; padding: 1.2em; border-radius: 1em;
+  font-size: 1.4em; font-weight: 750; color: #0d1117; }
+.pick a.A { background: var(--prop); } .pick a.B { background: var(--opp); }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Debate Referee · phone microphone</p>
+
+  <section id="picker" class="pick" hidden>
+    <p class="sub" style="text-align:center">Which debater is this phone for?</p>
+    <a id="pick-A" class="A" href="?ch=A">A · Proposition</a>
+    <a id="pick-B" class="B" href="?ch=B">B · Opposition</a>
+  </section>
+
+  <section id="mic" hidden>
+    <div class="side">
+      <p class="letter" id="letter">A</p>
+      <h1 class="side-name" id="side-name">Proposition</h1>
+      <p class="sub" id="side-sub">Microphone A</p>
+    </div>
+  </section>
+
+  <button type="button" id="toggle" hidden>Start</button>
+  <div class="meter" id="meter" hidden><i id="level"></i><span id="level-text">mic off</span></div>
+  <p class="state" id="state"><span class="dot"></span><span id="state-text">Not started</span></p>
+  <p class="stats" id="stats"></p>
+  <p class="error" id="error" role="alert" hidden></p>
+
+  <ul class="tips" id="tips" hidden>
+    <li>Hold the phone 10-20 cm from your mouth, pointed at you, away from the speakers.</li>
+    <li>Keep this page open with the screen on. <span id="wake-note"></span></li>
+    <li>Stop here, or close the tab, when the debate is over.</li>
+  </ul>
+</main>
+<script src="/static/mic.js"></script>
+</body>
+</html>
