@@ -49,12 +49,25 @@ class FakeLLM:
         if self.fail:
             raise self.fail
         if kind == "check":
-            return self.check or {"assessment": "unsure", "confidence": 0.5, "correction": "", "challenge": ""}
+            return self.check or check_answer("unsure", 0.5)
         return {"line": self.line} if kind == "banter" else {"question": self.question}
 
 
+def check_answer(assessment, conf=0.95, line="", correction="", context=""):
+    return {"assessment": assessment, "confidence": conf, "correction": correction, "context": context, "line": line}
+
+
 def false_check(conf=0.95, challenge="6%? Last I checked it was nearer 4%.", correction="it was nearer 4%"):
-    return {"assessment": "likely_false", "confidence": conf, "correction": correction, "challenge": challenge}
+    return check_answer("likely_false", conf, challenge, correction)
+
+
+def misleading_check(conf=0.9, line="True, but that's against a modelled baseline.",
+                     context="that's against a modelled baseline"):
+    return check_answer("misleading", conf, line, context=context)
+
+
+def surprising_check(conf=0.9, line="Annoyingly, that one checks out."):
+    return check_answer("surprising_true", conf, line)
 
 
 class Clock:
@@ -163,7 +176,7 @@ async def test_a_capped_verdict_is_not_sourced_so_the_knowledge_check_answers():
     (false_check(0.79), "followup"),                       # below BOTS_CHECK_MIN_CONF: no challenge
     (false_check(0.80), "challenge"),
     (false_check("90%"), "challenge"),                     # percentages are read as 0..1
-    ({"assessment": "likely_true", "confidence": 0.99, "correction": "", "challenge": ""}, "followup"),
+    (check_answer("likely_true", 0.99), "followup"),
     (false_check(0.95, challenge="That's a lie, it was 4%."), "challenge"),   # its line fails: built from correction
 ])
 async def test_the_ai_knowledge_challenge_fires_only_when_confident_and_is_tagged(check, kind):
@@ -208,6 +221,135 @@ async def test_low_importance_claims_get_only_a_sourced_rebut():
     bots.handle(C("c3", imp=0.33))
     await settle(bots)
     assert [b.kind for b in said(out)] == ["rebut"]
+
+
+ULEZ = "London's ULEZ cut nitrogen dioxide in central London by 46 per cent."
+STROKE = "Lightning often strikes the same place twice."
+
+
+@pytest.mark.parametrize("conf,kind", [(0.79, "followup"), (0.80, "challenge"), (0.95, "challenge")])
+@pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
+async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bot(conf, kind, spk, side, persona):
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=misleading_check(conf)))
+    bots.handle(C("c1", spk, side, ULEZ))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.sourced, b.evidence) == (kind, persona, spk, False, [])
+    if kind == "challenge":
+        assert b.text == "True, but that's against a modelled baseline. (unsourced)"
+    else:
+        assert "(unsourced)" not in b.text
+
+
+@pytest.mark.parametrize("line,text", [
+    ("True, but that's against a modelled baseline. (Unsourced)",               # its own tag, once
+     "True, but that's against a modelled baseline. (unsourced)"),
+    ("46%? True, but only 20% was measured.",                                    # a figure beyond claim + context
+     "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
+    ("Sure, but that's a misleading baseline.", "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
+    ("", "46 per cent? True, but that's against a modelled baseline. (unsourced)"),
+])
+async def test_a_misleading_challenge_carries_only_the_claims_and_its_context_figures(line, text):
+    bots, out, clock = make(check=FakeLLM(check=misleading_check(line=line)))
+    bots.handle(C("c1", text=ULEZ))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.text) == ("challenge", text)
+    assert lines.misleading(C("c", text=ULEZ), "True, but a modelled 46 per cent.", "") == \
+        "True, but a modelled 46 per cent. (unsourced)"
+    assert lines.misleading(C("c", text=ULEZ), "", "True, but it's against a modelled scenario") == \
+        "46 per cent? True, but it's against a modelled scenario. (unsourced)"
+    assert lines.misleading(C("c", text=ULEZ), "", "") is None
+
+
+@pytest.mark.parametrize("check,kind", [
+    (surprising_check(0.79), "followup"),                                      # below the bar
+    (surprising_check(0.80), "concede"),
+    (check_answer("likely_true", 0.99, "Annoyingly, that one checks out."), "followup"),   # a plain truth: no concede
+    (check_answer("unsure", 0.99, "Annoyingly, that one checks out."), "followup"),
+])
+async def test_a_surprising_truth_gets_a_grudging_concede_only_when_confident(check, kind):
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=check))
+    bots.handle(C("c1", "A", "prop", STROKE, typ="fact"))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.sourced) == (kind, "against", "A", False)
+    if kind == "concede":
+        assert b.text == "Annoyingly, that one checks out. (unsourced)"
+    else:
+        assert "(unsourced)" not in b.text and "checks out" not in b.text
+
+
+def test_a_concede_carries_only_the_claims_figures():
+    claim = C("c1", text="Over 70 percent of the Earth's surface is water.")
+    assert lines.concede(claim, "70 percent? Annoyingly, yes.") == "70 percent? Annoyingly, yes. (unsourced)"
+    assert lines.concede(claim, "Yes, about 71% actually.") == "Annoyingly, that one checks out. (unsourced)"
+    assert lines.concede(claim, "Fair. Annoyingly, that's right. (Unsourced).") == \
+        "Fair. Annoyingly, that's right. (unsourced)"
+    assert lines.concede(claim, "{x} checks out") == "Annoyingly, that one checks out. (unsourced)"   # braces: odd
+    assert lines.concede(claim, "Bob, that checks out.", names=["Bob"]) == "Annoyingly, that one checks out. (unsourced)"
+    assert lines.concede(claim, used=["Annoyingly, that one checks out. (unsourced)"]) == \
+        "Fine, that one is actually true. (unsourced)"
+    assert lines.guard("Annoyingly, it checks out.", "concede") is None                       # untagged
+    assert lines.guard("Fine, 71% checks out. (unsourced)", "concede", claim.text) is None    # Claude's figure
+    assert lines.guard("Fine, 70 percent checks out. (unsourced)", "concede", claim.text)
+
+
+@pytest.mark.parametrize("check", [false_check(), misleading_check(), surprising_check()])
+async def test_a_sourced_verdict_wins_over_every_knowledge_line(check):
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    checker = FakeLLM(check=check, delay=0.05)
+    bots, out, clock = make(check=checker)
+    bots.handle(C("c1", text=ULEZ))
+    await asyncio.sleep(0.01)
+    bots.handle(V("c1", label="missing_context", short_fact="the 46% is against a modelled scenario"))
+    await settle(bots, 1.0)
+    [b] = said(out)
+    assert (b.kind, b.sourced) == ("rebut", True)
+
+
+@pytest.mark.parametrize("check,label,kind", [
+    (misleading_check(0.99), "supported", "followup"),         # a supported sourced Verdict is never "true, but"
+    (false_check(0.99), "supported", "followup"),
+    (surprising_check(0.99), "supported", "followup"),         # sourced and supported: no unsourced concede either
+    (surprising_check(0.99), "contradicted", "followup"),      # capped, but it still disagrees: no concede
+    (false_check(0.99), "contradicted", "challenge"),          # capped, and it agrees
+    (misleading_check(0.99), "missing_context", "challenge"),
+    (surprising_check(0.99), "unverifiable", "concede"),
+])
+async def test_a_knowledge_line_never_contradicts_the_claims_verdict(check, label, kind):
+    bots, out, clock = make(check=FakeLLM(check=check))
+    capped = label in ("contradicted", "missing_context")
+    bots.handle(V("c1", label=label, guard_notes=["capped"] if capped else [],
+                  evidence=[] if label == "unverifiable" else ONS))
+    bots.handle(C("c1", text=ULEZ))
+    await settle(bots)
+    [b] = said(out)
+    assert b.kind == kind and not b.sourced
+    if label == "supported":
+        assert b.text in lines.GRANTED
+
+
+def test_one_fact_line_per_claim_across_rebut_challenge_and_concede():
+    kinds = ("rebut", "challenge", "concede")
+    for first in kinds:
+        for second in kinds:
+            p = Pacer(min_gap=1, ttl=30)
+            assert p.push(L(text=f"First {first}. (unsourced)", kind=first, claim_id="c1", hold=1), 0)
+            p.tick(0)
+            assert not p.push(L(text=f"Then {second}. (unsourced)", kind=second, claim_id="c1"), 1)
+            assert p.push(L(text=f"Then {second} on c2. (unsourced)", kind=second, claim_id="c2"), 1)
+            assert p.push(L(text="Source for that?", claim_id="c1"), 1)              # a follow-up is not a fact line
+    p = Pacer(min_gap=10, ttl=30)                                                    # both queued: the best one wins
+    p.push(L(text="Concede. (unsourced)", kind="concede", claim_id="c1"), 0)
+    p.push(L(text="Rebut.", kind="rebut", claim_id="c1"), 0)
+    assert posted(p.tick(0)) == ["Rebut."] and posted(p.tick(20)) == []
+
+
+def test_priority_order():
+    assert sorted(lines.PRIORITY, key=lines.PRIORITY.get, reverse=True) == [
+        "rebut", "challenge", "concede", "nudge", "followup", "banter"]
+    assert lines.FACT_KINDS == ("rebut", "challenge", "concede")
 
 
 # ----------------------------------------------------------------------------- follow-ups
@@ -344,10 +486,12 @@ def test_pacer_ttl_banter_sooner_and_priority():
     p.push(L(text="Nudge.", kind="nudge"), 20)
     p.push(L(text="Banter.", kind="banter"), 20)
     p.push(L(text="Rebut.", kind="rebut", claim_id="c1"), 20)
+    p.push(L(text="Concede. (unsourced)", kind="concede", claim_id="c3"), 20)
     p.push(L(text="Challenge. (unsourced)", kind="challenge", claim_id="c2"), 20)
     p.push(L(text="Newer follow?"), 21)
-    assert [posted(p.tick(t)) for t in (21, 31, 41, 51, 61)] == [
-        ["Rebut."], ["Challenge. (unsourced)"], ["Nudge."], ["Newer follow?"], ["Follow?"]]   # then the newest
+    assert [posted(p.tick(t)) for t in (21, 31, 41, 51, 61, 71)] == [
+        ["Rebut."], ["Challenge. (unsourced)"], ["Concede. (unsourced)"], ["Nudge."], ["Newer follow?"],
+        ["Follow?"]]                                                            # then the newest
 
 
 def test_pacer_one_fact_line_per_claim_and_no_duplicate_text():
@@ -598,6 +742,12 @@ async def test_writer_calls_are_bounded_and_never_raise(monkeypatch):
     assert await Writer(None, None).check(C("c1")) is None and Writer().name == "templates only (no LLM)"
     got = await Writer(None, FakeLLM(check=false_check("90%"))).check(C("c1"))
     assert got.likely_false and got.confidence == 0.9 and got.correction == "it was nearer 4%"
+    got = await Writer(None, FakeLLM(check=misleading_check(0.8))).check(C("c1"))
+    assert (got.assessment, got.context, got.likely_false) == ("misleading", "that's against a modelled baseline", False)
+    got = await Writer(None, FakeLLM(check=check_answer("Surprising_True", 0.9, "Fine."))).check(C("c1"))
+    assert (got.assessment, got.line) == ("surprising_true", "Fine.")
+    got = await Writer(None, FakeLLM(check=check_answer("half_true", 0.99))).check(C("c1"))
+    assert got.assessment == "unsure"
 
 
 def test_make_writer_uses_brains_client_with_the_bots_models(monkeypatch):

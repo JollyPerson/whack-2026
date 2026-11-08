@@ -7,8 +7,10 @@ The For bot is Prop's second and answers Opp's claims; the Against bot mirrors i
 A claim with no side is ignored, and a bot never answers its own side. Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
-  Supported -> no fact line. Otherwise a check that says likely false with confidence >= BOTS_CHECK_MIN_CONF ->
-  "challenge", tagged "(unsourced)". At most one fact line per claim.
+  Supported -> no fact line. Otherwise, with confidence >= BOTS_CHECK_MIN_CONF, the check's assessment decides,
+  every line tagged "(unsourced)": likely_false -> "challenge" with Claude's correction; misleading (true figure,
+  misrepresented) -> a "True, but ..." "challenge"; surprising_true (a well-known misconception) -> a grudging
+  "concede". A check that disagrees with the claim's Verdict label is dropped. At most one fact line per claim.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
@@ -33,6 +35,9 @@ from app.brain.director import truthy
 from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, Event, ModuleStatus, SessionStart, Verdict)
 
 log = logging.getLogger("bots")
+CHECK_KIND = {"likely_false": "challenge", "misleading": "challenge", "surprising_true": "concede"}
+DISAGREES = {"likely_false": {"supported"}, "misleading": {"supported"},   # check assessment -> Verdict labels
+             "surprising_true": {"contradicted", "missing_context"}}     # it would contradict
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
@@ -174,22 +179,20 @@ class Bots:
             check = self.spawn(self.writer.check(c, self.motion))
         verdict = await self.wait_verdict(c.id, config.BOTS_VERDICT_WAIT_S) if checkable else None
         granted = lines.supported(verdict)
+        to = dict(persona=persona, target=c.speaker, claim_id=c.id)
         if verdict is not None and lines.sourced(verdict):
             text = lines.rebut(c, verdict, self.said)
             if text:
                 if check:
                     check.cancel()
-                self.queue(session, persona=persona, text=text, kind="rebut", target=c.speaker, claim_id=c.id,
-                           sourced=True, evidence=list(verdict.evidence))
+                self.queue(session, text=text, kind="rebut", sourced=True, evidence=list(verdict.evidence), **to)
                 return
         if check is not None:
             res = None if granted else await check
             check.cancel()
-            if res and res.likely_false and res.confidence >= config.BOTS_CHECK_MIN_CONF:
-                text = lines.challenge(c, res.challenge, res.correction, names=self.names)
-                if text and self.queue(session, persona=persona, text=text, kind="challenge", target=c.speaker,
-                                       claim_id=c.id):
-                    return
+            kind, text, why = self.knowledge(c, res, verdict)
+            if text and self.queue(session, text=text, kind=kind, **to):
+                return
         if not important:
             return
         raw = await self.writer.followup(c, self.motion, persona, granted, tuple(self.said))
@@ -199,7 +202,26 @@ class Bots:
         if not text or self.pacer.has_said(text):
             text = lines.followup(c, self.said, granted)
         if text:
-            self.queue(session, persona=persona, text=text, kind="followup", target=c.speaker, claim_id=c.id)
+            self.queue(session, text=text, kind="followup", **to)
+
+    def knowledge(self, c: Claim, res: Any, verdict: Optional[Verdict]) -> tuple[str, Optional[str], str]:
+        """The fact line Claude's own-knowledge check `res` allows for `c`: (kind, text or None, why not)."""
+        if res is None:
+            return "", None, "no answer"
+        kind = CHECK_KIND.get(res.assessment)
+        if kind is None:
+            return "", None, res.assessment
+        if res.confidence < config.BOTS_CHECK_MIN_CONF:
+            return kind, None, f"below {config.BOTS_CHECK_MIN_CONF:.2f}"
+        if verdict is not None and verdict.label in DISAGREES[res.assessment]:
+            return kind, None, f"the Verdict says {verdict.label}"
+        if res.assessment == "likely_false":
+            text = lines.challenge(c, res.line, res.correction, names=self.names)
+        elif res.assessment == "misleading":
+            text = lines.misleading(c, res.line, res.context, names=self.names)
+        else:
+            text = lines.concede(c, res.line, names=self.names, used=self.said)
+        return kind, text, "" if text else "dropped by the guards"
 
     def queue(self, session: int, **kw) -> bool:
         """Hand a line to the pacer (and post it now if its bot is free). False if dropped."""
