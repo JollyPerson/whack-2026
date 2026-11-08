@@ -87,7 +87,8 @@ BOTS=real ./run.sh live                    # or drive, mock, ...
   only while nothing more important is running or queued for either bot (`BOTS_BANTER=0` turns it off).
   Priority: rebut > uturn > challenge > concede > nudge > conceded > followup > banter.
 - Each bot posts at most one bubble every `BOTS_MIN_GAP_S` (10 s). The admin flag `bots` pauses both; mute hides
-  everything. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
+  everything; the final screen pauses them until "Back to live" or the next session, so no bubble interrupts the
+  verdict dances. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
 - They use the same Anthropic key as the brain (`BOTS_MODEL` for follow-ups and banter, `BOTS_CHECK_MODEL` for the
   check). With no LLM they still rebut, nudge and ask template follow-ups, but never challenge, concede or banter.
 

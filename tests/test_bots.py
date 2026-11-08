@@ -1,5 +1,5 @@
 """app/bots: the For/Against side bots (wording, guards, pacing, the claim pipeline, nudges, U-turns and concessions,
-banter, wiring).
+banter, the final screen, wiring).
 
 The engine runs on a fake clock that only moves when a test says so (the pacer's gaps, TTLs and hold_s); asyncio
 waits (the verdict wait, LLM calls) stay real but tiny. The LLM is a FakeLLM with canned answers, never the network.
@@ -1090,6 +1090,53 @@ async def test_bots_false_or_mute_stops_posting_and_drops_queues(flag):
     assert len(said(out)) == 2
 
 
+@pytest.mark.parametrize("how", ["live", "session"])
+async def test_the_final_screen_pauses_the_bots_until_live_or_a_new_session(how):
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    bots, out, clock = make()
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c2", typ="value", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    first = said(out)[0]
+    bots.handle(C("c3"))                                                        # waiting for its Verdict
+    await asyncio.sleep(0.01)
+    assert bots.tasks and bots.pending == {"c3"} and bots.pacer.queued("for")
+    bots.handle(Control(flag="screen", value="final"))
+    [talk] = [e for e in out if e.event == "BotTalk"]                            # the open mouth closes now
+    assert talk.line_id == first.id and bots.pacer.queued("for") == [] and bots.pending == set()
+    assert bots.paused and bots.enabled and not bots.muted                      # the operator's flags untouched
+    await asyncio.sleep(0.01)
+    assert not bots.tasks
+    bots.handle(K("k1"))                                          # the summary's catch-up finds a U-turn
+    bots.handle(C("c4", typ="value", checkable=False, text="Unions protect nobody."))
+    bots.handle(V("c3"))
+    clock.t += 60
+    bots.tick()
+    assert len(said(out)) == 1 and not bots.tasks
+    if how == "live":
+        bots.handle(Control(flag="screen", value="live"))
+    else:
+        bots.handle(SessionStart(motion="Another motion", speakers=SPEAKERS))
+    assert not bots.paused and not bots.pacer.paused
+    bots.handle(K("k1"))                                          # live: seen at the final screen, never posted late
+    bots.handle(C("c5", typ="value", checkable=False, text="Tariffs protect jobs."))
+    await settle(bots)
+    assert [b.kind for b in said(out)] == ["followup"] + (["followup"] if how == "live" else ["uturn"])
+
+
+async def test_leaving_the_final_screen_keeps_the_operators_bots_switch():
+    bots, out, clock = make()
+    bots.handle(Control(flag="bots", value=False))
+    bots.handle(Control(flag="screen", value="final"))
+    bots.handle(Control(flag="screen", value="live"))
+    assert bots.paused and not bots.enabled
+    bots.handle(Control(flag="screen", value="final"))
+    bots.handle(Control(flag="bots", value=True))
+    assert bots.paused and bots.final                                           # still the final screen
+    bots.handle(SessionStart(motion="Another motion", speakers=SPEAKERS))
+    assert not bots.paused and not bots.pacer.paused
+
+
 async def test_operator_switch_set_before_the_bots_start_is_honoured(monkeypatch):
     monkeypatch.setattr(config, "FLAGS", {"bots": False})
     bots, out, clock = make()
@@ -1118,21 +1165,26 @@ async def test_restore_after_a_crash_remembers_what_was_said():
     assert len(said(out2)) == 1                                                 # already unanswered: no nudge
 
 
-async def test_restore_remembers_the_findings():
+async def test_restore_remembers_the_findings_and_the_final_screen():
     bots, out, clock = make()
     bots.handle(K("k1"))
     [b] = said(out)
     start = SessionStart(motion="m", speakers=SPEAKERS, ts=T0)
-    history = [start, K("k1"), b, K("k2", "agreement")]
+    history = [start, K("k1"), b, K("k2", "agreement"), Control(flag="screen", value="final")]
     again, out2, clock2 = make()
     again.restore(history)
-    assert again.findings == {"k1", "k2"}
+    assert again.findings == {"k1", "k2"} and again.paused and again.pacer.paused and again.enabled
+    again.handle(Control(flag="screen", value="live"))
     again.handle(K("k1"))                                         # answered before the crash
     clock2.t += 30
     again.tick()
     assert said(out2) == []
     again.handle(K("k3"))                                         # a new finding, the same words: not the same text
     assert [x.text for x in said(out2)] == ["You said 'cut it by 6%'. Now it's 'about 4%'?"]
+    for tail, paused in (([Control(flag="screen", value="live")], False), ([start], False), ([], True)):
+        again, out2, clock2 = make()
+        again.restore(history + tail)
+        assert (again.paused, again.pacer.paused) == (paused, paused)
 
 
 async def test_restore_closes_a_mouth_the_crash_left_open():
@@ -1221,7 +1273,7 @@ async def test_module_on_the_bus_answers_and_survives_a_failing_handler(monkeypa
         await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_module_on_the_bus_heckles_a_u_turn(monkeypatch):
+async def test_module_on_the_bus_heckles_a_u_turn_and_pauses_at_the_final_screen(monkeypatch):
     from app.bots import run as bots_run
     monkeypatch.setattr(writer_mod, "make_writer", lambda: Writer(None, None))
     bus = Bus()
@@ -1236,7 +1288,10 @@ async def test_module_on_the_bus_heckles_a_u_turn(monkeypatch):
         bus.publish(K("k1"), src="brain")
         [b] = await wait_for(lines_)
         assert (b.src, b.kind, b.persona, b.target, b.text) == ("bots", "uturn", "for", "B", UTURN_TEXT)
-        assert not task.done()
+        bus.publish(Control(flag="screen", value="final"))
+        bus.publish(K("k2", side="prop", spk="A"), src="brain")
+        await asyncio.sleep(0.1)
+        assert len(lines_()) == 1 and not task.done()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)

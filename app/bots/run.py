@@ -28,7 +28,9 @@ no non-banter line queued for either bot, and the replying bot idle; all of it i
 written, before it is queued. If that only comes true later, it may still start within BANTER_FRESH_S of the line.
 A queued banter is dropped when a real line for its bot is ready first or a claim for its bot comes in, and then
 gives the gap back. Banter is never answered.
-Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
+Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); so does the final screen
+(Control screen=final), until screen=live or the next SessionStart, so no bubble cuts into the verdict and its
+dances. SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
 from __future__ import annotations
@@ -68,13 +70,12 @@ class Bots:
         self.pacer = Pacer(config.BOTS_MIN_GAP_S, config.BOTS_LINE_TTL_S, BANTER_TTL_S)
         self.enabled = truthy(config.FLAGS.get("bots", True))
         self.muted = truthy(config.FLAGS.get("mute", False))
-        self.pacer.paused = self.paused
         self.tasks: set[asyncio.Task] = set()
         self.reset()
 
     @property
     def paused(self) -> bool:
-        return not self.enabled or self.muted
+        return not self.enabled or self.muted or self.final
 
     def reset(self, ev: Optional[SessionStart] = None) -> None:
         self.cancel()
@@ -102,6 +103,8 @@ class Bots:
         self.pending: set[str] = set()                # claims being answered (check, Verdict wait, line writing)
         self.cue: Optional[tuple[BotLine, float]] = None   # the latest real line banter may answer, and when
         self.findings: set[str] = set()               # Consistency ids already seen: one line each, at most
+        self.final = False                            # the final screen is up: paused (the operator's flags kept)
+        self.pacer.paused = self.paused
 
     def cancel(self) -> None:
         for t in list(self.tasks):
@@ -139,6 +142,8 @@ class Bots:
             self.enabled = truthy(ev.value)
         elif ev.flag == "mute":
             self.muted = truthy(ev.value)
+        elif ev.flag == "screen":
+            self.final = final_screen(ev.value)
         else:
             return
         if self.paused and not self.pacer.paused:
@@ -420,9 +425,9 @@ class Bots:
         self.maybe_banter()
 
     def restore(self, history: list[Event]) -> None:
-        """After a crash-restart: the session, claims, verdicts, map statuses, findings and lines already posted,
-        silently. A line whose BotTalk(on=false) the crash cut off still gets it, at its own ts + hold_s (or at the
-        next tick)."""
+        """After a crash-restart: the session, claims, verdicts, map statuses, findings, the final screen and lines
+        already posted, silently. A line whose BotTalk(on=false) the crash cut off still gets it, at its own
+        ts + hold_s (or at the next tick)."""
         open_lines: dict[str, BotLine] = {}
         for ev in history:
             try:
@@ -449,8 +454,11 @@ class Bots:
                     open_lines.pop(ev.line_id, None)
                 elif ev.event == "Consistency":
                     self.findings.add(ev.id)              # answered (or not) before the crash
+                elif ev.event == "Control" and ev.flag == "screen":
+                    self.final = final_screen(ev.value)
             except Exception:
                 log.exception("bots: restore skipped %s", ev.event)
+        self.pacer.paused = self.paused
         for line in open_lines.values():
             self.pacer.close_at(line, line.ts + line.hold_s)
 
@@ -479,6 +487,11 @@ def log_check(cid: str, res: Any, outcome: str) -> None:
 def finished(task: asyncio.Task) -> Any:
     """The task's result if it already finished cleanly, else None."""
     return task.result() if task.done() and not task.cancelled() and task.exception() is None else None
+
+
+def final_screen(value: Any) -> bool:
+    """Control(flag="screen"): "final" is the verdict screen; any other value ("live") is back to the debate."""
+    return str(value or "").strip().lower() == "final"
 
 
 def final_nr(snap: ArgMapSnapshot) -> list[dict]:
