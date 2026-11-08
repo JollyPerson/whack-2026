@@ -11,7 +11,7 @@ import pytest
 from app import config
 from app.brain import claims as C
 from app.brain.claims import ClaimExtractor
-from app.brain.llm import LLMRefusal
+from app.brain.llm import LLMInvalid, LLMRefusal
 from app.brain.prompts import OUTPUT_SCHEMA, SYSTEM_PROMPT
 from app.bus import load_jsonl
 from app.schemas import Claim, Pause, Utterance
@@ -165,6 +165,19 @@ def test_json_mode_shape_variants():
     out = {"claims": [{"text": "That figure is wrong.", "type": "fact", "checkable": True, "importance": 2,
                        "links": [{"to": "c3", "rel": "attack"}, {"to": "c4", "rel": "Support"}]}]}
     assert C.drafts_from_llm(out, {"c3", "c4"})[0].links == [("c3", "attacks"), ("c4", "supports")]
+    one_link = {"claims": [{"text": "That is wrong.", "links": {"to": "c3", "rel": "attacks"}}]}   # not a list
+    assert C.drafts_from_llm(one_link, {"c3"})[0].links == [("c3", "attacks")]
+
+
+@pytest.mark.parametrize("items", [["Crime rose 9% last year."], [{"claim": "Crime rose 9% last year."}],
+                                   [{"text": ""}], [None, 3]])
+def test_claims_list_with_no_usable_item_is_invalid_not_empty(items):
+    """JSON mode only hints the schema: a list of strings (or of objects without "text") read as 'no claims',
+    with no heuristic fallback and nothing counted. An empty list still means 'no claim'."""
+    with pytest.raises(LLMInvalid):
+        C.drafts_from_llm({"claims": items}, set())
+    assert C.drafts_from_llm({"claims": {}}, set()) == []                     # JSON mode's "none": still none
+    assert C.drafts_from_llm({"claims": items + [one("Crime rose 9%.")]}, set())[0].text == "Crime rose 9%."
 
 
 # ----------------------------------------------------------------------------- fallbacks
@@ -181,6 +194,7 @@ async def test_timeout_falls_back_to_heuristic(monkeypatch):
     ({"nope": 1}, "invalid"),
     ("{not json", "invalid"),
     ({"claims": "lots"}, "invalid"),
+    ({"claims": ["Bus use outside London has fallen by a third since 2010."]}, "invalid"),
     (LLMRefusal("declined"), "refusal"),
     (RuntimeError("socket closed"), "error"),
 ])

@@ -528,7 +528,7 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
     if isinstance(out, (str, bytes)):
         out = parse_json_text(out.decode() if isinstance(out, bytes) else out)
     if isinstance(out, dict) and isinstance(out.get("claims"), dict):     # JSON mode: one claim, not a list
-        out = {**out, "claims": [out["claims"]]}
+        out = {**out, "claims": [out["claims"]] if out["claims"] else []}
     if not isinstance(out, dict) or not isinstance(out.get("claims"), list):
         raise LLMInvalid("response has no 'claims' list")
     drafts: list[Draft] = []
@@ -540,8 +540,8 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
             continue
         typ = str(item.get("type") or "other").strip().lower()
         typ = typ if typ in KNOWN_TYPES else "other"
-        links, seen = [], set()
-        for ln in item.get("links") or []:
+        links, seen, raw_links = [], set(), item.get("links") or []
+        for ln in [raw_links] if isinstance(raw_links, dict) else raw_links:   # JSON mode: one link, not a list
             if not isinstance(ln, dict):
                 continue
             to = str(ln.get("to") or ln.get("claim_id") or "").strip()
@@ -553,6 +553,8 @@ def drafts_from_llm(out: Any, ctx_ids: set[str]) -> list[Draft]:
         topic = " ".join(str(item.get("topic") or "").split()[:4]) or heuristic_topic(text)
         drafts.append(Draft(text=text[:300], type=typ, checkable=_truthy(item.get("checkable")) and typ not in NO_CHECK,
                             importance=map_importance(item.get("importance")), topic=topic, links=links))
+    if out["claims"] and not drafts:              # [] is the model saying "no claim"; junk items are not
+        raise LLMInvalid(f"no usable claim in {len(out['claims'])} item(s): {str(out['claims'])[:80]!r}")
     return drafts
 
 
