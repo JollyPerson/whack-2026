@@ -371,10 +371,10 @@ def _on_control(st: State, ev: Control, out: list, now: float) -> None:
 def _veto(st: State, v: Any, out: list, now: float) -> None:
     """value = decision key or claim id; True (no value) vetoes whatever would be said next."""
     if isinstance(v, bool) or v is None:
-        ranked = sorted(st.pending.values(), key=lambda cd: _rank(st, cd, _score(st, cd, now)))
+        ranked = _order(st, now)
         if not (v and ranked):
             return
-        v = ranked[0].key
+        v = ranked[0][0].key
     v = str(v)
     st.vetoed.add(v)
     for k, cd in list(st.pending.items()):
@@ -423,11 +423,11 @@ def try_fire(st: State, now: float) -> list[Event]:
     if not _paused_since(st, now, last):                                     # G3: a human must pause again
         return out
     forced = now < st.force_until
-    first = st.force_key if forced else None                                 # Control(time): its own line
-    for cd in st.pending.values():
-        cd.score = _score(st, cd, now)
-    for cd in sorted(st.pending.values(), key=lambda cd: (cd.key != first, _rank(st, cd))):
-        skip = forced and st.force_key in (None, cd.key)
+    ranked = _order(st, now)
+    for cd, s in ranked:
+        cd.score = s
+    for cd, _ in ranked:
+        skip = forced and st.force_key in (None, cd.key)                     # Control(time): its own line only
         why = None if skip else _gate(st, cd, now, last)
         if why is None and (st.muted or st.director_off):
             why = "muted_would_fire"
@@ -464,6 +464,14 @@ def _score(st: State, cd: Cand, now: float) -> float:
             _side_pressure(st, cd.side) - _side_pressure(st, cd.side, same=False) >= c.confirm_boost_gap:
         boost = c.confirm_boost                   # an accurate claim by the over-pressured side gets voiced
     return KIND_W[cd.kind] * cd.conf * cd.imp * recency * boost
+
+
+def _order(st: State, now: float) -> list[tuple[Cand, float]]:
+    """(candidate, score), in the order try_fire tries them: while a Control(time) force window is open its own
+    line first, then _rank. _veto(True) and status() use it too, so "what is said next" agrees everywhere."""
+    first = st.force_key if now < st.force_until else None
+    return sorted(((cd, _score(st, cd, now)) for cd in st.pending.values()),
+                  key=lambda x: (x[0].key != first, _rank(st, *x)))
 
 
 def _rank(st: State, cd: Cand, score: Optional[float] = None) -> tuple:
@@ -546,7 +554,7 @@ def _log(st: State, out: list, cd: Cand, action: str, reason: str, text: str = "
 
 def status(st: State, now: float) -> DirectorStatus:
     last = st.fires[-1][0] if st.fires else None
-    ranked = sorted(((cd, _score(st, cd, now)) for cd in st.pending.values()), key=lambda x: _rank(st, *x))
+    ranked = _order(st, now)
     fl, busy, muted = floor_open(st, now), now < st.tts_until, st.muted or st.director_off
     blocked = ("nothing_pending" if not ranked else "own_tts" if busy else "floor_closed" if not fl else
                "awaiting_pause" if not _paused_since(st, now, last if last is not None else NEG) else

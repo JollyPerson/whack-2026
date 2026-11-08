@@ -823,6 +823,19 @@ def test_time_call_is_what_its_force_window_fires():
     assert fired(o)[1][1:] == ("correction", "B", "c2")
 
 
+def test_veto_and_status_agree_with_the_time_calls_force_window():
+    """veto(True) and DirectorStatus.pending ranked by score alone: in a time call's force window they named the
+    stronger correction (and vetoed it), while the time line was what would fire."""
+    ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
+          + talk("B", 7, 15) + [(14, C("c2", "B", 14, imp=1.0)), (14.5, V("c2", "contradicted", .99)),
+                                (15, Control(flag="time", value="B"))])
+    d, _ = run(ev)
+    assert [x["key"] for x in d.status(15.2).pending][:2] == ["time:B:15", "correction:c2"]
+    _, o = run(ev + [(15.2, Control(flag="veto", value=True)), (15.5, P("B", 15.5))])
+    assert ("time:B:15", "dropped", "veto") in logs(o) and ("correction:c2", "dropped", "veto") not in logs(o)
+    assert [f[1] for f in fired(o)] == ["correction"]               # c1 at 6; the vetoed time line never fires
+
+
 def test_time_control_by_side_alias_never_invents_a_speaker():
     d, _ = run(talk("A", 0, 2) + [(3, Control(flag="time", value="Opposition"))] + talk("B", 4, 6))
     assert "Opposition" not in d.st.sides and d.name("B") == "Opposition" and "Opposition" not in d.status(7).pressure
@@ -853,4 +866,3 @@ def test_restart_keeps_the_operators_aggr_from_flags(monkeypatch):
     for rel in ("up", "+", None, "junk"):                      # a relative step can't be replayed onto a fresh level
         monkeypatch.setattr(config, "FLAGS", {"director": True, "aggr": rel})
         assert Director(aggr=3).aggr == 3
-
