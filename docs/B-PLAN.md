@@ -13,7 +13,7 @@ Build specific first, generalise later. When unsure, stay silent. Never block a 
 | Claim extraction | `app/brain/claims.py`, `llm.py`, `prompts.py` | p50 < 500 ms per sentence (Haiku 5.5, no thinking, effort low); heuristic fallback when there's no key or a timeout |
 | Argument map | `app/brain/argmap.py` | Answered / conceded / unanswered / non-responsive are deterministic; scoreboard and "call" |
 | Director | `app/brain/director.py`, `voice.py` | Speaks only at pauses, ≤ 1 per 30 s, always names its source, balanced, explains every decision |
-| Wiring | `app/brain/run.py` | One subscriber; pause synthesis; echo and bleed guards; session reset; crash restore |
+| Wiring | `app/brain/run.py` | One subscriber; pause synthesis; echo guard; session reset; crash restore |
 
 ## Decisions made (to be confirmed with the team; all reversible)
 
@@ -45,7 +45,7 @@ Build specific first, generalise later. When unsure, stay silent. Never block a 
 | 17:00–18:30 | ✅ Brain modules (argmap, Director, claims) + tests. Bench Haiku once a key exists | **18:30** standalone on mocks |
 | 18:30–19:10 | Label ~25 gold claims with C on the real 3-minute fixture; run `eval/eval_extract.py` | Baseline numbers |
 | 19:10–20:00 | Swap mocks for C's verdicts and D's dashboard; fix integration bugs | **20:00** `./run.sh drive` E2E → `fixtures/golden_run.jsonl` |
-| 20:00–21:30 | Live mics with A: tune the bleed/echo guards, pause timing, fragment assembly | **21:30** live E2E |
+| 20:00–21:30 | Live mics with A: tune the echo guard, pause timing, fragment assembly | **21:30** live E2E |
 | 21:30–01:30 | Prompt iterations (≤3, keep only if F1 ↑ and p50 not ↓); tune the Director's aggressiveness on recorded logs; teach a backup integrator the run modes | Regression vs golden before sleeping |
 | 01:45–05:45 | Sleep (backup integrator on call, revert-only) | |
 | 06:00–09:00 | Regression run, fixes only, record the best rehearsal as `fixtures/golden_demo.jsonl` | **09:00** feature freeze |

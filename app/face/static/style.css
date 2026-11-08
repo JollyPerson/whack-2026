@@ -87,12 +87,14 @@ mark { color: inherit; background: none; border-bottom: 3px solid var(--mark); p
 mark.supported { --mark: var(--ok); } mark.contradicted { --mark: var(--bad); }
 mark.missing_context { --mark: var(--warn); } mark.unverifiable { --mark: var(--unk); }
 mark.checking { --mark: var(--pend); }
+mark.uncheckable { --mark: var(--line); }
 
 .chip { display: inline-flex; gap: .35em; align-items: baseline; padding: .05em .6em; border-radius: 1em; font-size: .8em; font-weight: 700; color: var(--on-chip); background: var(--unk); white-space: nowrap; }
 .chip.supported { background: var(--ok); } .chip.contradicted { background: var(--bad); }
 .chip.missing_context { background: var(--warn); } .chip.unverifiable { background: var(--unk); }
 .chip.checking { background: var(--raise); color: var(--fg); outline: 1px solid var(--pend); outline-offset: -1px; }
 .chip.stale { background: var(--raise); color: var(--mute); }
+.chip.uncheckable { background: transparent; color: var(--mute); outline: 1px solid var(--line); outline-offset: -1px; font-weight: 600; }
 .clock { font-variant-numeric: tabular-nums; }
 .pulse { color: var(--pend); animation: pulse 1.1s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .3; } }

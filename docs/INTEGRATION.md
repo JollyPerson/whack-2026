@@ -88,7 +88,8 @@ invalid, it replies 422 with the reason and publishes none of them, so a retry n
     `start`/`end`) sent over `/ws` or `/publish` are treated as unknown.
   - No `Pause` at all: B synthesises Pauses (see the timings above) until real ones arrive.
   - Deepgram-style payloads: `speaker: 0` (an integer), `is_final`, and `null` fields.
-  - Mic bleed: B drops the other speaker's voice leaking into a mic.
+  - Mic bleed: not filtered. If one speaker is heard on both mics, both copies count as speech, so keep the
+    mics apart or directional.
   - TTS echo: B drops the moderator's own voice.
 - Nice to have:
   - `t_start`/`t_end` on the server clock;

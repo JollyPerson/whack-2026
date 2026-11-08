@@ -126,7 +126,7 @@ def split_sentences(text: str) -> list[str]:
         piece = piece.strip()
         if not piece:
             continue
-        if out and _ABBR.search(out[-1]):
+        if out and _cut_off(out[-1]):              # "Mr." / "..." don't end a sentence
             out[-1] = f"{out[-1]} {piece}"
         else:
             out.append(piece)
@@ -141,9 +141,15 @@ def keep_sentence(s: str) -> bool:
     return len(n.split()) >= 4 or has_quantity(s)
 
 
+def _cut_off(head: str) -> bool:
+    """Ends in punctuation but not a sentence: "welcome Mr." or a trailing "..." (STT marks a cut-off)."""
+    head = head.rstrip("\"'”’)] ")
+    return bool(_ABBR.search(head)) or head.endswith("..")
+
+
 def _split_complete(text: str) -> tuple[str, str]:
-    """(complete sentences, trailing fragment without terminal punctuation)."""
-    ends = [m.end() for m in _TERM.finditer(text)]
+    """(complete sentences, trailing fragment without terminal punctuation). "Mr." and "..." don't end one."""
+    ends = [m.end() for m in _TERM.finditer(text) if not _cut_off(text[:m.end()])]
     if not ends:
         return "", text.strip()
     return text[:ends[-1]].strip(), text[ends[-1]:].strip()
@@ -702,13 +708,30 @@ class ClaimExtractor:
     async def extract(self, u: Utterance) -> list[Claim]:
         gen = self.gen
         stale = self._age(u) - self._held.pop(u.id, 0.0) > float(getattr(config, "CLAIM_STALE_S", 6.0))
-        sents = [s for s in split_sentences(u.text) if keep_sentence(s)]
+        sents = self._sentences(u)
         if not sents:
             return []
         side = self._side(u.speaker)
         res = await asyncio.gather(*(self._sentence(u, s, sents[:i], side, gen, stale)
                                      for i, s in enumerate(sents)))
         return [c for r in res for c in r]
+
+    def _sentences(self, u: Utterance) -> list[str]:
+        """Sentences worth extracting. STT often ends a chunk mid-sentence ("...was an" / "atrocity."): a short
+        piece that starts in lower case is the tail of the sentence before it (in this unit, else the speaker's
+        last one), so it is extracted joined to that sentence instead of being dropped as too short."""
+        out: list[str] = []
+        for s in split_sentences(u.text):
+            if keep_sentence(s):
+                out.append(s)
+                continue
+            if not (s[:1].islower() and _norm(s)) or _FILLER.fullmatch(_norm(s)):
+                continue
+            prev = out.pop() if out else (self._earlier(u, [])[-1:] or [""])[0]
+            joined = f"{prev.rstrip().rstrip('.!?…')} {s}".strip()
+            if prev and keep_sentence(joined):
+                out.append(joined)
+        return out
 
     async def _sentence(self, u: Utterance, sent: str, earlier: list[str], side: str, gen: int,
                         stale: bool = False) -> list[Claim]:
