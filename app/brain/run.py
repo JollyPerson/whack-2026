@@ -291,8 +291,10 @@ async def run(bus) -> None:
                 if ev.event == "SessionStart":
                     amap.reset(ev)
                     director.reset(ev)
-                elif ev.event == "Utterance" and ev.final:
-                    amap.on_utterance(ev)
+                elif ev.event == "Utterance" and ev.final:   # the live ingress guards, in the live order
+                    heard = echo.classify(ev, ev.ts)         # (bleed also remembers a floor-only final)
+                    if heard != "echo" and not bleed.is_bleed(ev) and heard == "speech":
+                        amap.on_utterance(ev)
                 elif ev.event == "Claim":
                     amap.add_claim(ev)
                     director.handle(ev, ev.ts)

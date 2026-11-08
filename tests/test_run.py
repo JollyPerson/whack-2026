@@ -17,7 +17,7 @@ from app import config
 from app.brain import run as brain_run
 from app.brain.run import BleedGuard, EchoGuard, LateInterims, PauseSynth, _fill_times
 from app.bus import Bus
-from app.schemas import Claim, Control, Evidence, Pause, SessionStart, TTSState, Utterance, Verdict
+from app.schemas import Claim, Control, Evidence, Interjection, Pause, SessionStart, TTSState, Utterance, Verdict
 
 T0 = 1_762_532_400.0
 EVID = [Evidence(url="https://www.ons.gov.uk/x", title="ONS", quote="q")]
@@ -533,3 +533,30 @@ async def test_warmup_task_is_cancelled_with_the_brain(brain, monkeypatch):
     for _ in range(3):
         await asyncio.sleep(0)
     assert warm() == []
+
+
+async def test_crash_restore_applies_the_echo_and_bleed_guards(brain, monkeypatch):
+    """restore_from_history fed every final to the argument map: after a restart our own echoed lines and the
+    other mic's bleed copies became debate turns."""
+    from app.brain.argmap import ArgMap
+    seen, real = [], ArgMap.on_utterance
+    monkeypatch.setattr(ArgMap, "on_utterance", lambda self, u: (seen.append(u.id), real(self, u))[1])
+    h = brain
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    h.pub(U("B", "air pollution causes 40,000 early deaths a year in the UK", t - 3.8, t - .1, uid="u-B-bleed"))
+    h.pub(Interjection(id="i-1", text="Point of fact: the ONS says it is 4.1 percent.", kind="correction",
+                       claim_id="a1", target="A"), src="brain")
+    h.clock.t += 1
+    h.pub(TTSState(speaking=True))
+    h.clock.t += 3
+    h.pub(TTSState(speaking=False))
+    h.clock.t += 1
+    t = h.now()
+    h.pub(U("A", "the ONS says it is 4.1 percent", t - 1.5, t - .5, uid="u-A-echo"))
+    h.pub(U("B", "Diesel buses produce more nitrogen dioxide than cars do.", t - .4, t, uid="u-B-1"))
+    await h.start()
+    assert seen == ["u-A-1", "u-B-1"]
+
+
