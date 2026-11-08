@@ -1,9 +1,10 @@
-"""app/judge: the post-debate scorecard, Claude's verdict and its fallbacks. The LLM is a FakeLLM with canned answers
-(never the network)."""
+"""app/judge: the post-debate scorecard, Claude's verdict and its fallbacks, the summary files, the verdict dances and
+the wiring. The LLM is a FakeLLM with canned answers (never the network); files go to tmp dirs."""
 from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import time
 from pathlib import Path
 
@@ -11,10 +12,12 @@ import pytest
 
 from app import config
 from app.brain.llm import LLMError, LLMTimeout
-from app.bus import load_jsonl
-from app.judge import scorecard as sc, writer
-from app.schemas import (ArgMapSnapshot, BotLine, Claim, Evidence, Interjection, MapNode, SessionStart, SpeakerInfo,
-                         Utterance, Verdict)
+from app.bus import Bus, load_jsonl
+from app.judge import report, scorecard as sc, writer
+from app.judge import run as judge_run
+from app.judge.run import Judge, dances_for, music_for
+from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, DebateResult, Evidence, Interjection, MapNode,
+                         SessionStart, SpeakerInfo, Utterance, Verdict)
 
 ROOT = Path(__file__).resolve().parent.parent
 T0 = 1_762_600_000.0
@@ -83,6 +86,12 @@ def synthetic() -> list:
                            {"turn": 3, "side": "prop", "ignored": ["c3"], "final": False}]),     # still open
     ]
 
+
+def on_bus(events, bus=None) -> Bus:
+    bus = bus or Bus()
+    for e in events:
+        bus.publish(e)
+    return bus
 
 
 def answer(winner="prop", margin="clear", prop=7.0, opp=5.0, **kw) -> dict:
@@ -280,3 +289,217 @@ def test_make_judge_llm_uses_the_judge_model_on_brains_client(monkeypatch):
     assert writer.make_judge_llm().model == writer.DEFAULT_JUDGE_MODEL
     monkeypatch.setattr(writer, "make_llm", lambda: None)
     assert writer.make_judge_llm() is None
+
+
+# ----------------------------------------------------------------------------- dances and music
+@pytest.mark.parametrize("winner, mode, dances, music", [
+    ("prop", "winner", {"for": WIN, "against": LOSE}, {"for": True, "against": False}),
+    ("opp", "winner", {"for": LOSE, "against": WIN}, {"for": False, "against": True}),
+    ("draw", "winner", {"for": DRAW, "against": DRAW}, {"for": False, "against": False}),
+    ("prop", "none", {"for": WIN, "against": LOSE}, {"for": False, "against": False}),
+    ("opp", "none", {"for": LOSE, "against": WIN}, {"for": False, "against": False}),
+    ("draw", "none", {"for": DRAW, "against": DRAW}, {"for": False, "against": False}),
+    ("prop", "both", {"for": WIN, "against": LOSE}, {"for": True, "against": True}),
+    ("opp", "both", {"for": LOSE, "against": WIN}, {"for": True, "against": True}),
+    ("draw", "both", {"for": DRAW, "against": DRAW}, {"for": True, "against": True}),
+    ("opp", " Loud ", {"for": LOSE, "against": WIN}, {"for": False, "against": True}),   # unknown -> winner
+])
+def test_dances_and_music_per_bot(monkeypatch, winner, mode, dances, music):
+    monkeypatch.setattr(config, "JUDGE_MUSIC", mode)
+    assert dances_for(winner) == dances and music_for(winner) == music
+
+
+# ----------------------------------------------------------------------------- the module
+async def wait_for(pred, timeout=3.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if (got := pred()):
+            return got
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out")
+
+
+def results(where) -> list[DebateResult]:
+    """DebateResults a Judge published (judge.sent outlives the bus history's SessionStart reset), or on a bus."""
+    return [e for e in (where.sent if isinstance(where, Judge) else where.history) if e.event == "DebateResult"]
+
+
+def statuses(where) -> list[str]:
+    return [e.detail for e in (where.sent if isinstance(where, Judge) else where.history)
+            if e.event == "ModuleStatus" and e.module == "judge"]
+
+
+def make_judge(bus: Bus, llm=None, **kw) -> Judge:
+    sent: list = []
+    judge = Judge(lambda ev: sent.append(bus.publish(ev, src="judge")), llm, history=lambda: bus.history, **kw)
+    judge.sent = sent
+    return judge
+
+
+FINAL = Control(flag="screen", value="final")
+
+
+async def test_the_final_screen_publishes_one_debate_result_and_writes_the_summary(tmp_path):
+    bus = Bus(tmp_path / "20261108-120000-live.jsonl")
+    llm = FakeLLM()
+    judge = make_judge(bus, llm, log_path=bus.log_path)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(Control(flag="screen", value="live")))             # not the final screen
+    assert judge.task is None
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert (r.src, r.winner, r.margin, r.via, r.dance_s) == ("judge", "prop", "clear", "llm", 30.0)
+    assert r.headline == "The Proposition wins on the evidence." and r.scores["opp"]["overall"] == 5.0
+    assert r.dances == {"for": WIN, "against": LOSE} and r.music == {"for": True, "against": False}
+    md = Path(r.report)
+    assert md == tmp_path / "summaries" / "20261108-120000-live-summary.md"   # outside the repo: absolute
+    text = md.read_text()
+    for head in ("# Debate summary: This house would raise the minimum wage", "## Verdict", "**The Proposition wins**",
+                 "## Speakers", "Alice Archer", "## Scorecard", "## Scores by criterion", "Argument quality",
+                 "## Bias", "## Factuality", "## Other observations", "## Reasoning", "## Fact checks",
+                 "### Sourced", "### AI knowledge, unsourced", "## System balance", "## Verdict dances", WIN,
+                 "with its music", "silent", "automated assessment"):
+        assert head in text, head
+    sourced, ai = text.split("### Sourced")[1].split("### AI knowledge, unsourced")
+    assert "6%? Last I checked" in ai and "6%? Last I checked" not in sourced
+    assert "[Labour market overview](https://www.ons.gov.uk/x)" in sourced
+    data = json.loads(md.with_suffix(".json").read_text())
+    assert data["verdict"]["winner"] == "prop" and data["verdict"]["via"] == "llm"
+    assert data["scorecard"]["formula"]["winner"] == "prop" and data["music"] == {"for": True, "against": False}
+    assert len(data["fact_checks"]["sourced"]) == 4 and data["dances"]["against"] == LOSE
+    assert any("prop wins (clear) via llm" in d for d in statuses(judge))
+
+
+async def test_judged_once_per_session_and_again_only_after_new_speech(tmp_path):
+    bus = Bus()
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(FINAL))
+    first = (await wait_for(lambda: results(judge)))[0]
+    await wait_for(lambda: judge.task.done())
+    judge.handle(bus.publish(FINAL))                                              # nothing new was said
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 1 and len(llm.calls) == 1
+    judge.handle(bus.publish(Claim(id="c9", speaker="B", side="opp", text="late claim")))   # not speech
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 1
+    judge.handle(bus.publish(U("u-B-0003", "B", "One more thing about wages", 40, 44)))
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: len(results(judge)) == 2)
+    assert results(judge)[1].report == first.report and len(llm.calls) == 2       # re-judged: the same file
+    assert "One more thing about wages" in llm.calls[1][1]
+    judge.handle(bus.publish(SessionStart(motion="Second debate", speakers=SPEAKERS)))
+    judge.handle(bus.publish(FINAL))                                              # nobody spoke yet
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 2 and "nothing to judge" in statuses(judge)[-1]
+    judge.handle(bus.publish(U("u-A-0001", "A", "Second debate opening", 1, 4)))
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: len(results(judge)) == 3)
+    third = Path(results(judge)[2].report)
+    assert third != Path(first.report) and third.name.endswith("-2-summary.md")   # never overwrites the first
+    assert "Second debate" in third.read_text() and "minimum wage" in Path(first.report).read_text()
+
+
+async def test_a_click_while_judging_is_ignored_and_a_new_session_cancels_the_judgement():
+    bus = Bus()
+    llm = FakeLLM(delay=0.2)
+    judge = make_judge(bus, llm)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(FINAL))
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: results(judge))
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 1 and len(llm.calls) == 1
+    judge.handle(bus.publish(U("u-B-0009", "B", "And another point", 50, 52)))
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.05)
+    task = judge.task
+    judge.handle(bus.publish(SessionStart(motion="Next", speakers=SPEAKERS)))     # mid-judgement
+    await asyncio.sleep(0.3)
+    assert task.cancelled() and len(results(judge)) == 1
+
+
+async def test_the_record_survives_the_history_cap():
+    """A final Utterance trimmed from the bus history is still judged: the module kept its own copy."""
+    bus = Bus()
+    judge = make_judge(bus)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    bus.history = [e for e in bus.history if getattr(e, "id", "") != "u-A-0001"]
+    rec = sc.collect(judge.events())
+    assert [u.id for u in rec.utterances] == ["u-A-0001", "u-B-0001", "u-A-0002", "u-B-0002"]
+    assert rec.utterances[2].text == "Wages rose by six percent last year"
+
+
+async def test_after_a_restart_a_judged_session_is_not_judged_again(tmp_path):
+    bus = on_bus(synthetic())
+    prior = tmp_path / "summaries" / "run-summary.md"
+    bus.publish(DebateResult(winner="prop", margin="clear", report=str(prior), src="judge"))
+    judge = make_judge(bus)
+    judge.restore(list(bus.history))
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.05)
+    assert results(judge) == []
+    judge.handle(bus.publish(U("u-A-0003", "A", "A closing line", 60, 62)))
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert (r.via, Path(r.report)) == ("formula", prior) and prior.exists()      # no LLM: the formula; same file
+
+
+async def test_the_module_on_the_bus(monkeypatch, tmp_path):
+    monkeypatch.setattr(writer, "make_judge_llm", lambda: FakeLLM(answer("opp", "decisive", prop=3.0, opp=8.0,
+                                                                         headline="The Opposition wins.")))
+    bus = Bus()
+    task = asyncio.create_task(judge_run.run(bus))
+    try:
+        await wait_for(lambda: any("fake:judge" in d for d in statuses(bus)))
+        on_bus(synthetic(), bus)
+        bus.publish(Control(flag="screen", value="Final"), src="dashboard")
+        r = (await wait_for(lambda: results(bus)))[0]
+        assert (r.winner, r.margin, r.via) == ("opp", "decisive", "llm")
+        assert r.dances == {"for": LOSE, "against": WIN} and r.music == {"for": False, "against": True}
+        assert Path(r.report).exists() and not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_report_paths_are_relative_to_the_repo_inside_it(monkeypatch):
+    monkeypatch.setattr(config, "JUDGE_DIR", "logs/summaries")
+    assert report.summary_dir() == ROOT / "logs" / "summaries"
+    assert report.display(ROOT / "logs" / "summaries" / "x-summary.md") == "logs/summaries/x-summary.md"
+
+
+def test_main_starts_the_judge_only_with_judge_real(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import main as mainmod
+    assert mainmod.resolve("judge", "real") == "app.judge.run:run"
+    assert "judge" not in {r for p in mainmod.PROFILES.values() for r in p}
+    monkeypatch.setattr(config, "LLM_PROVIDER", "heuristic")                    # never the network
+    for k in ("EARS", "BRAIN", "EVIDENCE", "FACE"):
+        monkeypatch.setenv(k, "off")
+    monkeypatch.delenv("BOTS", raising=False)
+    monkeypatch.delenv("JUDGE", raising=False)
+    for env, started in ((None, False), ("real", True)):
+        if env:
+            monkeypatch.setenv("JUDGE", env)
+        with TestClient(mainmod.build_app("mock", log_dir=tmp_path)) as c:
+            assert ("judge" in c.get("/health").json()["modules"]) is started
+            if started:
+                for _ in range(100):
+                    hist = c.get("/debug/history").json()
+                    if any(e["event"] == "ModuleStatus" and e["module"] == "judge" and "llm: none" in e["detail"]
+                           for e in hist):
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("the judge never came up")
+            else:
+                hist = c.get("/debug/history").json()
+                assert not any(e["event"] == "ModuleStatus" and e["module"] == "judge" for e in hist)
