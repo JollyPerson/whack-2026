@@ -807,3 +807,15 @@ def test_debug_history_n_zero_or_negative_is_empty(make_client):
         c.post("/publish", json={"event": "Pause", "speaker": f"p{i}"})
     assert len(c.get("/debug/history?n=2").json()) == 2
     assert c.get("/debug/history?n=0").json() == [] and c.get("/debug/history?n=-5").json() == []
+
+
+def test_run_sh_survives_a_dotenv_value_bash_cannot_parse(tmp_path):
+    """run.sh sourced .env as bash under `set -eu`: `MOTION=This house ...` ran `house` and aborted startup."""
+    d = _fake_repo(tmp_path)
+    (d / ".venv" / "bin" / "python").write_text('#!/bin/sh\nif [ "$1" = "-c" ]; then exit 0; fi\n'
+                                                'echo "PYTHON $* GOOD=$GOOD"\n')
+    (d / ".env").write_text("MOTION=This house would ban cars\nHASH=$2a$12$abc\nGOOD=1\n")
+    r = subprocess.run(["bash", str(d / "run.sh"), "mock"], capture_output=True, text=True, timeout=20,
+                       env={**os.environ, "SKIP_PIP": "1", "GOOD": "from-shell"})
+    assert r.returncode == 0, r.stderr
+    assert "PYTHON -m app.main mock GOOD=1" in r.stdout                        # .env still wins over the shell

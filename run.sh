@@ -22,8 +22,13 @@ if [ -z "${SKIP_PIP:-}" ] && [ "$(cat .venv/.deps 2>/dev/null)" != "$SUM" ]; the
     exit 1
   fi
 fi
-set -a
-if [ -f .env ]; then . ./.env; fi
-set +a
+# .env is sourced so it still wins over the shell's exports, but never fatally: a line bash can't run (a value with
+# spaces, a `$`) only prints an error here, and app/config.py loads the same file with python-dotenv, which fills
+# in whatever bash skipped.
+if [ -f .env ]; then
+  set -a +eu
+  . ./.env
+  set +a -eu
+fi
 mkdir -p logs cache
 exec .venv/bin/python -m app.main "$@"
