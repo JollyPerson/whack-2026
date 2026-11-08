@@ -276,6 +276,7 @@ class SessionStart(Event):
     motion: str = ""
     speakers: dict[Speaker, SpeakerInfo] = Field(default_factory=dict)
     mode: str = "live"             # live | drive | replay | mock
+    brief: str = ""                # debate brief typed by the organiser: steers pre-research, shown on the stage
 
 
 class ResearchProgress(Event):
@@ -284,6 +285,33 @@ class ResearchProgress(Event):
     done: int = 0
     total: int = 0
     detail: str = ""
+    motion: str = ""               # which Motion this is for (a ResearchRequest can run before its SessionStart)
+
+
+class ResearchRequest(Event):
+    """Research a Motion before the debate starts, without resetting anything. Evidence answers with
+    ResearchProgress (motion set) and a FactSheet; the later SessionStart with the same motion + brief loads it."""
+    event: Literal["ResearchRequest"] = "ResearchRequest"
+    motion: str
+    brief: str = ""
+
+
+class Fact(_Model):
+    statement: str                 # one self-contained, checkable sentence
+    side: str = "both"             # prop | opp | both: whose case it helps
+    quote: str = ""                # verbatim from the source (code-checked)
+    url: str = ""
+    title: str = ""
+    number: Optional[float] = None
+    unit: str = ""
+
+
+class FactSheet(Event):
+    """Key facts pulled out of a Motion's pre-research, each with a verbatim, code-checked quote."""
+    event: Literal["FactSheet"] = "FactSheet"
+    motion: str = ""
+    brief: str = ""
+    facts: list[Fact] = Field(default_factory=list)
 
 
 class MapNode(_Model):
@@ -395,7 +423,7 @@ class TTSState(Event):
     interjection_id: Optional[str] = None
 
 
-KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress,
+KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress, ResearchRequest, FactSheet,
          ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState)
 EVENT_TYPES = {m.model_fields["event"].default: m for m in KNOWN}
 

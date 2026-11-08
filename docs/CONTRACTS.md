@@ -38,7 +38,9 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 
 | Event | Producer → consumers | Required fields | Useful optional fields |
 |---|---|---|---|
-| `SessionStart` | dashboard/CLI → all | — | `motion`, `speakers{id:{name, side: prop\|opp}}`, `mode` |
+| `SessionStart` | dashboard/CLI → all | — | `motion`, `speakers{id:{name, side: prop\|opp}}`, `mode`, `brief` (organiser's debate brief: steers pre-research, shown on the stage) |
+| `ResearchRequest` | stage setup screen → C | `motion` | `brief`. Researches before the debate without resetting anything; the later `SessionStart` with the same motion + brief loads the result |
+| `FactSheet` | C → D | — | `motion`, `brief`, `facts[{statement, side: prop\|opp\|both, quote, url, title, number, unit}]`, each quote checked verbatim by code. Re-sent on `SessionStart`; never trimmed from the snapshot |
 | `Utterance` | A → B, D | `speaker`, `text` | `id` (interims share their final's id), `t_start`, `t_end`, `final` (default true; `is_final` accepted) |
 | `Pause` | A → B (Director) | `speaker` | `t` (end-of-turn detected) |
 | `Claim` | B → C, D | `id`, `speaker`, `text` | `utterance_id`, `type`, `checkable`, `links[{claim_id, relation}]`, `side`, `importance` 0–1, `topic`, `t_end`, `marks` |
@@ -48,7 +50,7 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 | `ArgMapSnapshot` | B → D | — | full map: `nodes`, `edges`, `score{prop,opp}`, `call`, `turns`, `nonresponsive` |
 | `DirectorDecision` | B → D (reasoning panel), log | — | `key`, `kind`, `action` (candidate\|held\|fired\|skipped\|dropped), `reason`, `score` |
 | `DirectorStatus` | B → D (status chip), ~1 Hz | — | `floor_open`, `tts_busy`, `cooldown_left_s`, `muted`, `aggr`, `pending`, `pressure` |
-| `ResearchProgress` | C → D | — | `stage`, `done`, `total`, `detail` |
+| `ResearchProgress` | C → D | — | `stage` (searching\|embedding\|facts\|ready\|error), `done`, `total`, `detail`, `motion` |
 | `TTSState` | D (the one `?audio=1` tab) → A, B | `speaking` | `interjection_id` |
 | `Control` | dashboard/CLI → all | `flag` | `value` — flags: `tts`, `director`, `web_fallback`, `interims`, `agent_speaking`, `mute`, `force_next`, `veto`, `aggr` (1–5), `time` |
 | `ModuleStatus` | supervisor/modules → D | `module` | `state` (up\|degraded\|down), `detail` (a module that returned normally, or one served only by routes.py/static, stays `up`) |

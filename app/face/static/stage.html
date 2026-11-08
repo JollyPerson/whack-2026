@@ -11,8 +11,11 @@
 </head>
 <body>
 <header>
-  <p class="eyebrow">Debate Referee <span id="conn" class="dot" title="websocket"></span> <a href="/">dashboard</a></p>
+  <p class="eyebrow">Debate Referee <span id="conn" class="dot" title="websocket"></span>
+    <span id="research-chip"></span> <a href="/">dashboard</a>
+    <button type="button" id="open-setup" class="link">New debate</button></p>
   <h1 id="motion">Waiting for a motion</h1>
+  <p id="brief" class="brief" hidden title="Click to expand"></p>
 </header>
 
 <main>
@@ -40,6 +43,34 @@
 </main>
 
 <footer id="cast"></footer>
+
+<div id="setup" class="setup" hidden>
+  <form id="setup-form" autocomplete="off">
+    <h2>Set up the debate</h2>
+    <p class="hint">Pick or type a motion and add a brief. Researching first builds the evidence index and a sheet of
+      key facts the referee checks claims against.</p>
+    <label class="field">Motion
+      <input id="s-motion" placeholder="This house would…" required>
+    </label>
+    <div id="s-picks" class="picks"></div>
+    <label class="field">Brief <small>optional: context, scope, key terms, what each side is likely to argue</small>
+      <textarea id="s-brief" rows="5" placeholder="e.g. UK focus. Proposition will lean on air-quality deaths and the Ghent and Oslo schemes; opposition on high-street footfall, disabled access and rural commuters."></textarea>
+    </label>
+    <div class="names">
+      <label class="field prop">Proposition <small>channel A</small><input id="s-prop" value="Proposition"></label>
+      <label class="field opp">Opposition <small>channel B</small><input id="s-opp" value="Opposition"></label>
+    </div>
+    <div id="s-research" class="research-box" hidden>
+      <p id="s-status"></p>
+      <div class="bar"><div id="s-bar"></div></div>
+    </div>
+    <div class="row">
+      <button type="button" id="s-go-research">Research this debate</button>
+      <button type="submit" id="s-start" class="primary">Start debate</button>
+      <button type="button" id="s-close">Close</button>
+    </div>
+  </form>
+</div>
 <script src="/static/stage-cast.js"></script>
 <script src="/static/stage.js"></script>
 </body>
