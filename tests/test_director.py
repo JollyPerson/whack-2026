@@ -148,6 +148,18 @@ def test_06_low_conf_skipped():
     assert fired(o) == [] and ("correction:c1", "skipped", "low_conf") in logs(o)
 
 
+def test_06b_evidence_capped_verdict_never_spoken_at_any_aggr():
+    """C caps a verdict at 0.74 to keep it off air; aggr 4-5 lower min_conf below that, so the note itself decides."""
+    for aggr in (3, 5):
+        ev = talk("A", 0, 7) + [(6, C("c1", "A", 5)), (7, V("c1", "contradicted", .74, guard_notes=["capped"])),
+                                (8, P("A", 8))]
+        _, o = run(ev, Director(aggr=aggr))
+        assert fired(o) == [] and ("correction:c1", "skipped", "capped") in logs(o)
+    _, o = run(talk("A", 0, 7) + [(6, C("c1", "A", 5)), (7, V("c1", "contradicted", .74)), (8, P("A", 8))],
+               Director(aggr=5))
+    assert fired(o) == [(8, "correction", "A", "c1")]      # the same 0.74 without the note: aggr 5 voices it
+
+
 def test_07_cooldown_holds_then_fires_after_gap():
     ev = (talk("A", 0, 5) + [(4, C("c1", "A", 3)), (5, V("c1", "contradicted", .9)), (6, P("A", 6))]
           + talk("B", 7, 21) + [(20, C("c2", "B", 19)), (21, V("c2", "contradicted", .9)), (22, P("B", 22))]

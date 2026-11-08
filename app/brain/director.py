@@ -279,6 +279,8 @@ def _on_verdict(st: State, v: Verdict, out: list, now: float) -> None:
         return
     elif not cl.checkable:
         why = "not_checkable"
+    elif "capped" in (getattr(v, "guard_notes", None) or ()):
+        why = "capped"          # C's guards kept it off air: dashboard only, at every aggressiveness (aggr 4-5 go < .74)
     elif conf < (c.confirm_min_conf if kind == "confirm" else c.min_conf):
         why = "low_conf"
     elif not v.evidence:

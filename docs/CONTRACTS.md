@@ -45,7 +45,7 @@ The bus fills in `seq` (order), `ts` (server time, if you didn't send one) and `
 | `Utterance` | A → B, D | `speaker`, `text` | `id` (interims share their final's id), `t_start`, `t_end`, `final` (default true; `is_final` accepted) |
 | `Pause` | A → B (Director) | `speaker` | `t` (end-of-turn detected) |
 | `Claim` | B → C, D | `id`, `speaker`, `text` | `utterance_id`, `type`, `checkable`, `links[{claim_id, relation}]`, `side`, `importance` 0–1, `topic`, `t_end`, `marks` |
-| `Verdict` | C → B, D | `claim_id` | `label` (supported\|contradicted\|missing_context\|unverifiable), `confidence` 0–1, `evidence[{url,title,quote}]`, `explanation`, `latency_ms`, `via`, `short_fact`, `numeric{claimed,actual,unit}`, `marks` |
+| `Verdict` | C → B, D | `claim_id` | `label` (supported\|contradicted\|missing_context\|unverifiable), `confidence` 0–1, `evidence[{url,title,quote}]`, `explanation`, `latency_ms`, `via`, `short_fact`, `numeric{claimed,actual,unit}`, `marks`, `guard_notes[]` (`capped` = dashboard only: the Director never voices it) |
 | `SourceCard` | C → D | `claim_id`, `url` | `title`, `snippet` |
 | `Interjection` | B → D (TTS) | `id`, `text` | `priority`, `claim_id`, `kind`, `target`, `evidence[0]` (show while speaking) |
 | `ArgMapSnapshot` | B → D | — | full map: `nodes`, `edges`, `score{prop,opp}`, `call`, `turns`, `nonresponsive` |
