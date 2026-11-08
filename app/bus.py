@@ -159,6 +159,7 @@ class Bus:
 # ----------------------------------------------------------------------------- replayer
 TIME_FIELDS = ("ts", "t", "t_start", "t_end")
 MAX_GAP_S = 5.0              # replayed silences longer than this are cut to this (setup time, idle minutes)
+MAX_SPEECH_S = 120.0         # an own start time further before ts than this is another clock: ignored
 REPLAY_SKIP = {"ModuleStatus"}   # full replay: module health is about THIS process, not the recorded one
 
 
@@ -175,17 +176,32 @@ def load_jsonl(path: Path) -> list[Event]:
 
 
 def last_session(events: list[Event]) -> list[Event]:
-    """Only the events from the last SessionStart on (rehearsals earlier in the same log are dropped)."""
+    """Only the last session that has speech in it (rehearsals earlier in the same log are dropped, and so is a
+    trailing New debate click nobody spoke after). No speech in any session: from the last SessionStart on."""
     starts = [i for i, e in enumerate(events) if e.event == "SessionStart"]
-    return events[starts[-1]:] if starts else events
+    if not starts:
+        return events
+    said = [i for i, e in enumerate(events) if e.event == "Utterance"]
+    first = ([i for i in starts if said and i < said[-1]] or starts)[-1]
+    return events[first:next((i for i in starts if i > first), len(events))]
 
 
-def gap_offsets(times: list[float], max_gap: float) -> list[float]:
-    """Per (sorted) time: seconds of idle cut before it, so no gap exceeds max_gap (0 = keep every gap)."""
+def _begin(ev: Event) -> float:
+    """When the event's own content started: a final Utterance arrives at the END of its speech, so its t_start
+    is earlier than ts. Everything else (and 0 = unknown, or a t_start on another clock): ts."""
+    v = getattr(ev, "t_start", None)
+    return v if isinstance(v, (int, float)) and v and ev.ts - MAX_SPEECH_S <= v < ev.ts else ev.ts
+
+
+def gap_offsets(times: list[float], max_gap: float, begins: Optional[list[float]] = None) -> list[float]:
+    """Per (sorted) time: seconds of idle cut before it, so no gap exceeds max_gap (0 = keep every gap).
+    begins[i] <= times[i] is when event i's own content started: its gap runs from the previous time to there,
+    so the speech before a final is never cut as if it were silence."""
     out, off = [], 0.0
-    for prev, t in zip([times[0]] + times, times) if times else ():
-        if max_gap and t - prev > max_gap:
-            off += t - prev - max_gap
+    for i, t in enumerate(times):
+        gap = (begins[i] if begins else t) - times[i - 1] if i else 0.0
+        if max_gap and gap > max_gap:
+            off += gap - max_gap
         out.append(off)
     return out
 
@@ -216,7 +232,7 @@ async def replay(bus: Bus, path: Path, speed: float = 1.0, only: Iterable[str] =
             log.warning("replay: nothing to replay in %s", path)
             return n
         t0, w0 = evs[0].ts, time.time()
-        for ev, off in zip(evs, gap_offsets([e.ts for e in evs], max_gap)):
+        for ev, off in zip(evs, gap_offsets([e.ts for e in evs], max_gap, [_begin(e) for e in evs])):
             def shift(t: float, off: float = off) -> float:
                 return w0 + (t - t0 - off) / speed
 
