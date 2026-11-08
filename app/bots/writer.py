@@ -65,8 +65,8 @@ correction: if likely_false, a phrase of at most 10 words that completes "Last I
 there is one (e.g. "it was nearer 4%"); otherwise "".
 context: if misleading, a phrase of at most 10 words that completes "True, but ...", naming the catch (e.g. \
 "that's against a modelled baseline"); otherwise "".
-line: one line of at most 12 words addressed directly to the speaker ("you"), dry and a little humble; \
-otherwise "".
+line: if likely_false, misleading or surprising_true, one line of at most 12 words addressed directly to the \
+speaker ("you"), dry and a little humble; otherwise "".
 - likely_false: question the claim with what you believe is right ("6%? Last I checked it was nearer 4%.").
 - misleading: grant the figure, then name the catch ("True, but that's against a modelled baseline.").
 - surprising_true: concede it, grudgingly, with no figures of your own ("Annoyingly, that one checks out.").

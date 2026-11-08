@@ -79,7 +79,6 @@ referee's lines never reach a bot's channel, and bot lines never reach the refer
 
 The dashboard shows a **For / Against strip** above the panels with each bot's latest line, in its side's colour. An
 unsourced `challenge` or `concede` (Claude's own knowledge) is tagged **AI knowledge**, and a sourced `rebut` names
-its source. The
-strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown on the final
-screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(flag="bots")`: off stops new lines and clears the
-bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
+its source. The strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown
+on the final screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(flag="bots")`: off stops new lines
+and clears the bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
