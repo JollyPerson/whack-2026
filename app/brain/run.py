@@ -2,6 +2,7 @@
 
 Consumes: SessionStart, Utterance, Pause, Claim, Verdict, Control, TTSState
 Produces: Claim, ArgMapSnapshot, Interjection, DirectorDecision, DirectorStatus, ModuleStatus(brain stats),
+          Consistency (after each turn closes: consistency.py), DebateSummary (on Control screen=final or summary),
           Pause (synthetic, only while A's VAD isn't sending Pauses; src="brain:pause_synth")
 
 Flexible on purpose:
@@ -30,7 +31,9 @@ from typing import Iterable, Iterator
 from app import config
 from app.brain.argmap import ArgMap
 from app.brain.claims import ClaimExtractor
+from app.brain.consistency import ConsistencyChecker, make_consistency_llm, make_summary_llm
 from app.brain.director import Director, truthy
+from app.brain.llm import usage_line
 from app.schemas import Claim, Event, Interjection, ModuleStatus, Pause, Utterance
 
 log = logging.getLogger("brain")
@@ -244,6 +247,7 @@ async def run(bus) -> None:
         if isinstance(ev, Interjection):
             ev.marks.setdefault("interject", time.time())
             echo.spoke(ev.text, time.time())
+            checker.on_interjection(ev)
         return bus.publish(ev, src="brain")
 
     def emit(evs: Iterable[Event]) -> None:
@@ -251,12 +255,34 @@ async def run(bus) -> None:
             publish(e)
 
     extractor = ClaimExtractor(amap, publish, llm)
+    consistency_llm, summary_llm = make_consistency_llm(llm), make_summary_llm(llm)
+    checker = ConsistencyChecker(amap, publish, consistency_llm)
+    llms = {"claims": llm, "consistency": consistency_llm, "summary": summary_llm}
     inflight: set[asyncio.Task] = set()               # extraction + warmup: cancelled on SessionStart and on exit
     log.info("brain up: llm=%s", getattr(llm, "name", None) or "heuristic")
 
     def drain(now: float) -> None:
         for n in amap.drain_notices():
             emit(director.notice(n, now))
+
+    async def _check(idx: int) -> None:
+        try:
+            await checker.check_turn(idx)
+            drain(time.time())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("consistency check failed for turn %s", idx)
+
+    async def _summary() -> None:
+        try:
+            s = await checker.summary(time.time(), summary_llm)
+            drain(time.time())
+            publish(s)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("debate summary failed")
 
     async def _extract(u: Utterance) -> None:
         try:
@@ -293,6 +319,7 @@ async def run(bus) -> None:
                 if ev.event == "SessionStart":
                     amap.reset(ev)
                     director.reset(ev)
+                    checker.reset()
                 elif ev.event == "Utterance" and ev.final:   # the live ingress guards, in the live order
                     heard = echo.classify(ev, ev.ts)         # (bleed also remembers a floor-only final)
                     if heard != "echo" and not bleed.is_bleed(ev) and heard == "speech":
@@ -306,6 +333,10 @@ async def run(bus) -> None:
                 elif ev.event == "Interjection" and ev.src.startswith("brain"):
                     director.restore_fired(ev)
                     echo.spoke(ev.text, ev.ts)
+                    checker.on_interjection(ev)
+                elif ev.event == "Consistency":
+                    checker.apply(ev)                        # findings are never paid for twice
+                    amap.drain_notices()                     # ...nor said twice
                 elif ev.event in ("Control", "TTSState"):
                     on_tts(ev, ev.ts)
                     director.handle(ev, ev.ts)
@@ -315,6 +346,7 @@ async def run(bus) -> None:
             except Exception:
                 log.exception("restore skipped %s", ev.event)
         amap.drain_notices()
+        checker.restored()
         if n:
             log.info("brain restored %d events from history", n)
 
@@ -337,6 +369,10 @@ async def run(bus) -> None:
                     bus.publish(p, src="brain:pause_synth")   # comes back through the subscription
             with guarded("tick flush"):
                 start_extract(extractor.flush_due(now))
+            with guarded("tick consistency"):
+                if config.CONSISTENCY:
+                    for idx in checker.due(now):
+                        spawn(_check(idx))
             with guarded("tick director"):
                 emit(director.tick(now))
             with guarded("tick snapshot"):
@@ -358,6 +394,13 @@ async def run(bus) -> None:
                     publish(ModuleStatus(module="brain", state="degraded" if degraded else "up",
                                          detail=f"llm={s.get('llm', '?')} p50={s.get('p50_ms') or '-'}ms "
                                                 f"fallback {fb}/{calls} {s.get('by_cause', {})}"))
+                    cs = checker.stats
+                    publish(ModuleStatus(module="consistency", state="up" if config.CONSISTENCY else "down",
+                                         detail=f"llm={getattr(consistency_llm, 'name', None) or 'heuristic'} "
+                                                f"{cs['calls']} calls, {cs['findings']} findings, "
+                                                f"{cs['skipped_no_candidates']} turns skipped (no candidates), "
+                                                f"{cs['heuristic']} heuristic, {cs['dropped']} dropped by guards"))
+                    publish(ModuleStatus(module="usage:brain", state="up", detail=usage_line(llms)))
 
     restore_from_history(history)
     tick_task = asyncio.create_task(ticker())
@@ -372,7 +415,7 @@ async def run(bus) -> None:
                         t.cancel()
                     for m in (amap, director):
                         m.reset(ev)
-                    for m in (extractor, pauses, echo, bleed, late):
+                    for m in (extractor, pauses, echo, bleed, late, checker):
                         m.reset()
                     spawn(extractor.warmup(ev.motion))
                 elif name == "Utterance":
@@ -402,10 +445,13 @@ async def run(bus) -> None:
                 elif name in ("Control", "TTSState"):
                     on_tts(ev, now)
                     emit(director.handle(ev, now))
+                    if name == "Control" and ((ev.flag == "screen" and ev.value == "final") or ev.flag == "summary"):
+                        spawn(_summary())                      # cached per map version: a second press is free
                 drain(now)
             except Exception:
                 log.exception("brain failed on %s", ev.event)
     finally:
+        log.warning("brain LLM usage: %s", usage_line(llms))
         tick_task.cancel()
         for t in list(inflight):
             t.cancel()

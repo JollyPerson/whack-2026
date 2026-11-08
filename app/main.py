@@ -52,7 +52,38 @@ PROFILES = {
     "dev-c":  dict(ears="mock", brain="mock", evidence="real", face="off"),
     "dev-d":  dict(ears="mock", brain="mock", evidence="mock", face="real"),
     "replay": dict(ears="off",  brain="off",  evidence="off",  face="real"),   # + --file
+    # The real pipeline on the cheap model: the consistency fixture replayed through Haiku everywhere.
+    "test-haiku": dict(ears="mock", brain="real", evidence="real", face="real"),
 }
+HAIKU = "claude-haiku-5-5"
+# Environment defaults a profile brings with it. Applied with setdefault: anything you set yourself (in the shell or
+# .env) wins. Printed at start-up so a test run says which models it is paying for.
+PROFILE_ENV = {
+    "test-haiku": {
+        "LLM_MODEL": HAIKU,                      # claim extraction (already the default)
+        "EVIDENCE_MODEL": HAIKU,                 # verdicts (default Opus)
+        "CONSISTENCY_MODEL": HAIKU,              # self-contradictions, concessions, the final summary
+        "SUMMARY_MODEL": HAIKU,
+        "PREPARE_DEADLINE_S": "60",              # shorter pre-research, fewer searches
+        "FIXTURE": "fixtures/consistency_debate.jsonl",
+        "CONSISTENCY_VOICE": "1",                # let the referee say the consistency lines, to hear them
+    },
+}
+
+
+def apply_profile_env(profile: str) -> dict:
+    """setdefault the profile's env and mirror it onto app.config (already imported). Returns what was applied."""
+    from app import config
+    applied = {}
+    for k, v in PROFILE_ENV.get(profile, {}).items():
+        if k not in os.environ:
+            os.environ[k] = v
+            applied[k] = v
+        if hasattr(config, k):
+            cur = getattr(config, k)
+            setattr(config, k, type(cur)(os.environ[k]) if not isinstance(cur, bool) else
+                    os.environ[k].strip().lower() in config.TRUE_WORDS)
+    return applied
 
 
 KEYWORDS = ("real", "mock", "off", "external")
@@ -446,6 +477,10 @@ def main():
         p.error(f"--file {a.file}: {e.strerror or e}")
     if port_in_use(a.host, a.port):                  # before build_app re-points logs/latest.jsonl
         p.error(f"port {a.port} is already in use: is another ./run.sh running? Stop it or pass --port")
+    applied = apply_profile_env(a.profile)
+    if PROFILE_ENV.get(a.profile):
+        log.warning("profile %s: %s", a.profile, ", ".join(f"{k}={os.environ[k]}" for k in PROFILE_ENV[a.profile])
+                    + (f" (set by the profile: {', '.join(applied)})" if applied else ""))
     app = build_app(a.profile, file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 

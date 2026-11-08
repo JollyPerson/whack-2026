@@ -1,0 +1,23 @@
+{"event": "SessionStart", "motion": "This house would ban cars from city centres", "brief": "UK cities. Test debate with planted self-contradictions (prop on cost, opp on how shoppers travel), one real concession (opp on NHS savings), one partial concession (opp on short trips), one shared point (public transport investment) and one rhetorical 'even if' that is NOT a concession.", "speakers": {"A": {"name": "Priya", "side": "prop"}, "B": {"name": "Tom", "side": "opp"}}, "mode": "drive", "ts": 0.0}
+{"event": "Utterance", "id": "u-A-0001", "speaker": "A", "text": "Thank you. Air pollution causes around 40,000 early deaths a year in the UK.", "t_start": 0.5, "t_end": 5.82, "final": true, "ts": 6.62}
+{"event": "Utterance", "id": "u-A-0002", "speaker": "A", "text": "Most car trips into our city centres are under two miles.", "t_start": 6.22, "t_end": 10.4, "final": true, "ts": 11.2}
+{"event": "Utterance", "id": "u-A-0003", "speaker": "A", "text": "Banning cars from city centres would cost the taxpayer almost nothing to introduce.", "t_start": 10.8, "t_end": 15.74, "final": true, "ts": 16.54}
+{"event": "Pause", "speaker": "A", "t": 16.64, "ts": 16.64}
+{"event": "Utterance", "id": "u-B-0001", "speaker": "B", "text": "Nearly 70 percent of high street shoppers arrive by car.", "t_start": 18.14, "t_end": 21.94, "final": true, "ts": 22.74}
+{"event": "Utterance", "id": "u-B-0002", "speaker": "B", "text": "I'll grant that most car trips into city centres are short.", "t_start": 22.34, "t_end": 26.52, "final": true, "ts": 27.32}
+{"event": "Utterance", "id": "u-B-0003", "speaker": "B", "text": "Even if Ghent's footfall did rise after its car ban, Ghent is not London.", "t_start": 26.92, "t_end": 32.24, "final": true, "ts": 33.04}
+{"event": "Utterance", "id": "u-B-0004", "speaker": "B", "text": "Small shops would lose around a fifth of their trade.", "t_start": 32.64, "t_end": 36.44, "final": true, "ts": 37.24}
+{"event": "Pause", "speaker": "B", "t": 37.34, "ts": 37.34}
+{"event": "Utterance", "id": "u-A-0004", "speaker": "A", "text": "We need to invest far more in buses and trams.", "t_start": 38.84, "t_end": 42.64, "final": true, "ts": 43.44}
+{"event": "Utterance", "id": "u-A-0005", "speaker": "A", "text": "Oslo removed cars from its centre and pedestrian numbers rose by ten percent.", "t_start": 43.04, "t_end": 47.98, "final": true, "ts": 48.78}
+{"event": "Pause", "speaker": "A", "t": 48.88, "ts": 48.88}
+{"event": "Utterance", "id": "u-B-0005", "speaker": "B", "text": "We both agree public transport needs much more investment.", "t_start": 50.38, "t_end": 53.8, "final": true, "ts": 54.6}
+{"event": "Utterance", "id": "u-B-0006", "speaker": "B", "text": "But only about a third of shoppers drive into town anyway, most come by bus.", "t_start": 54.2, "t_end": 59.9, "final": true, "ts": 60.7}
+{"event": "Utterance", "id": "u-B-0007", "speaker": "B", "text": "Delivery vans would still need access, so congestion would barely change.", "t_start": 60.3, "t_end": 64.48, "final": true, "ts": 65.28}
+{"event": "Pause", "speaker": "B", "t": 65.38, "ts": 65.38}
+{"event": "Utterance", "id": "u-A-0006", "speaker": "A", "text": "Setting up the scheme would cost around two billion pounds, but it pays for itself.", "t_start": 66.88, "t_end": 72.58, "final": true, "ts": 73.38}
+{"event": "Utterance", "id": "u-A-0007", "speaker": "A", "text": "Cleaner air would save the NHS money within a decade.", "t_start": 72.98, "t_end": 76.78, "final": true, "ts": 77.58}
+{"event": "Pause", "speaker": "A", "t": 77.68, "ts": 77.68}
+{"event": "Utterance", "id": "u-B-0008", "speaker": "B", "text": "My opponent is right that cleaner air would save the NHS money.", "t_start": 79.18, "t_end": 83.74, "final": true, "ts": 84.54}
+{"event": "Utterance", "id": "u-B-0009", "speaker": "B", "text": "But disabled residents would lose door-to-door access to the centre.", "t_start": 84.14, "t_end": 87.94, "final": true, "ts": 88.74}
+{"event": "Pause", "speaker": "B", "t": 88.84, "ts": 88.84}

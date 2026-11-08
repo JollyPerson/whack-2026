@@ -321,6 +321,59 @@ class FactSheet(Event):
     facts: list[Fact] = Field(default_factory=list)
 
 
+CONSISTENCY_KINDS = ("self_contradiction", "concession", "agreement", "correction")
+
+
+class Consistency(Event):
+    """B's consistency checker: how a new claim stands against everything said earlier in the debate.
+    self_contradiction  the same side now says something incompatible with its own earlier claim
+    concession          one side accepts a point the other side made (claim_id concedes earlier_claim_id)
+    agreement           both sides independently hold the same position (common ground)
+    correction          a speaker changed their own figure after the referee flagged it: an update, not a U-turn
+    `now`/`then` are the two claims' words as said (code-checked against the claims)."""
+    event: Literal["Consistency"] = "Consistency"
+    id: str
+    kind: Literal["self_contradiction", "concession", "agreement", "correction"]
+    claim_id: str                  # the newer claim
+    earlier_claim_id: str          # the claim it contradicts / concedes / agrees with
+    side: Optional[str] = None     # side of the newer claim
+    speaker: Optional[str] = None
+    earlier_side: Optional[str] = None
+    now: str = ""
+    then: str = ""
+    explanation: str = ""          # one neutral sentence
+    confidence: Unit = 0.0
+    topic: str = ""
+
+
+class SummaryPoint(_Model):
+    statement: str
+    claim_ids: list[str] = Field(default_factory=list)
+
+
+class DisputedPoint(_Model):
+    issue: str                     # <= 8 words
+    prop: str = ""                 # Proposition's position
+    opp: str = ""                  # Opposition's position
+    evidence_leans: str = "even"   # prop | opp | even: which side the fact checks favour on this issue
+    claim_ids: list[str] = Field(default_factory=list)
+
+
+class DebateSummary(Event):
+    """End-of-debate summary for the final screen: common ground, open disputes and each side's U-turns.
+    `version` is the argument-map version it was made from (the brain only re-asks when the debate moved on)."""
+    event: Literal["DebateSummary"] = "DebateSummary"
+    motion: str = ""
+    version: int = 0
+    agreed: list[SummaryPoint] = Field(default_factory=list)
+    disputed: list[DisputedPoint] = Field(default_factory=list)
+    self_contradictions: dict[str, int] = Field(default_factory=dict)   # side -> count
+    concessions: dict[str, int] = Field(default_factory=dict)           # side -> points that side conceded
+    score: dict[str, float] = Field(default_factory=dict)               # side -> evidence score 0..1 (tilts the scales)
+    call: str = ""
+    source: str = "llm"            # llm | heuristic | mock
+
+
 class MapNode(_Model):
     claim_id: str
     speaker: Speaker
@@ -347,6 +400,7 @@ class Score(_Model):
     unverifiable: int = 0
     unanswered: int = 0
     conceded: int = 0
+    self_contradictions: int = 0   # this side's own U-turns (Consistency self_contradiction)
     score: float = 0.5
 
 
@@ -472,6 +526,7 @@ class DebateResult(Event):
 
 
 KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress, ResearchRequest, FactSheet,
+         Consistency, DebateSummary,
          ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState, BotLine, BotTalk, DebateResult)
 EVENT_TYPES = {m.model_fields["event"].default: m for m in KNOWN}
 

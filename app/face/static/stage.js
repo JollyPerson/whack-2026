@@ -37,6 +37,7 @@ function reset() {
     if (u.active) u.active.el.remove();
     u.queue = []; u.active = null; u.history = [];
   }
+  Centre.reset();
 }
 function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionStart said otherwise
   if (!(spk in S.sides)) S.sides[spk] = Object.keys(S.sides).length % 2 ? 'opp' : 'prop';
@@ -64,6 +65,7 @@ function apply(e, live) {
     case 'Utterance': sideOf(e.speaker); S.utts.set(e.id, e); break;
     case 'Claim': sideOf(e.speaker); S.claims.set(e.id, e); if (S.verdicts.has(e.id)) onVerdict(e.id, live); break;
     case 'Verdict': S.verdicts.set(e.claim_id, e); onVerdict(e.claim_id, live); break;
+    case 'Consistency': case 'DebateSummary': case 'Control': Centre.apply(e, live); break;
   }
 }
 
@@ -204,6 +206,7 @@ function draw() {
         + ` data-claim="${esc(id)}" title="${esc(c.text)}">${faceHtml(v.label)}<span>${esc(clip(c.text, 70))}</span></button>`;
     }).join(''));
   }
+  Centre.draw();
 }
 setInterval(() => { if (S) draw(); }, 2000);   // ages "checking…" between events
 
@@ -251,6 +254,7 @@ function drawSetup() {
   $('s-go-research').textContent = p && p.stage === 'ready' ? 'Research again' : 'Research this debate';
 }
 $('open-setup').onclick = openSetup;
+$('open-final').onclick = () => Centre.openFinal();
 $('s-close').onclick = closeSetup;
 $('s-motion').oninput = $('s-brief').oninput = drawSetup;
 $('s-go-research').onclick = () => {
@@ -279,7 +283,7 @@ document.addEventListener('click', ev => {   // a past check, or a demo motion o
   if (b) showNext(b.dataset.side, b.dataset.claim);
 });
 
-$('cast').innerHTML = ['supported', 'contradicted', 'missing_context'].map(k => {
+$('cast').innerHTML = ['supported', 'contradicted', 'missing_context', 'self_contradiction', 'concession'].map(k => {
   const w = castOf(k);
   return `<span class="who ${k}">${faceHtml(k)}<b>${esc(w.name)}</b> ${esc(w.role)}: “${esc(w.sign.toLowerCase())}”</span>`;
 }).join('');
@@ -305,6 +309,7 @@ function connect() {
         const last = ui[side].history[ui[side].history.length - 1];
         if (last) showNext(side, last, false);
       }
+      Centre.afterSnapshot(e.flags || {});
       if (!S.session && !setupOpen) openSetup();   // nothing running yet: start on the setup screen
     } else if (e.seq == null) {
       return;

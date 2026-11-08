@@ -157,6 +157,7 @@ class ArgMap:
         self._pending_verdicts: dict[str, Verdict] = {}
         self._held: Optional[Utterance] = None
         self._interrupted: dict[str, int] = {}        # held final's id -> idx of the turn it was said over
+        self.consistency: dict[str, Any] = {}         # Consistency id -> event (consistency.py's findings)
         self._now = 0.0
 
     def reset(self, session: Optional[SessionStart] = None) -> None:
@@ -270,6 +271,22 @@ class ArgMap:
         node.verdict, node.confidence = v.label, v.confidence
         self._clock(v.ts)
         self.version += 1
+
+    def add_consistency(self, k: Any) -> None:
+        """A Consistency finding. A concession becomes a cross-side "supports" link (so the conceded point gets
+        status conceded and the scoreboard counts it); a self-contradiction is counted on its side's scoreboard.
+        Every finding is also a notice for the Director (it decides whether to say anything)."""
+        if k.id in self.consistency or k.claim_id not in self.nodes or k.earlier_claim_id not in self.nodes:
+            return
+        self.consistency[k.id] = k
+        node = self.nodes[k.claim_id]
+        if k.kind == "concession" and (k.earlier_claim_id, "supports") not in set(_key(node.links())):
+            node.extra_links += self._clean_links(k.claim_id, [Link(claim_id=k.earlier_claim_id, relation="supports")])
+        self._clock(k.ts)
+        self._notices.append(Notice("consistency", node.claim.speaker, self._now, k.claim_id,
+                                    {"kind": k.kind, "earlier_claim_id": k.earlier_claim_id, "topic": k.topic,
+                                     "side": node.side, "confidence": k.confidence, "id": k.id}))
+        self._changed()
 
     def merge_repeat(self, claim_id: str, links: Iterable[Any]) -> None:
         node = self.nodes.get(claim_id)
@@ -486,6 +503,8 @@ class ArgMap:
             raw[side], rated[side] = (s + 0.5 * m + 1) / (s + c + m + 2), s + c + m
             score[side] = Score(**k, unanswered=sum(n.status == "unanswered" for n in mine),
                                 conceded=sum(n.status == "conceded" for n in mine), score=round(raw[side], 3),
+                                self_contradictions=sum(k.kind == "self_contradiction" and k.side == side
+                                                        for k in self.consistency.values()),
                                 rated=rated[side])
         if min(rated.values()) < 2:
             return score, "Not enough checked claims yet", None, 0.0
