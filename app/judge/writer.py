@@ -367,8 +367,8 @@ def from_llm(out: Any, model: str = "") -> Judgement:
         if scores[winner]["overall"] <= scores[OTHER[winner]]["overall"]:
             raise Invalid(f"winner {winner} is inconsistent with its own overall scores ({p:.1f} to {o:.1f})")
         if margin == "narrow" or band == "narrow":
-            why = "" if margin == "narrow" else f", but its own overalls differ by less than {DRAW_BELOW}"
-            note = (f"Claude called a {margin} {SIDE_LABEL[winner]} win ({p:.1f} to {o:.1f}){why}: a narrow margin "
+            but = "" if margin == "narrow" else f", but its own overalls differ by less than {DRAW_BELOW}"
+            note = (f"Claude called a {margin} {SIDE_LABEL[winner]} win ({p:.1f} to {o:.1f}){but}: a narrow margin "
                     f"is a draw.")
             winner, headline = "draw", draw_headline(p, o)
         elif margin != band:

@@ -313,6 +313,7 @@ async def test_the_margin_follows_claudes_own_overalls(winner, margin, prop, opp
     rec = sc.collect(synthetic())
     j = await writer.decide(FakeLLM(answer(winner, margin, prop=prop, opp=opp)), rec, sc.scorecard(rec))
     assert j.via == "llm" and (j.winner, j.margin) == got
+    assert j.why["prop"]["civility"] == "civility because reasons"                 # the justifications survive
     assert (j.note == "") == (winner == got[0] and (winner == "draw" or margin == got[1]))
     if got[0] == "draw" and winner != "draw":
         assert "less than 0.5" in j.note and j.headline == f"Too close to call: {prop:.1f} to {opp:.1f}. A draw."
