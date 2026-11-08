@@ -87,7 +87,8 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
 
 - Code first computes a fixed scorecard per side from the session's record: speaking time and words, claims, sourced
   verdicts, the bots' AI-knowledge flags, points left unanswered, non-responsive turns, and the referee's and bots'
-  interventions per side (to show whether the system itself was even-handed). From it come four 0-10 criteria and a
+  pressure per side (to show whether the system itself was even-handed; the referee's confirmations, bots conceding
+  a point and time calls are not pressure and are counted apart). From it come four 0-10 criteria and a
   formula overall: 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (`app/judge/scorecard.py`).
 - Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript and the fact checks, scores each side on six
   criteria (plus argument quality and civility), concludes on bias and factuality, picks the winner and writes

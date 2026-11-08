@@ -15,8 +15,12 @@ the argument map, else the side with fewer speakers so far, Prop first):
 - from the final ArgMapSnapshot: unanswered (the side's points the opponent left unanswered), conceded_to (the side's
   points the opponent conceded), answered / conceded / ignored (the opponent's points the side attacked, conceded or
   left unanswered), nonresponsive (the side's finished non-responsive turns)
-- interjections / bot_lines: the referee's and the side bots' interventions aimed at the side, by kind. With the
-  flagged claims per side they show whether the SYSTEM's interventions were balanced (scorecard()["system"])
+- interjections / bot_lines: the referee's and the side bots' interventions aimed at the side, by kind
+- pressure: those that put the side on the spot (is_pressure: the referee's correction, context, prompt and source
+  request; every bot line but a concession). Not pressure: the referee's confirmations and a bot conceding a point
+  (confirmations: in the side's favour; the Director voices confirms on purpose to balance its pressure) and time
+  calls (procedure). With the flagged claims per side, pressure shows whether the SYSTEM was even-handed
+  (scorecard()["system"], balance_text())
 
 Derived 0-10 criteria, Laplace-smoothed so a side with little on the record sits near the middle (S/C/M = supported,
 contradicted, missing_context; AI knowledge at half weight, AI_WEIGHT):
@@ -35,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 from app.brain.argmap import LOW_CONF, NO_CHECK, SIDE_LABEL, SIDES
-from app.brain.director import norm_side
+from app.brain.director import PRESSURE, norm_side
 from app.schemas import ArgMapSnapshot, BotLine, Claim, Event, Interjection, SessionStart, Utterance, Verdict
 
 WEIGHTS = {"factuality": 0.35, "evidence": 0.25, "responsiveness": 0.25, "balance": 0.15}
@@ -50,6 +54,8 @@ LABELS = ("supported", "contradicted", "missing_context", "unverifiable")
 OTHER = {"prop": "opp", "opp": "prop"}
 SECOND = {"for": "prop", "against": "opp"}    # the side each bot seconds
 AIMED_AT = {"for": "opp", "against": "prop"}  # each bot only ever addresses the opposing debater
+PRESSURE_KINDS = PRESSURE - {"time"}          # referee kinds that put a side on the spot (a time call is procedure)
+CONFIRM_KINDS = {"confirm", "concede"}        # the referee confirming a claim, a bot conceding one: in its favour
 
 
 @dataclass
@@ -150,12 +156,26 @@ def _side_blank(rec: Record, side: str) -> dict:
             "verdicts": {**dict.fromkeys(LABELS, 0), "with_source": 0, "low_conf": 0},
             "ai_flagged": 0, "ai_confirmed": 0,
             "unanswered": 0, "conceded_to": 0, "answered": 0, "conceded": 0, "ignored": 0, "nonresponsive": 0,
-            "interjections": {"total": 0}, "bot_lines": {"total": 0}}
+            "interjections": {"total": 0}, "bot_lines": {"total": 0}, "pressure": 0, "confirmations": 0}
 
 
 def _bump(d: dict, kind: str) -> None:
     d["total"] += 1
     d[kind] = d.get(kind, 0) + 1
+
+
+def is_pressure(ev: Any) -> bool:
+    """An intervention that puts the side it addresses on the spot. A bot line is, unless it concedes (or is banter,
+    which addresses nobody); a referee interjection only for PRESSURE_KINDS (not a confirmation or a time call)."""
+    if isinstance(ev, BotLine):
+        return ev.kind not in ("concede", "banter")
+    return ev.kind in PRESSURE_KINDS
+
+
+def _intervention(st: dict, key: str, ev: Any) -> None:
+    _bump(st[key], ev.kind)
+    st["pressure"] += is_pressure(ev)
+    st["confirmations"] += ev.kind in CONFIRM_KINDS
 
 
 def checkable(c: Claim) -> bool:
@@ -193,7 +213,7 @@ def scorecard(rec: Record) -> dict:
         if st is None:
             banter += 1
             continue
-        _bump(st["bot_lines"], b.kind)
+        _intervention(st, "bot_lines", b)
         if not b.sourced and b.kind == "challenge":
             st["ai_flagged"] += 1
         elif not b.sourced and b.kind == "concede":
@@ -204,7 +224,7 @@ def scorecard(rec: Record) -> dict:
         if st is None:
             room += 1
         else:
-            _bump(st["interjections"], i.kind)
+            _intervention(st, "interjections", i)
     snap = rec.snapshot
     for n in snap.nodes if snap is not None else []:
         side = norm_side(n.side) or rec.sides.get(n.speaker)
@@ -281,11 +301,12 @@ def flagged(st: dict) -> int:
 
 
 def system_balance(sides: dict, banter: int = 0, room: int = 0) -> dict:
-    """Were the referee's and the bots' interventions even? Counted per side next to the claims each side had
-    flagged: more interventions on the side with more flagged claims is fair, not bias."""
+    """Was the referee's and the bots' PRESSURE even? Counted per side next to the claims each side had flagged:
+    more pressure on the side with more flagged claims is fair, not bias. Confirmations (in a side's favour) and time
+    calls (procedure) are not pressure; confirmations are counted apart, time calls stay in the by-kind counts."""
     inter = {s: sides[s]["interjections"]["total"] for s in SIDES}
     bots = {s: sides[s]["bot_lines"]["total"] for s in SIDES}
-    total = {s: inter[s] + bots[s] for s in SIDES}
+    total = {s: sides[s]["pressure"] for s in SIDES}
     flags = {s: flagged(sides[s]) for s in SIDES}
     hi, lo = max(SIDES, key=lambda s: total[s]), min(SIDES, key=lambda s: total[s])
     even = total[hi] - total[lo] <= 1 or total[hi] <= 1.5 * total[lo]
@@ -297,7 +318,22 @@ def system_balance(sides: dict, banter: int = 0, room: int = 0) -> dict:
                 + ("in line with its flagged claims" if fair else "although it did not have more flagged claims")
                 + f" ({flags[hi]} to {flags[lo]})")
     return {"interjections": {**inter, "none": room}, "bot_lines": {**bots, "banter": banter},
-            "interventions": total, "flagged": flags, "even": even, "note": note}
+            "pressure": total, "confirmations": {s: sides[s]["confirmations"] for s in SIDES},
+            "time_calls": {s: sides[s]["interjections"].get("time", 0) for s in SIDES},
+            "flagged": flags, "even": even, "note": note}
+
+
+def balance_text(system: dict) -> str:
+    """The system's balance in a sentence or two, for the report and the formula's bias conclusion."""
+    out = (f"The referee's and the side bots' pressure (corrections, prompts, challenges and the like) was "
+           f"{system['note']}.")
+    conf, times = system["confirmations"], system["time_calls"]
+    if any(conf.values()):
+        out += (f" Confirmations, which favour the side and are not pressure: Proposition {conf['prop']}, "
+                f"Opposition {conf['opp']}.")
+    if any(times.values()):
+        out += f" Time calls (procedure, not pressure): Proposition {times['prop']}, Opposition {times['opp']}."
+    return out
 
 
 def fact_checks(rec: Record) -> dict:

@@ -77,8 +77,10 @@ overall: your 0-10 overall for the side, weighing the criteria; factuality and e
 
 Then:
 - bias: per side, one or two sentences on its framing, loaded language and cherry-picking; and "system": whether \
-the referee's and the side bots' interventions were even-handed (more of them on a side with more flagged claims \
-is fair).
+the referee's and the side bots' pressure was even-handed (more of it on a side with more flagged claims is fair). \
+Pressure is the referee's corrections, context, prompts and source requests and the bots' rebuttals, challenges, \
+nudges and follow-ups. The referee's confirmations and a bot conceding a point favour the side, and time calls are \
+procedure: neither is pressure (the scorecard counts them apart, and the interventions list marks them).
 - factuality: two or three sentences on the factual record of the debate.
 - observations: up to three other short observations (structure, strongest moment, a missed opportunity).
 - reasoning: one paragraph of at most 120 words explaining the decision. It MUST cite numbers from the scorecard, \
@@ -209,11 +211,14 @@ def fact_lines(rec: Record) -> list[str]:
 
 def intervention_lines(rec: Record, limit: int = INTERVENTIONS) -> list[str]:
     """What the referee and the side bots said, and to which side (so the system's balance can be judged)."""
-    said = [(i.ts, f"referee {i.kind}", rec.aimed_at(i), i.text) for i in rec.interjections]
-    said += [(b.ts, f"{b.persona.upper()} bot {b.kind}", rec.aimed_at(b), b.text) for b in rec.bot_lines]
+    said = [(e.ts, f"referee {e.kind}" if e.event == "Interjection" else f"{e.persona.upper()} bot {e.kind}", e)
+            for e in [*rec.interjections, *rec.bot_lines]]
     out = ["SYSTEM INTERVENTIONS (the referee's interjections and the side bots' lines, by the side addressed):"]
-    for _, who, side, text in sorted(said, key=lambda x: x[0])[:limit]:
-        out.append(f"- {who} -> {SIDE_LABEL.get(side or '', 'nobody in particular')}: \"{' '.join(text.split())}\"")
+    for _, who, e in sorted(said, key=lambda x: x[0])[:limit]:
+        side = rec.aimed_at(e)
+        mark = "" if side is None or sc.is_pressure(e) else " (not pressure)"
+        out.append(f"- {who} -> {SIDE_LABEL.get(side or '', 'nobody in particular')}{mark}: "
+                   f"\"{' '.join(e.text.split())}\"")
     if len(said) > limit:
         out.append(f"- ... and {len(said) - limit} more")
     if not said:
@@ -408,7 +413,7 @@ def from_formula(card: dict, note: str) -> Judgement:
     return Judgement(winner=f["winner"], margin=f["margin"], headline=formula_headline(f), scores=scores,
                      why={s: formula_why(sides[s]) for s in SIDES},
                      bias={**{s: formula_why(sides[s])["balance"] for s in SIDES},
-                           "system": f"The referee's and side bots' interventions were {card['system']['note']}."},
+                           "system": sc.balance_text(card["system"])},
                      factuality=fact + ".", observations=[], reasoning=reasoning, via="formula", criteria=crit,
                      note=note)
 

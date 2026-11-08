@@ -146,13 +146,43 @@ def test_scorecard_on_a_synthetic_session():
     assert o["criteria"] == {"factuality": 2.9, "evidence": 1.7, "responsiveness": 2.3, "balance": 8.6}
     assert p["overall"] == sc.overall(p["criteria"]) and o["overall"] == sc.overall(o["criteria"]) == 3.3
     assert card["formula"]["winner"] == "prop" and card["formula"]["margin"] == "decisive"
+    assert (p["pressure"], p["confirmations"], o["pressure"], o["confirmations"]) == (0, 1, 5, 0)   # b2 concedes
     s = card["system"]
-    assert s["interventions"] == {"prop": 1, "opp": 5} and s["flagged"] == {"prop": 1, "opp": 2}
+    assert s["pressure"] == {"prop": 0, "opp": 5} and s["flagged"] == {"prop": 1, "opp": 2}
+    assert s["confirmations"] == {"prop": 1, "opp": 0} and s["time_calls"] == {"prop": 0, "opp": 0}
     assert s["interjections"]["none"] == 1 and s["bot_lines"]["banter"] == 1 and not s["even"]
-    assert s["note"] == "more on the Opposition (5 to 1), in line with its flagged claims (2 to 1)"
+    assert s["note"] == "more on the Opposition (5 to 0), in line with its flagged claims (2 to 1)"
     fc = sc.fact_checks(rec)
     assert [f["claim_id"] for f in fc["sourced"]] == ["c1", "c3", "c4", "c5"] and fc["unchecked"] == 1
     assert [(a["kind"], a["side"]) for a in fc["ai"]] == [("challenge", "opp"), ("concede", "prop")]
+
+
+def test_confirmations_and_time_calls_are_not_pressure_on_a_side():
+    """The Director voices confirms to balance its pressure: they must not read as the system picking on a side."""
+    rec = sc.collect([
+        SessionStart(motion="m", speakers=SPEAKERS), U("u1", "A", "Prop speaks", 1, 3), U("u2", "B", "Opp speaks", 4, 6),
+        C("c1", "A", "prop"), C("c2", "A", "prop"), C("c3", "B", "opp"),
+        V("c1", "supported"), V("c2", "supported"), V("c3", "contradicted"),
+        Interjection(id="i-1", text="That checks out.", kind="confirm", claim_id="c1", target="A"),
+        Interjection(id="i-2", text="Right again.", kind="confirm", claim_id="c2", target="A"),
+        Interjection(id="i-3", text="Proposition, thirty seconds.", kind="time", target="A"),
+        Interjection(id="i-4", text="Not quite.", kind="correction", claim_id="c3", target="B"),
+        BotLine(id="b1", persona="against", text="Fair, that one checks out.", kind="concede", target="A",
+                claim_id="c1", src="bots")])
+    card = sc.scorecard(rec)
+    s, p = card["system"], card["sides"]["prop"]
+    assert p["interjections"] == {"total": 3, "confirm": 2, "time": 1} and p["bot_lines"] == {"total": 1, "concede": 1}
+    assert s["pressure"] == {"prop": 0, "opp": 1} and s["confirmations"] == {"prop": 3, "opp": 0}
+    assert s["time_calls"] == {"prop": 1, "opp": 0} and s["flagged"] == {"prop": 0, "opp": 1}
+    assert s["even"] and s["note"] == "even (0 on the Proposition, 1 on the Opposition)"
+    text = sc.balance_text(s)
+    assert "was even (0 on the Proposition, 1 on the Opposition)" in text and "not pressure" in text
+    assert "Proposition 3, Opposition 0" in text and "although" not in text
+    lines = "\n".join(writer.intervention_lines(rec))
+    assert '- referee confirm -> Proposition (not pressure): "That checks out."' in lines
+    assert '- referee correction -> Opposition: "Not quite."' in lines
+    j = writer.from_formula(card, "no LLM is configured")
+    assert j.bias["system"] == text
 
 
 def test_scorecard_on_the_golden_run():

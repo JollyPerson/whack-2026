@@ -173,11 +173,13 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
     out += _table(["", "Proposition", "Opposition"], [
         ["Referee interjections", *(_kinds(sides[s]["interjections"]) for s in SIDES)],
         ["Side-bot lines", *(_kinds(sides[s]["bot_lines"]) for s in SIDES)],
+        ["Pressure (all but confirmations, concessions and time calls)", *(system["pressure"][s] for s in SIDES)],
+        ["Confirmations (the referee's confirms, bots conceding)", *(system["confirmations"][s] for s in SIDES)],
         ["Flagged claims (contradicted, missing context, AI-flagged)", *(system["flagged"][s] for s in SIDES)]])
     extra = [f"{system['interjections']['none']} interjections to nobody in particular"] \
         if system["interjections"]["none"] else []
     extra += [f"{system['bot_lines']['banter']} banter lines between the bots"] if system["bot_lines"]["banter"] else []
-    out += ["", f"Balance: {system['note']}." + (f" Also {', '.join(extra)}." if extra else ""), ""]
+    out += ["", sc.balance_text(system) + (f" Also {', '.join(extra)}." if extra else ""), ""]
 
     out += ["## Verdict dances", ""]
     for p in ("for", "against"):
