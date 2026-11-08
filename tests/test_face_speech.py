@@ -29,7 +29,7 @@ from app.main import build_app
 from app.schemas import DirectorDecision, Interjection, TTSState
 from tests.test_main import make_client  # noqa: F401  (fixture)
 
-KEYS = {"op", "id", "text", "audio", "title", "on", "clear"}
+KEYS = {"op", "id", "text", "audio", "title", "on", "clear", "seconds"}
 SECRET = "sk-SENTINEL-7f3a9c"
 _POOL = ThreadPoolExecutor(max_workers=4)
 
@@ -397,7 +397,7 @@ def test_events_map_to_commands(make_client, tmp_path):
                {"event": "Utterance", "speaker": "A", "text": "ignored"}]:
         assert c.post("/publish", json=ev).status_code == 200
     body = poll(c, cur, ep)
-    blank = {"id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False}
+    blank = {"id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False, "seconds": 0}
     assert body["cmds"] == [
         {**blank, "op": "say", "id": "i-0003", "text": text, "audio": tts.url_for(text)},
         {**blank, "op": "talk", "id": "i-0003", "on": True},
@@ -463,7 +463,7 @@ def test_dance_routes_queue_commands_for_the_avatar(make_client, tmp_path):
     time.sleep(0.3)
     assert c.post("/face/mate/dance", json={"title": "PET_DANCING_01"}).json()["ok"] is True
     assert fut.result(timeout=5)["cmds"] == [{"op": "dance", "id": "", "text": "", "audio": "",
-                                              "title": "PET_DANCING_01", "on": False, "clear": False}]
+                                              "title": "PET_DANCING_01", "on": False, "clear": False, "seconds": 0}]
     c.post("/face/mate/dance")
     c.post("/face/mate/dance/stop")
     assert [(x["op"], x["title"]) for x in poll(c, cur, ep)["cmds"]] == [("dance", ""), ("dance_stop", "")]

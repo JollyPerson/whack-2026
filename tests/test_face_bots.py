@@ -8,11 +8,14 @@ import pytest
 from app.bus import Bus
 from app.face import run as face_run, speech
 from app.face.speech import CHANNELS, state_for
+from app.face.tts import TTS
+from app.schemas import BotLine, DebateResult, SessionStart
 from tests.test_face_speech import _POOL, KEYS, Fake, _with_tts
 from tests.test_main import make_client  # noqa: F401  (fixture)
 
-BLANK = {"id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False}
+BLANK = {"id": "", "text": "", "audio": "", "title": "", "on": False, "clear": False, "seconds": 0}
 STOP = {**BLANK, "op": "stop", "clear": True}
+DANCE_STOP = {**BLANK, "op": "dance_stop"}
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +95,8 @@ def test_bot_channels_clear_on_session_start_mute_and_bots_off(make_client):
     assert poll(c, None, cur, ep)["cmds"] == [STOP]                        # mute: bots is not the referee's flag
     cur = c.get("/health").json()["seq"]
     c.post("/session", json={"motion": "m"})
-    assert all(poll(c, ch, cur, ep)["cmds"] == [STOP] for ch in CHANNELS)  # SessionStart
+    assert poll(c, None, cur, ep)["cmds"] == [STOP]                        # SessionStart; the bots' dances stop too
+    assert all(poll(c, ch, cur, ep)["cmds"] == [STOP, DANCE_STOP] for ch in ("for", "against"))
 
 
 def test_unknown_channel_is_a_404_and_leaves_no_state(make_client):
@@ -173,3 +177,115 @@ def test_a_channel_nobody_polls_keeps_no_expired_dances():
     mate.dances = [(time.monotonic() - speech.DANCE_TTL_S - 1, {"op": "dance"})]
     mate.queue({"op": "dance_stop"})
     assert [c["op"] for _, c in mate.dances] == ["dance_stop"]
+
+
+# ----------------------------------------------------------------------------- verdict dances (DebateResult)
+WIN, LOSE, DRAW = "MMD-Conqueror", "MMD-Lost One_s Weeping", "MMD-皆大欢喜-卜逻desu"
+
+
+def result(winner="prop", **kw):
+    """A DebateResult as app/judge publishes it: the winner's bot (prop -> for, opp -> against) gets the music."""
+    win, lose = ("for", "against") if winner == "prop" else ("against", "for")
+    return {"event": "DebateResult", "winner": winner, "margin": "clear", "headline": "Prop wins on the evidence.",
+            "scores": {"prop": {"factuality": 8, "overall": 7.5}, "opp": {"factuality": 5, "overall": 5.5}},
+            "report": "logs/summaries/run-summary.md", "dances": {win: WIN, lose: LOSE},
+            "music": {win: True, lose: False}, "dance_s": 30.0, "via": "llm", **kw}
+
+
+def dance(title, on=False, seconds=30):
+    return {**BLANK, "op": "dance", "title": title, "on": on, "seconds": seconds}
+
+
+def test_the_winner_dances_with_music_and_the_loser_silently(make_client):
+    c = make_client()
+    cur, ep = resync(c)
+    c.post("/publish", json=result("opp"))
+    assert poll(c, "against", cur, ep)["cmds"] == [dance(WIN, on=True)]        # Opp won: its second, Against
+    assert poll(c, "for", cur, ep)["cmds"] == [dance(LOSE)]                    # the loser dances in silence
+    assert poll(c, None, cur, ep)["cmds"] == []                                # the referee is unchanged
+
+
+def test_a_draw_has_both_bots_dance_the_same_title(make_client):
+    c = make_client()
+    cur, ep = resync(c)
+    c.post("/publish", json=result("draw", margin="", dances={"for": DRAW, "against": DRAW},
+                                   music={"for": False, "against": False}, dance_s=12.5))
+    got = {ch: poll(c, ch, cur, ep)["cmds"] for ch in ("for", "against")}
+    assert got == {"for": [dance(DRAW, seconds=13)], "against": [dance(DRAW, seconds=13)]}   # whole seconds, rounded up
+
+
+def test_a_bot_without_a_title_does_not_dance_and_keeps_talking(make_client):
+    c = make_client()
+    cur, ep = resync(c)
+    c.post("/publish", json=result(dances={"for": WIN, "against": ""}))
+    c.post("/publish", json=result(dances={"for": WIN}))
+    c.post("/publish", json=line("against", "b-0001", "Still here."))
+    assert [x["op"] for x in poll(c, "against", cur, ep)["cmds"]] == ["say", "talk"]
+    assert poll(c, "for", cur, ep)["cmds"] == [dance(WIN, on=True)] * 2
+
+
+def test_a_result_older_than_its_dance_is_not_danced(make_client):
+    c = make_client()
+    cur, ep = resync(c)
+    c.post("/publish", json=result(ts=time.time() - 31))
+    c.post("/publish", json=line("for", "b-0001", "Back to it."))
+    assert [x["op"] for x in poll(c, "for", cur, ep)["cmds"]] == ["say", "talk"]   # nothing dancing to protect
+
+
+def test_bot_lines_wait_out_the_dance_or_the_next_session(make_client):
+    c = make_client()
+    cur, ep = resync(c)
+    c.post("/publish", json=line("for", "b-0001", "Before the verdict."))
+    c.post("/publish", json=result())
+    c.post("/publish", json=line("for", "b-0002", "Mid-dance."))
+    c.post("/publish", json={"event": "BotTalk", "persona": "for", "line_id": "b-0001", "on": False})
+    body = poll(c, "for", cur, ep)
+    assert [(x["op"], x["id"]) for x in body["cmds"]] == [("say", "b-0001"), ("talk", "b-0001"), ("dance", ""),
+                                                          ("talk", "b-0001")]   # no say: it would stop the dance
+    cur = body["cursor"]
+    c.post("/publish", json=line("for", "b-0003", "Still dancing."))
+    assert poll(c, "for", cur, ep)["cmds"] == []
+    c.post("/session", json={"motion": "m"})
+    c.post("/publish", json=line("for", "b-0004", "New debate."))
+    assert [(x["op"], x["id"]) for x in poll(c, "for", cur, ep)["cmds"]] == [
+        ("stop", ""), ("dance_stop", ""), ("say", "b-0004"), ("talk", "b-0004")]
+
+
+def test_the_dance_window_ends_after_dance_s():
+    mate, t0 = speech.Mate(), 1000.0
+    res = DebateResult.model_validate(result(dance_s=30.0, ts=t0))
+
+    def says(t: float, persona="for", m=mate) -> list[str]:
+        return [x["op"] for x in speech.bot_cmds(BotLine(persona=persona, id=f"b-{t}", text="x", ts=t), t, persona, m)]
+
+    assert speech.bot_cmds(res, t0 + 1, "for", mate) == [dance(WIN, on=True)]   # delivered at t0+1: on until t0+31
+    assert says(t0 + 2) == [] and says(t0 + 30.9) == []
+    assert says(t0 + 31) == ["say", "talk"]
+    assert says(t0 + 2, "against", speech.Mate()) == ["say", "talk"]           # each channel has its own window
+    speech.bot_cmds(res, t0 + 1, "for", mate)
+    assert speech.bot_cmds(SessionStart(ts=t0 + 3), t0 + 3, "for", mate) == [STOP, DANCE_STOP]
+    assert says(t0 + 4) == ["say", "talk"]                                     # a new debate: talking again
+    assert speech.bot_cmds(res, t0 + 40, "for", mate) == []                    # past its dance: never started
+    assert says(t0 + 41) == ["say", "talk"]
+
+
+def test_a_dance_to_the_end_still_holds_the_lines_back():
+    mate = speech.Mate()
+    res = DebateResult.model_validate(result(dance_s=0, ts=100.0))
+    assert speech.bot_cmds(res, 100.0, "for", mate) == [dance(WIN, on=True, seconds=0)]
+    assert speech.bot_cmds(BotLine(persona="for", id="b", text="x", ts=160.0), 160.0, "for", mate) == []
+
+
+def test_the_referee_channel_ignores_results_and_keeps_its_session_start():
+    tts, res = TTS([]), DebateResult.model_validate(result(ts=time.time()))
+    assert speech.to_cmds(res, tts, time.time(), "referee", speech.Mate()) == []
+    assert speech.to_cmds(SessionStart(), tts, time.time(), "referee", speech.Mate()) == [STOP]
+
+
+def test_operator_dances_take_optional_music_and_seconds(make_client):
+    c = make_client()
+    cur, ep = resync(c, "for")
+    c.post("/face/mate/dance", json={"title": WIN, "channel": "for", "on": True, "seconds": 12.2})
+    c.post("/face/mate/dance", json={"title": "PET_DANCING_01", "channel": "for"})
+    assert poll(c, "for", cur, ep)["cmds"] == [dance(WIN, on=True, seconds=13), dance("PET_DANCING_01", seconds=0)]
+    assert c.post("/face/mate/dance", json={"seconds": -1}).status_code == 422
