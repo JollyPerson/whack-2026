@@ -65,9 +65,9 @@ FLAGS: dict = {
 BOTS_MIN_GAP_S = _env("BOTS_MIN_GAP_S", 10.0)            # per bot: at most one bubble this often
 BOTS_LINE_TTL_S = _env("BOTS_LINE_TTL_S", 30.0)          # a queued line older than this is dropped
 BOTS_VERDICT_WAIT_S = _env("BOTS_VERDICT_WAIT_S", 10.0)  # wait this long for a sourced Verdict before an unsourced check
-BOTS_CHECK_MIN_CONF = _env("BOTS_CHECK_MIN_CONF", 0.85)  # the AI-knowledge challenge only fires at or above this
+BOTS_CHECK_MIN_CONF = _env("BOTS_CHECK_MIN_CONF", 0.80)  # an AI-knowledge challenge or concede only at or above this
 BOTS_BANTER = _env("BOTS_BANTER", True)                  # bot-to-bot replies (dry, guarded, rate-limited)
-BOTS_BANTER_GAP_S = _env("BOTS_BANTER_GAP_S", 45.0)      # at most one banter line this often, across both bots
+BOTS_BANTER_GAP_S = _env("BOTS_BANTER_GAP_S", 20.0)      # at most one banter line this often, across both bots
 BOTS_MODEL = _env("BOTS_MODEL", "claude-haiku-5-5")      # follow-ups and banter: fast
 BOTS_CHECK_MODEL = _env("BOTS_CHECK_MODEL", "claude-opus-5-5")   # the unsourced knowledge check: most accurate
 

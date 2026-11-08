@@ -28,8 +28,8 @@ SPEAKERS = {"A": SpeakerInfo(name="Alice Archer", side="prop"), "B": SpeakerInfo
 @pytest.fixture(autouse=True)
 def _tunables(monkeypatch):
     monkeypatch.setattr(config, "FLAGS", {"bots": True})
-    for k, v in dict(BOTS_MIN_GAP_S=10.0, BOTS_LINE_TTL_S=30.0, BOTS_VERDICT_WAIT_S=0.05, BOTS_CHECK_MIN_CONF=0.85,
-                     BOTS_BANTER=False, BOTS_BANTER_GAP_S=45.0).items():
+    for k, v in dict(BOTS_MIN_GAP_S=10.0, BOTS_LINE_TTL_S=30.0, BOTS_VERDICT_WAIT_S=0.05, BOTS_CHECK_MIN_CONF=0.80,
+                     BOTS_BANTER=False, BOTS_BANTER_GAP_S=20.0).items():
         monkeypatch.setattr(config, k, v)
 
 
@@ -160,8 +160,8 @@ async def test_a_capped_verdict_is_not_sourced_so_the_knowledge_check_answers():
 
 
 @pytest.mark.parametrize("check,kind", [
-    (false_check(0.84), "followup"),                       # below BOTS_CHECK_MIN_CONF: no challenge
-    (false_check(0.85), "challenge"),
+    (false_check(0.79), "followup"),                       # below BOTS_CHECK_MIN_CONF: no challenge
+    (false_check(0.80), "challenge"),
     (false_check("90%"), "challenge"),                     # percentages are read as 0..1
     ({"assessment": "likely_true", "confidence": 0.99, "correction": "", "challenge": ""}, "followup"),
     (false_check(0.95, challenge="That's a lie, it was 4%."), "challenge"),   # its line fails: built from correction
@@ -444,12 +444,12 @@ async def test_banter_replies_once_per_gap_never_chains_and_is_guarded():
     assert (first.persona, first.kind) == ("for", "followup")
     assert (reply.persona, reply.kind, reply.reply_to, reply.target) == ("against", "banter", first.id, None)
     assert reply.text == "Bold of you to fact-check with vibes."
-    clock.t += 20                                                               # inside the 45 s gap
+    clock.t += 10                                                               # inside the 20 s gap
     bots.handle(C("c2", typ="value", checkable=False, text="Regulation always backfires."))
     await settle(bots)
     assert [b.kind for b in said(out)] == ["followup", "banter", "followup"]
     assert sum(k == "banter" for k, _ in fast.calls) == 1                       # the banter line got no reply either
-    clock.t += 30
+    clock.t += 15
     fast.line = "Steady on, that was rhetorical."
     bots.handle(C("c3", "A", "prop", typ="value", checkable=False, text="Fair pay is a moral duty."))
     await settle(bots)
@@ -671,3 +671,17 @@ def test_main_starts_the_bots_only_with_bots_real(tmp_path, monkeypatch):
             else:
                 hist = c.get("/debug/history").json()
                 assert not any(e["event"] == "ModuleStatus" and e["module"] == "bots" for e in hist)
+
+
+
+def test_tunable_defaults():
+    """The shipped defaults (a fresh interpreter: no .env, no BOTS_* overrides)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BOTS_")} | {"DEBATE_REF_NO_DOTENV": "1"}
+    code = "from app import config as c; print(c.BOTS_CHECK_MIN_CONF, c.BOTS_BANTER_GAP_S, c.BOTS_MIN_GAP_S)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env,
+                         cwd=Path(__file__).resolve().parent.parent, check=True).stdout
+    assert out.split() == ["0.8", "20.0", "10.0"]
