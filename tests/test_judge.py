@@ -143,9 +143,9 @@ def test_scorecard_on_a_synthetic_session():
     assert o["interjections"] == {"total": 2, "correction": 1, "prompt": 1} and p["interjections"] == {"total": 0}
     assert o["bot_lines"] == {"total": 3, "challenge": 1, "nudge": 1, "rebut": 1}
     assert p["bot_lines"] == {"total": 1, "concede": 1}
-    assert p["criteria"] == {"factuality": 5.6, "evidence": 5.0, "responsiveness": 7.5, "balance": 10.0}
-    assert o["criteria"] == {"factuality": 2.9, "evidence": 1.7, "responsiveness": 2.3, "balance": 8.6}
-    assert p["overall"] == sc.overall(p["criteria"]) and o["overall"] == sc.overall(o["criteria"]) == 3.3
+    assert p["criteria"] == {"factuality": 5.6, "evidence": 3.3, "responsiveness": 7.5, "balance": 8.9}
+    assert o["criteria"] == {"factuality": 2.9, "evidence": 0.0, "responsiveness": 2.3, "balance": 7.1}
+    assert p["overall"] == sc.overall(p["criteria"]) == 6.0 and o["overall"] == sc.overall(o["criteria"]) == 2.7
     assert card["formula"]["winner"] == "prop" and card["formula"]["margin"] == "decisive"
     assert (p["pressure"], p["confirmations"], o["pressure"], o["confirmations"]) == (0, 1, 5, 0)   # b2 concedes
     s = card["system"]
@@ -197,9 +197,10 @@ def test_scorecard_on_the_golden_run():
     assert o["verdicts"]["low_conf"] == 1 and o["verdicts"]["unverifiable"] == 1      # c6 at 0.3 confidence
     assert (p["unanswered"], o["unanswered"], o["nonresponsive"]) == (2, 2, 1)
     assert o["interjections"] == {"total": 1, "prompt": 1}                         # "Opposition, you haven't..."
-    assert (p["overall"], o["overall"]) == (5.4, 6.3)
+    assert p["criteria"]["evidence"] > o["criteria"]["evidence"]                 # 2.5 of 6 sourced beats 1 of 2
+    assert (p["overall"], o["overall"]) == (5.1, 5.6)
     f = card["formula"]
-    assert (f["winner"], f["margin"], f["difference"]) == ("opp", "clear", 0.9)
+    assert (f["winner"], f["margin"], f["difference"]) == ("opp", "clear", 0.5)
     assert 0 < p["speaking_s"] < 120 and p["share"] + o["share"] == pytest.approx(1.0, abs=0.01)
 
 
@@ -223,6 +224,18 @@ def test_an_empty_record_is_neutral_and_a_draw():
     card = sc.scorecard(sc.collect([SessionStart(motion="m", speakers=SPEAKERS)]))
     assert card["sides"]["prop"]["criteria"] == card["sides"]["opp"]["criteria"]
     assert card["formula"]["winner"] == "draw"
+
+
+def test_saying_nothing_checkable_does_not_pay():
+    """A side that sources nothing scores no evidence and no perfect balance: below a side whose checks held up."""
+    silent = sc.criteria(sc.scorecard(sc.collect([SessionStart(motion="m", speakers=SPEAKERS)]))["sides"]["prop"])
+    assert silent == {"factuality": 5.0, "evidence": 0.0, "responsiveness": 5.0, "balance": 7.5}
+    rec = sc.collect([SessionStart(motion="m", speakers=SPEAKERS), U("u1", "A", "figures", 1, 5),
+                      *(C(f"c{i}", "A", "prop") for i in range(6)),
+                      *(V(f"c{i}", "supported" if i < 2 else "contradicted") for i in range(6))])
+    p = sc.scorecard(rec)["sides"]["prop"]
+    assert p["criteria"]["evidence"] == 2.9 > silent["evidence"]                  # 2 of 6 sourced beats none
+    assert p["criteria"]["balance"] > silent["balance"]                            # checked, and nothing misleading
 
 
 def test_unknown_speakers_alternate_prop_then_opp():
@@ -309,7 +322,7 @@ async def test_an_invalid_or_inconsistent_answer_leaves_it_to_the_formula(out, w
     j = await writer.decide(FakeLLM(out), rec, card)
     assert (j.via, j.winner, j.margin) == ("formula", card["formula"]["winner"], card["formula"]["margin"])
     assert why in j.note and j.scores["prop"]["overall"] == card["sides"]["prop"]["overall"]
-    assert j.criteria == sc.CRITERIA and "Proposition" in j.reasoning and "3.3" in j.reasoning
+    assert j.criteria == sc.CRITERIA and "Proposition 6.0" in j.reasoning and "Opposition 2.7" in j.reasoning
 
 
 @pytest.mark.parametrize("llm, why", [
@@ -325,7 +338,7 @@ async def test_no_llm_a_timeout_or_an_error_leaves_it_to_the_formula(monkeypatch
     j = await writer.decide(llm, rec, sc.scorecard(rec))
     assert time.monotonic() - t < 0.5
     assert (j.via, j.winner, j.margin) == ("formula", "prop", "decisive") and why in j.note
-    assert j.headline == "Proposition wins decisively on the scorecard, 6.6 to 3.3."
+    assert j.headline == "Proposition wins decisively on the scorecard, 6.0 to 2.7."
 
 
 async def test_the_transcript_is_delimited_and_never_instructions():

@@ -22,13 +22,15 @@ the argument map, else the side with fewer speakers so far, Prop first):
   calls (procedure). With the flagged claims per side, pressure shows whether the SYSTEM was even-handed
   (scorecard()["system"], balance_text())
 
-Derived 0-10 criteria, Laplace-smoothed so a side with little on the record sits near the middle (S/C/M = supported,
-contradicted, missing_context; AI knowledge at half weight, AI_WEIGHT):
+Derived 0-10 criteria, smoothed so a side with little on the record is not rated on one data point (S/C/M/U =
+supported, contradicted, missing_context, unverifiable; AI knowledge at half weight, AI_WEIGHT). Saying nothing
+checkable never pays: it earns no evidence, and balance starts below the top until checks bear it out.
   factuality      (S' + 0.5 M + 1) / (S' + C' + M + 2)     S' = S + 0.5 confirmed, C' = C + 0.5 flagged
-  evidence        (S + 0.5 M + 0.5) / (checkable + 1)      how much of what the side asserted a source backed
+  evidence        (S + 0.5 M) / (n + 1)                     n = max(checkable, S + C + M + U): how much of what the
+                  side asserted a source backed (a side that sourced nothing scores 0)
   responsiveness  (answered + conceded + 1) / (answered + conceded + ignored + 2) - 0.1 per non-responsive turn
-  balance         1 - (M + 0.5 flagged) / (S + C + M + 0.5 (flagged + confirmed) + 2): fewer misleading or
-                  cherry-picked flags = higher
+  balance         1 - (M + 0.5 flagged + 0.5) / (S + C + M + 0.5 (flagged + confirmed) + 2): fewer misleading or
+                  cherry-picked flags = higher; 7.5 with nothing checked
 overall = 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (WEIGHTS), from the criteria rounded to
 0.1. formula(): an overall difference below DRAW_BELOW is a draw (the margin is narrow), below DECISIVE_FROM it is
 clear, from there decisive.
@@ -48,6 +50,7 @@ DRAW_BELOW = 0.5          # |prop - opp| overall below this: a narrow margin, de
 DECISIVE_FROM = 2.0       # this or more: decisive; in between: clear
 AI_WEIGHT = 0.5           # an unsourced AI-knowledge result counts half as much as a sourced verdict
 NR_PENALTY = 0.1          # responsiveness lost per finished non-responsive turn
+BALANCE_PRIOR = 0.5       # balance with nothing checked: 1 - 0.5 / 2 = 7.5, not a perfect 10
 WORDS_PER_S = 2.5         # speaking time of an utterance without usable times
 MAX_UTTERANCE_S = 120.0   # longer than this: a time from another clock, use the word count instead
 LABELS = ("supported", "contradicted", "missing_context", "unverifiable")
@@ -266,9 +269,9 @@ def criteria(st: dict) -> dict[str, float]:
     replied = st["answered"] + st["conceded"]
     raw = {
         "factuality": (s_ai + 0.5 * M + 1) / (s_ai + c_ai + M + 2),
-        "evidence": (S + 0.5 * M + 0.5) / (max(st["checkable"], S + C + M + U) + 1),
+        "evidence": (S + 0.5 * M) / (max(st["checkable"], S + C + M + U) + 1),
         "responsiveness": (replied + 1) / (replied + st["ignored"] + 2) - NR_PENALTY * st["nonresponsive"],
-        "balance": 1 - (M + AI_WEIGHT * flagged) / (S + C + M + AI_WEIGHT * (flagged + confirmed) + 2),
+        "balance": 1 - (M + AI_WEIGHT * flagged + BALANCE_PRIOR) / (S + C + M + AI_WEIGHT * (flagged + confirmed) + 2),
     }
     return {k: round(10 * _unit(raw[k]), 1) for k in CRITERIA}
 

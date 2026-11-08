@@ -90,6 +90,8 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
   pressure per side (to show whether the system itself was even-handed; the referee's confirmations, bots conceding
   a point and time calls are not pressure and are counted apart). From it come four 0-10 criteria and a
   formula overall: 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (`app/judge/scorecard.py`).
+  Saying nothing checkable never pays: a side that sources nothing scores 0 on evidence, and balance starts at 7.5
+  until fact checks bear it out.
 - Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript and the fact checks, scores each side on six
   criteria (plus argument quality and civility), concludes on bias and factuality, picks the winner and writes
   reasoning that cites the scorecard. The margin is read off Claude's own two overalls with the formula's bands: a
