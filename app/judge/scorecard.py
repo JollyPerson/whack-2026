@@ -2,7 +2,8 @@
 
 collect(events) -> Record: the current session (from the last SessionStart on), deduplicated the way the Bus history
 keeps it: the latest final revision of each Utterance, the latest Claim per id and Verdict per claim, the newest
-ArgMapSnapshot, and every BotLine and Interjection once.
+ArgMapSnapshot, every BotLine and Interjection once, each Consistency finding once per (claim, earlier claim) pair,
+and the newest DebateSummary (the brain's, on the final screen: highest argument-map version, then the latest).
 
 scorecard(record) -> dict. Per side (prop/opp; a speaker's side comes from SessionStart.speakers. When it names the
 debaters and they spoke, anyone else (a chair, a stray diarization label) is on neither side: not counted, and named
@@ -18,6 +19,9 @@ argument map, else the side with fewer speakers so far, Prop first):
   points the opponent conceded), answered / conceded / ignored (the opponent's points the side attacked, conceded or
   left unanswered), nonresponsive (the side's finished non-responsive turns)
 - interjections / bot_lines: the referee's and the side bots' interventions aimed at the side, by kind
+- from the brain's Consistency findings (side: its claim's, as claims are counted): self_contradictions (U-turns),
+  concessions (the side accepted the other side's point), corrections (it changed a figure after the referee flagged
+  it: an update, not penalised) and agreements (common ground: shared, the same number on both sides)
 - pressure: those that put the side on the spot (is_pressure: the referee's correction, context, prompt and source
   request; every bot line but a concession). Not pressure: the referee's confirmations and a bot conceding a point
   (confirmations: in the side's favour; the Director voices confirms on purpose to balance its pressure) and time
@@ -33,9 +37,12 @@ checkable never pays: it earns no evidence, and balance starts below the top unt
   responsiveness  (answered + conceded + 1) / (answered + conceded + ignored + 2) - 0.1 per non-responsive turn
   balance         1 - (M + 0.5 flagged + 0.5) / (S + C + M + 0.5 (flagged + confirmed) + 2): fewer misleading or
                   cherry-picked flags = higher; 7.5 with nothing checked
-overall = 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (WEIGHTS), from the criteria rounded to
-0.1. formula(): an overall difference below DRAW_BELOW is a draw (the margin is narrow), below DECISIVE_FROM it is
-clear, from there decisive.
+  consistency     1 - 2 U / (claims + 2)                    U = self_contradictions: fewer U-turns = higher, and one
+                  weighs more in a short case (1 in 6 claims: 7.5); concessions, corrections and agreements cost
+                  nothing; 10 with no U-turn
+overall = 0.30 factuality + 0.25 evidence + 0.20 responsiveness + 0.15 balance + 0.10 consistency (WEIGHTS), from the
+criteria rounded to 0.1. formula(): an overall difference below DRAW_BELOW is a draw (the margin is narrow), below
+DECISIVE_FROM it is clear, from there decisive.
 """
 from __future__ import annotations
 
@@ -44,15 +51,17 @@ from typing import Any, Iterable, Optional
 
 from app.brain.argmap import LOW_CONF, NO_CHECK, SIDE_LABEL, SIDES
 from app.brain.director import PRESSURE, norm_side
-from app.schemas import ArgMapSnapshot, BotLine, Claim, Event, Interjection, SessionStart, Utterance, Verdict
+from app.schemas import (ArgMapSnapshot, BotLine, Claim, Consistency, DebateSummary, Event, Interjection, SessionStart,
+                         Utterance, Verdict)
 
-WEIGHTS = {"factuality": 0.35, "evidence": 0.25, "responsiveness": 0.25, "balance": 0.15}
+WEIGHTS = {"factuality": 0.30, "evidence": 0.25, "responsiveness": 0.20, "balance": 0.15, "consistency": 0.10}
 CRITERIA = tuple(WEIGHTS)
 DRAW_BELOW = 0.5          # |prop - opp| overall below this: a narrow margin, declared a draw
 DECISIVE_FROM = 2.0       # this or more: decisive; in between: clear
 AI_WEIGHT = 0.5           # an unsourced AI-knowledge result counts half as much as a sourced verdict
 NR_PENALTY = 0.1          # responsiveness lost per finished non-responsive turn
 BALANCE_PRIOR = 0.5       # balance with nothing checked: 1 - 0.5 / 2 = 7.5, not a perfect 10
+UTURN_WEIGHT = 2.0        # consistency lost per U-turn, over (claims + 2)
 WORDS_PER_S = 2.5         # speaking time of an utterance without usable times
 MAX_UTTERANCE_S = 120.0   # longer than this: a time from another clock, use the word count instead
 LABELS = ("supported", "contradicted", "missing_context", "unverifiable")
@@ -61,11 +70,14 @@ SECOND = {"for": "prop", "against": "opp"}    # the side each bot seconds
 AIMED_AT = {"for": "opp", "against": "prop"}  # each bot only ever addresses the opposing debater
 PRESSURE_KINDS = PRESSURE - {"time"}          # referee kinds that put a side on the spot (a time call is procedure)
 CONFIRM_KINDS = {"confirm", "concede"}        # the referee confirming a claim, a bot conceding one: in its favour
+FINDING_COUNT = {"self_contradiction": "self_contradictions", "concession": "concessions",
+                 "correction": "corrections"}  # a side's own Consistency findings -> its count (agreements: shared)
 
 
 @dataclass
 class Record:
-    """One session's events, deduplicated. `sides`/`names`: speaker id -> prop|opp / display name."""
+    """One session's events, deduplicated. `sides`/`names`: speaker id -> prop|opp / display name. `summary_note`:
+    set by the judge (run.py) when the brain's DebateSummary is missing or older than the record."""
     motion: str = ""
     start: Optional[SessionStart] = None
     utterances: list[Utterance] = field(default_factory=list)
@@ -74,6 +86,9 @@ class Record:
     bot_lines: list[BotLine] = field(default_factory=list)
     interjections: list[Interjection] = field(default_factory=list)
     snapshot: Optional[ArgMapSnapshot] = None
+    consistency: list[Consistency] = field(default_factory=list)
+    summary: Optional[DebateSummary] = None
+    summary_note: str = ""
     sides: dict[str, str] = field(default_factory=dict)
     names: dict[str, str] = field(default_factory=dict)
 
@@ -82,6 +97,11 @@ class Record:
 
     def claim_side(self, c: Claim) -> Optional[str]:
         return norm_side(c.side) or self.sides.get(c.speaker)
+
+    def finding_side(self, k: Consistency) -> Optional[str]:
+        """A Consistency finding's side: its (newer) claim's, as the claims are counted; else the finding's own."""
+        c = self.claims.get(k.claim_id)
+        return self.claim_side(c) if c is not None else norm_side(k.side) or self.sides.get(k.speaker or "")
 
     def aimed_at(self, ev: Any) -> Optional[str]:
         """The side a BotLine or Interjection addresses: its target's. Without a target, a bot line addresses the
@@ -105,6 +125,7 @@ def collect(events: Iterable[Event]) -> Record:
     utts: dict[str, Utterance] = {}
     lines: dict[str, BotLine] = {}
     inters: dict[str, Interjection] = {}
+    finds: dict[tuple, Consistency] = {}
     for ev in evs[starts[-1]:] if starts else evs:
         name = ev.event
         if name == "SessionStart":
@@ -122,7 +143,13 @@ def collect(events: Iterable[Event]) -> Record:
             inters.setdefault(ev.id, ev)
         elif name == "ArgMapSnapshot" and (rec.snapshot is None or ev.version >= rec.snapshot.version):
             rec.snapshot = ev
+        elif name == "Consistency":
+            finds.setdefault((ev.claim_id, ev.earlier_claim_id), ev)     # reported once per pair, like the brain
+        elif name == "DebateSummary" and (rec.summary is None or
+                                          (ev.version, ev.seq) >= (rec.summary.version, rec.summary.seq)):
+            rec.summary = ev
     rec.utterances, rec.bot_lines, rec.interjections = list(utts.values()), list(lines.values()), list(inters.values())
+    rec.consistency = list(finds.values())
     if not rec.motion and rec.snapshot is not None:
         rec.motion = rec.snapshot.motion
     _assign_sides(rec)
@@ -165,6 +192,7 @@ def _side_blank(rec: Record, side: str) -> dict:
             "verdicts": {**dict.fromkeys(LABELS, 0), "with_source": 0, "low_conf": 0},
             "ai_flagged": 0, "ai_confirmed": 0,
             "unanswered": 0, "conceded_to": 0, "answered": 0, "conceded": 0, "ignored": 0, "nonresponsive": 0,
+            "self_contradictions": 0, "concessions": 0, "corrections": 0, "agreements": 0,
             "interjections": {"total": 0}, "bot_lines": {"total": 0}, "pressure": 0, "confirmations": 0}
 
 
@@ -216,6 +244,14 @@ def scorecard(rec: Record) -> dict:
             st["verdicts"][label] += 1
             st["verdicts"]["low_conf"] += label != v.label
             st["verdicts"]["with_source"] += bool(v.evidence)
+    agreements = 0
+    for k in rec.consistency:
+        if k.kind == "agreement":
+            agreements += 1
+            continue
+        st = sides.get(rec.finding_side(k) or "")
+        if st is not None and k.kind in FINDING_COUNT:
+            st[FINDING_COUNT[k.kind]] += 1
     banter = 0
     for b in rec.bot_lines:
         st = sides.get(rec.aimed_at(b) or "")
@@ -254,6 +290,7 @@ def scorecard(rec: Record) -> dict:
             sides[side]["nonresponsive"] += 1
     talk = sum(st["speaking_s"] for st in sides.values()) or 1.0
     for st in sides.values():
+        st["agreements"] = agreements                # common ground belongs to both sides
         st["speaking_s"] = round(st["speaking_s"], 1)
         st["share"] = round(st["speaking_s"] / talk, 2)
         st["criteria"] = criteria(st)
@@ -282,6 +319,7 @@ def criteria(st: dict) -> dict[str, float]:
         "evidence": (S + 0.5 * M) / (max(st["checkable"], S + C + M + U) + 1),
         "responsiveness": (replied + 1) / (replied + st["ignored"] + 2) - NR_PENALTY * st["nonresponsive"],
         "balance": 1 - (M + AI_WEIGHT * flagged + BALANCE_PRIOR) / (S + C + M + AI_WEIGHT * (flagged + confirmed) + 2),
+        "consistency": 1 - UTURN_WEIGHT * st["self_contradictions"] / (st["claims"] + 2),
     }
     return {k: round(10 * _unit(raw[k]), 1) for k in CRITERIA}
 
@@ -368,3 +406,16 @@ def fact_checks(rec: Record) -> dict:
         ai.append({"persona": b.persona, "side": rec.aimed_at(b), "kind": b.kind, "text": b.text,
                    "claim_id": b.claim_id, "claim": c.text if c is not None else ""})
     return {"sourced": sourced, "ai": ai, "unchecked": sum(c.id not in rec.verdicts for c in rec.claims.values())}
+
+
+def consistency_findings(rec: Record) -> list[dict]:
+    """The record's Consistency findings in publish order, each with its side as the scorecard counts it and the
+    verbatim `then` (the earlier claim) and `now` (the newer one)."""
+    out = []
+    for k in rec.consistency:
+        out.append({"kind": k.kind, "side": rec.finding_side(k), "speaker": rec.name(k.speaker),
+                    "earlier_side": norm_side(k.earlier_side), "claim_id": k.claim_id,
+                    "earlier_claim_id": k.earlier_claim_id, "then": " ".join(k.then.split()),
+                    "now": " ".join(k.now.split()), "explanation": k.explanation, "topic": k.topic,
+                    "confidence": round(k.confidence, 2)})
+    return out

@@ -105,24 +105,34 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
 ```
 
 - Code first computes a fixed scorecard per side from the session's record: speaking time and words, claims, sourced
-  verdicts, the bots' AI-knowledge flags, points left unanswered, non-responsive turns, and the referee's and bots'
-  pressure per side (to show whether the system itself was even-handed; the referee's confirmations, bots conceding
-  a point and time calls are not pressure and are counted apart). From it come four 0-10 criteria and a
-  formula overall: 0.35 factuality + 0.25 evidence + 0.25 responsiveness + 0.15 balance (`app/judge/scorecard.py`).
-  Saying nothing checkable never pays: a side that sources nothing scores 0 on evidence, and balance starts at 7.5
-  until fact checks bear it out.
-- Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript and the fact checks, scores each side on six
-  criteria (plus argument quality and civility), concludes on bias and factuality, picks the winner and writes
-  reasoning that cites the scorecard. The margin is read off Claude's own two overalls with the formula's bands: a
-  gap below 0.5 is narrow, and a narrow margin is a draw; 2.0 or more is decisive. If Claude is unavailable, slower
-  than `JUDGE_TIMEOUT_S` (60 s; about 25 s on the golden run) or answers something invalid or inconsistent (a
-  winner its own overalls don't favour, a draw 0.5 or more apart), the formula decides (`via: formula`).
+  verdicts, the bots' AI-knowledge flags, points left unanswered, non-responsive turns, the brain's consistency
+  findings (U-turns, concessions made, corrections after a referee flag, and common ground), and the referee's and
+  bots' pressure per side (to show whether the system itself was even-handed; the referee's confirmations, bots
+  conceding a point and time calls are not pressure and are counted apart). From it come five 0-10 criteria and a
+  formula overall: 0.30 factuality + 0.25 evidence + 0.20 responsiveness + 0.15 balance + 0.10 consistency
+  (`app/judge/scorecard.py`). Consistency is 1 - 2 U-turns / (claims + 2): fewer U-turns score higher; conceding a
+  point and correcting a figure after the referee flagged it are not penalised. Saying nothing checkable never pays:
+  a side that sources nothing scores 0 on evidence, and balance starts at 7.5 until fact checks bear it out.
+- The brain makes its end-of-debate summary (`DebateSummary`: agreed points, disputed issues with which way the
+  evidence leans, U-turn and concession counts) on the same click; the judge waits for it, `JUDGE_SUMMARY_WAIT_S`
+  (15 s) after the click at most. Without it (the brain is off or failed, or it is late) the judge goes ahead without
+  it, and the summary file says so.
+- Claude (`JUDGE_MODEL`, Opus) weighs the scorecard with the transcript, the fact checks, the debate summary and the
+  consistency findings (with their verbatim quotes), scores each side on seven criteria (the five plus argument
+  quality and civility), concludes on bias and factuality, picks the winner and writes reasoning that cites the
+  scorecard. The margin is read off Claude's own two overalls with the formula's bands: a gap below 0.5 is narrow,
+  and a narrow margin is a draw; 2.0 or more is decisive. If Claude is unavailable, slower than `JUDGE_TIMEOUT_S`
+  (60 s; about 25 s on the golden run) or answers something invalid or inconsistent (a winner its own overalls don't
+  favour, a draw 0.5 or more apart), the formula decides (`via: formula`).
 - The summary goes to `logs/summaries/<run>-summary.md`, with the same content as `.json` beside it (`JUDGE_DIR`;
-  `<run>` is the run's log name). It holds the verdict, the scorecard, the scores with reasons, bias, factuality,
-  the reasoning, the fact checks (sourced kept apart from "AI knowledge, unsourced"), the system's balance and the
-  dances. A click first lets the record settle, for 8 s at most (the last claims, verdicts and the argument map
-  trail the speech by 1-6 s). The judgement runs once per session: Final screen again re-judges only if someone
-  spoke or a fact check landed (or was revised) since. Replaying a log recorded with the judge on shows its recorded
+  `<run>` is the run's log name). It holds the verdict, the common ground and the disputed issues (issue, each side's
+  position, which way the evidence leans; with the summary's source, `llm` or `heuristic`, or why it was not
+  available), the scorecard, the scores with reasons, bias, factuality, the U-turns and concessions (who, and the
+  verbatim then/now quotes; corrections after a referee flag listed apart as updates, not U-turns), the reasoning,
+  the fact checks (sourced kept apart from "AI knowledge, unsourced"), the system's balance and the dances. A click
+  first lets the record settle, for 8 s at most (the last claims, verdicts and the argument map trail the speech by
+  1-6 s). The judgement runs once per session: Final screen again re-judges only if someone spoke, a fact check
+  landed (or was revised), a consistency finding came in or the debate summary arrived since. Replaying a log recorded with the judge on shows its recorded
   verdict: a replayed Final screen click never starts a second judgement.
 - **Verdict dances.** The `DebateResult` makes both side bots dance on their Mate Engine channels (see
   [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot `MMD-Conqueror` with its music,

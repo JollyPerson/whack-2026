@@ -75,6 +75,7 @@ BOTS_CHECK_MODEL = _env("BOTS_CHECK_MODEL", "claude-opus-5-5")   # the unsourced
 # --- judge (app/judge): post-debate summary + verdict on the Final screen click. Enable with JUDGE=real ----------
 JUDGE_MODEL = _env("JUDGE_MODEL", "claude-opus-5-5")     # weighs the scorecard + transcript, names the victor
 JUDGE_TIMEOUT_S = _env("JUDGE_TIMEOUT_S", 60.0)          # then the scorecard formula decides (DebateResult.via=formula)
+JUDGE_SUMMARY_WAIT_S = _env("JUDGE_SUMMARY_WAIT_S", 15.0)   # after the click, wait this long for the brain's DebateSummary
 JUDGE_DIR = _env("JUDGE_DIR", "logs/summaries")          # <run>-summary.md + .json
 JUDGE_DANCE_WIN = _env("JUDGE_DANCE_WIN", "MMD-Conqueror")             # alternative: MMD-KING
 JUDGE_DANCE_LOSE = _env("JUDGE_DANCE_LOSE", "MMD-Lost One_s Weeping")  # alternative: MMD-Failure Girl

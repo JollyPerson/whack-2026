@@ -3,9 +3,12 @@
 <run> is the bus log's stem (logs/<run>.jsonl), else a timestamp; a relative JUDGE_DIR is under the repo root (logs/
 is gitignored). new_path() never overwrites an earlier session's summary (<run>-2-summary.md, ...); re-judging the
 same session rewrites its own file. render() builds the Markdown: motion, date, speakers and sides, the verdict
-(winner, margin, headline, how it was decided), the scorecard per side, the per-criterion scores with justifications,
-bias, factuality, other observations, the reasoning, the fact checks (sourced and "AI knowledge, unsourced" apart),
-the system's balance, the dances, and a line saying it is an automated assessment.
+(winner, margin, headline, how it was decided, whether the brain's debate summary was there), the common ground and
+the disputed issues (from the brain's DebateSummary, with its source, or why it was not available), the scorecard per
+side, the per-criterion scores with justifications, bias, factuality, the U-turns and concessions (verbatim quotes;
+corrections after a referee flag listed apart, as updates), other observations, the reasoning, the fact checks
+(sourced and "AI knowledge, unsourced" apart), the system's balance, the dances, and a line saying it is an automated
+assessment.
 """
 from __future__ import annotations
 
@@ -18,12 +21,13 @@ from app import config
 from app.brain.argmap import SIDE_LABEL, SIDES
 from app.judge import scorecard as sc
 from app.judge.scorecard import DECISIVE_FROM, DRAW_BELOW, Record
-from app.judge.writer import CRITERION_LABEL, Judgement, weights_text
+from app.judge.writer import CRITERION_LABEL, SUMMARY_SOURCE, Judgement, _n, weights_text
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 PERSONA_LABEL = {"for": "FOR bot (the Proposition's second)", "against": "AGAINST bot (the Opposition's second)"}
 LABEL_TEXT = {"supported": "supported", "contradicted": "contradicted", "missing_context": "missing context",
               "unverifiable": "unverifiable"}
+LEAN_CELL = {"prop": "Proposition", "opp": "Opposition", "even": "Even"}
 _RECORD = "This is an automated assessment: a code scorecard from the live fact-checker's record"
 _WRONG = "It can be wrong; every sourced fact check shows its source."
 AUTOMATED = {"llm": f"{_RECORD}, weighed with the transcript by an AI judge. {_WRONG}",
@@ -66,9 +70,34 @@ def write(path: Path, rec: Record, card: dict, j: Judgement, dances: dict, music
             "criteria": list(j.criteria), "scores": j.scores, "justifications": j.why, "bias": j.bias,
             "factuality": j.factuality, "observations": j.observations, "reasoning": j.reasoning,
             "scorecard": {k: card[k] for k in ("sides", "system", "formula")}, "fact_checks": sc.fact_checks(rec),
+            "debate_summary": summary_data(rec), "consistency": sc.consistency_findings(rec),
             "dances": dances, "music": music, "dance_s": dance_s, "automated": automated(j)}
     path.with_suffix(".json").write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
+
+
+def summary_data(rec: Record) -> dict:
+    """The brain's DebateSummary as the JSON carries it: what the judge used, or that it was not available."""
+    s = rec.summary
+    if s is None:
+        return {"available": False, "note": rec.summary_note}
+    return {"available": True, "source": s.source, "version": s.version, "note": rec.summary_note,
+            "agreed": [a.model_dump() for a in s.agreed], "disputed": [d.model_dump() for d in s.disputed],
+            "self_contradictions": s.self_contradictions, "concessions": s.concessions}
+
+
+def _made(rec: Record) -> str:
+    s = rec.summary
+    how = SUMMARY_SOURCE.get(s.source, f"source {s.source}")
+    note = f"; {rec.summary_note}" if rec.summary_note else ""
+    return f"{how}; source `{s.source}`, argument map version {s.version}{note}"
+
+
+def summary_line(rec: Record) -> str:
+    """The brain's debate summary in a phrase: how it was made (its source), or why it is missing."""
+    if rec.summary is None:
+        return f"not available ({rec.summary_note or 'the brain made none'}); judged without it"
+    return f"the brain's ({_made(rec)})"
 
 
 def automated(j: Judgement) -> str:
@@ -118,7 +147,8 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
             f"- Overall: Proposition **{j.scores['prop']['overall']:.1f}**, Opposition "
             f"**{j.scores['opp']['overall']:.1f}** (out of 10)",
             f"- Decided by: {decided_by(j)}",
-            f"- Scorecard formula: {_formula_line(card['formula'])}", ""]
+            f"- Scorecard formula: {_formula_line(card['formula'])}",
+            f"- Debate summary: {summary_line(rec)}", ""]
 
     out += ["## Speakers", ""]
     out += _table(["Side", "Speakers", "Speaking time", "Share", "Words"],
@@ -130,11 +160,14 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
                     f"({other['words']} words)."]
     out.append("")
 
+    out += _common_ground(rec) + _disputed(rec)
+
     out += ["## Scorecard", "", "Computed in code from the session's record, the same way for both sides.", ""]
     out += _table(["", "Proposition", "Opposition"], [[label, *(fn(sides[s]) for s in SIDES)] for label, fn in _ROWS])
     out += ["", f"Formula: {weights_text(sc.WEIGHTS)}. A difference below {DRAW_BELOW} is a draw, {DECISIVE_FROM} or "
                 f"more is decisive. Verdicts below 0.6 confidence count as unverifiable; AI-knowledge results count "
-                f"half.", ""]
+                f"half. Consistency: fewer U-turns score higher; concessions and corrections after a referee flag are "
+                f"not penalised.", ""]
 
     out += ["## Scores by criterion", ""]
     out += _table(["Criterion", "Proposition", "Opposition"],
@@ -151,6 +184,7 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
             f"- **Opposition:** {j.bias.get('opp') or '-'}",
             f"- **The system's interventions:** {j.bias.get('system') or '-'}", ""]
     out += ["## Factuality", "", j.factuality or "-", ""]
+    out += _uturns(rec, sides)
     none = "- None: the scorecard formula decided, and only the AI judge adds observations." if j.via == "formula" \
         else "- None."
     out += ["## Other observations", "", *(f"- {o}" for o in j.observations or []), *([] if j.observations else [none]),
@@ -198,6 +232,78 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
     return "\n".join(out)
 
 
+def _ids(ids: list) -> str:
+    return f" ({', '.join(f'`{i}`' for i in ids)})" if ids else ""
+
+
+def _common_ground(rec: Record) -> list[str]:
+    out = ["## Common ground", ""]
+    s = rec.summary
+    if s is None:
+        out += [f"The brain's debate summary: {summary_line(rec)}.", ""]
+        agreed = [f for f in sc.consistency_findings(rec) if f["kind"] == "agreement"]
+        if agreed:
+            out += ["Agreements the consistency checker found:", ""]
+            out += [f"- {SIDE_LABEL.get(f['earlier_side'] or '', '?')}: \"{_flat(f['then'])}\"; "
+                    f"{SIDE_LABEL.get(f['side'] or '', '?')} ({f['speaker']}): \"{_flat(f['now'])}\""
+                    for f in agreed]
+            out.append("")
+        return out
+    out += [f"Points both sides accepted by the end, from the brain's debate summary ({_made(rec)}).", ""]
+    out += [f"- {_flat(a.statement)}{_ids(a.claim_ids)}" for a in s.agreed] or ["- None found."]
+    return out + [""]
+
+
+def _disputed(rec: Record) -> list[str]:
+    out = ["## Disputed issues", ""]
+    s = rec.summary
+    if s is None:
+        return out + ["Not available: the brain's debate summary did not reach the judge (see Common ground).", ""]
+    if not s.disputed:
+        return out + ["- None found.", ""]
+    out += _table(["Issue", "Proposition", "Opposition", "Evidence leans"],
+                  [[d.issue, d.prop or "-", d.opp or "-", LEAN_CELL.get(d.evidence_leans, d.evidence_leans)]
+                   for d in s.disputed])
+    return out + ["", "Evidence leans: which side the sourced fact checks on the issue's claims favour (at 0.6 "
+                      "confidence or more), computed in code from the verdicts, never by a model.", ""]
+
+
+def _uturns(rec: Record, sides: dict) -> list[str]:
+    found = sc.consistency_findings(rec)
+    out = ["## U-turns and concessions", "",
+           "From the brain's consistency checker; the quotes are verbatim from the two claims. A correction after a "
+           "referee flag is an update, not a U-turn, and is not penalised; nor is conceding a point.", ""]
+    out.append("Counted: " + "; ".join(
+        f"{SIDE_LABEL[s]} {_n(sides[s]['self_contradictions'], 'U-turn')}, "
+        f"{_n(sides[s]['concessions'], 'concession')}, {_n(sides[s]['corrections'], 'correction')}" for s in SIDES)
+        + "." + (" No findings on the record (the consistency checker runs in the brain)."
+                 if not found and rec.summary is None else ""))
+
+    def items(kind: str, line) -> list[str]:
+        got = [line(f) for f in found if f["kind"] == kind]
+        return got or ["- None."]
+
+    def who(f: dict) -> str:
+        return f"{SIDE_LABEL.get(f['side'] or '', '?')} ({f['speaker']})"
+
+    def why(f: dict) -> str:
+        e = _flat(f["explanation"]).rstrip(".")
+        return f" {e}." if e else ""
+
+    out += ["", "### U-turns", ""]
+    out += items("self_contradiction", lambda f: f"- {who(f)}" + (f", on {_flat(f['topic'])}" if f["topic"] else "")
+                 + f": then \"{_flat(f['then'])}\", now \"{_flat(f['now'])}\".{why(f)}"
+                 + _ids([f["earlier_claim_id"], f["claim_id"]]))
+    out += ["", "### Concessions", ""]
+    out += items("concession", lambda f: f"- {who(f)} accepted the "
+                 + f"{SIDE_LABEL.get(f['earlier_side'] or '', 'other side')}'s point: then \"{_flat(f['then'])}\", "
+                 + f"now \"{_flat(f['now'])}\".{why(f)}" + _ids([f["earlier_claim_id"], f["claim_id"]]))
+    out += ["", "### Updates after a referee flag (corrections, not U-turns)", ""]
+    out += items("correction", lambda f: f"- {who(f)}: then \"{_flat(f['then'])}\", now \"{_flat(f['now'])}\".{why(f)}"
+                 + _ids([f["earlier_claim_id"], f["claim_id"]]))
+    return out + [""]
+
+
 def _formula_line(f: dict) -> str:
     who = "a draw" if f["winner"] == "draw" else f"{SIDE_LABEL[f['winner']]} ({f['margin']})"
     return f"{who}, Proposition {f['overall']['prop']:.1f} to Opposition {f['overall']['opp']:.1f}"
@@ -225,6 +331,10 @@ _ROWS = [
     ("Opponent's points it answered / conceded / ignored",
      lambda st: f"{st['answered']} / {st['conceded']} / {st['ignored']}"),
     ("Non-responsive turns", lambda st: st["nonresponsive"]),
+    ("U-turns (self-contradictions)", lambda st: st["self_contradictions"]),
+    ("Concessions made (it accepted the other side's point)", lambda st: st["concessions"]),
+    ("Corrections after a referee flag (updates, not penalised)", lambda st: st["corrections"]),
+    ("Common ground (agreements, shared by both sides)", lambda st: st["agreements"]),
     *((f"Formula {k}", lambda st, k=k: f"{st['criteria'][k]:.1f}") for k in sc.CRITERIA),
     ("**Formula overall**", lambda st: f"**{st['overall']:.1f}**"),
 ]
