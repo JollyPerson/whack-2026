@@ -1356,3 +1356,18 @@ async def test_a_deep_verdict_that_replaces_an_unverifiable_one_while_the_check_
     if kind == "followup":
         assert b.text in lines.GRANTED
 
+
+@pytest.mark.parametrize("name,question", [
+    ("Anne-Marie Duval", "Anne-Marie, which baseline year?"),
+    ("Siobhán Kelly", "Siobhán, which baseline year?"),
+    ("Dara O'Neill", "O'Neill, which baseline year?"),
+    ("Zoë Kent", "Zoë, which baseline year?"),
+])
+async def test_a_hyphenated_accented_or_apostrophe_name_never_reaches_a_bubble(name, question):
+    bots, out, clock = make(fast=FakeLLM(question=question))
+    bots.handle(SessionStart(motion="M", speakers={"A": SpeakerInfo(name="Alice Archer", side="prop"),
+                                                   "B": SpeakerInfo(name=name, side="opp")}))
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)
+    [b] = said(out)
+    assert b.text == "Why should anyone accept that?"                       # the template, not the named question

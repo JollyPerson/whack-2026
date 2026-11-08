@@ -70,6 +70,7 @@ _URL = re.compile(r"\bhttps?://|\bwww\.|\b[\w-]+\.[a-z]{2,}/|"     # a link: a d
 _TAG = re.compile(r"\(?\s*\bunsourced\b\s*\)?\.?", re.I)   # the tag as the LLM may write it: "(Unsourced)."
 _DIGITS = re.compile(r"\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[a-z]+")
+_LETTERS = re.compile(r"[^\W\d_]+")             # words in any script: a name's "Siobhán", "Anne-Marie", "O'Neill"
 _FIGURE = re.compile(r"[£$€]?\d[\d,.]*\d?(?:\s?(?:%|per ?cent|percent|million|billion|trillion|bn|m|k)\b|%)?", re.I)
 _YEAR = re.compile(r"(?:19|20)\d\d")
 _ODD = re.compile(r"[#@<>{}\[\]\\|*_~`]")
@@ -136,7 +137,7 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
         return None
     if strict and toks & PERSONAL:
         return None
-    if any(n and n.lower() in toks for n in names):
+    if named(low, names):
         return None
     if kind == "banter":
         if toks & SOURCE_WORDS or toks & DEBATERS:
@@ -145,6 +146,13 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
         if any(re.search(rf"\b{re.escape(n)}\b", low) and n not in allowed_low for n in _SOURCE_NAMES):
             return None
     return s
+
+
+def named(text: str, names: Iterable[str]) -> bool:
+    """True if `text` has one of `names` (the debaters' names), or any part of a hyphenated or apostrophe name,
+    accents and all ("Zoë", "Anne-Marie" or "Marie", "O'Neill" or "Neill")."""
+    words = set(_LETTERS.findall(text.lower()))
+    return any(p in words for n in names for p in _LETTERS.findall(str(n or "").lower()) if len(p) > 1)
 
 
 def _finish(text: str) -> str:
