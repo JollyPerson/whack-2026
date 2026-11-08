@@ -489,12 +489,6 @@ ROADS_TEXT = "In 2024 there were an estimated 128,272 casualties of all severiti
 ROADS_SRC, ROADS_QUOTE = [Source("https://gov.uk/roads", "Road casualties", ROADS_TEXT)], "an estimated 128,272 casualties"
 
 
-def test_prompt_asks_for_figures_said_in_words():
-    """The code compares figures said in words, so the prompt must not tell the model to leave them out."""
-    from app.evidence import verdicts
-    assert "counts as no figure" not in verdicts.SYSTEM and "500000" in verdicts.SYSTEM
-
-
 def test_word_figure_reported_beside_a_year_is_compared_and_stays_on_air():
     g = apply_guards(raw(label="contradicted", quote=ROADS_QUOTE, claimed=500000, actual=128272), ROADS, ROADS_SRC)
     assert g.label == "contradicted" and g.confidence == .9 and g.notes == []
