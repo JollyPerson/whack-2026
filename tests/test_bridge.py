@@ -221,13 +221,14 @@ def test_an_event_too_old_to_matter_is_given_up_and_the_next_one_still_goes(monk
     tries = flaky(monkeypatch, *[urllib.error.URLError("down")] * 1000)
     pub = publisher(max_age=0.2)
     pub.send({"event": "Pause", "speaker": "A", "t": 1.0})
-    time.sleep(0.4)
+    err = []
+    assert wait_for(lambda: err.append(capsys.readouterr().err) or "gave up" in "".join(err))
+    assert len(tries) > 2                                    # retried, then gave up
     tries.clear()
     monkeypatch.setattr(bridge.urllib.request, "urlopen", lambda req, timeout: tries.append(req) or OK())
     pub.send({"event": "Pause", "speaker": "B", "t": 2.0})
     pub.close()
-    assert len(tries) == 1
-    assert "gave up" in capsys.readouterr().err
+    assert [json.loads(req.data)["speaker"] for req in tries] == ["B"]
 
 
 def test_one_event_that_blows_up_does_not_stop_the_ones_after_it(monkeypatch, capsys):
