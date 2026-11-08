@@ -120,9 +120,13 @@ async def supervise(bus: Bus, name: str, spec: str, served: str = ""):
             delay = min(delay * 2, 10.0)
 
 
+ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAGS; every other flag is state
+
+
 async def flags_watcher(bus: Bus):
     async for ev in bus.subscribe("flags", {"Control"}):
-        FLAGS[ev.flag] = ev.value
+        if ev.flag not in ONE_SHOT_FLAGS:
+            FLAGS[ev.flag] = ev.value
 
 
 async def loop_lag(bus: Bus, tick: float = 0.1, warn: float = 0.05, recover: int = 20):
@@ -188,10 +192,19 @@ async def run_replay(bus: Bus, path: Path, **kw) -> None:
         bus.publish(ModuleStatus(module="replay", state="down", detail=repr(e)[:200]), src="main")
 
 
+def _create_hint(path: Path) -> str:
+    if path.name == "latest.jsonl":
+        return "No run recorded yet: run ./run.sh mock (or drive) first, it writes logs/latest.jsonl."
+    return f"Save a recorded run there first: cp logs/latest.jsonl {path} (e.g. the 20:00 golden run)."
+
+
 def build_app(profile: str = "mock", file: str | None = None, speed: float = 1.0, only=(),
               log_dir: Path | None = None, last: bool = True, max_gap: float = MAX_GAP_S) -> FastAPI:
     if file:   # resolve NOW: follows logs/latest.jsonl before it is re-pointed; a missing file fails loudly
-        file = Path(file).resolve(strict=True)
+        try:
+            file = Path(file).resolve(strict=True)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(e.errno, f"No such file. {_create_hint(Path(file))}", str(file)) from None
         if not file.is_file():
             raise FileNotFoundError(f"not a file: {file}")
     log_dir = log_dir or ROOT / "logs"

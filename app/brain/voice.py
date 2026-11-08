@@ -54,6 +54,8 @@ T = {
     "prompt":     ["{side}, you haven't yet answered the point on {topic}.",
                    "{side}, your opponent's last point is still unanswered."],
     "time":       ["Time, {side}. Please wrap up."],
+    "dry":        ["Neither side has offered a figure yet. Care to name one?"],
+    "dry_again":  ["Either side, a figure I can check?"],
     "generic":    ["Referee's note: details are on screen."],
 }
 BANNED = frozenset({

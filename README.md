@@ -3,7 +3,7 @@
 Project context, roles and the demo plan: [`docs/OVERVIEW.md`](docs/OVERVIEW.md).
 
 WHACK hackathon, incident.io track. Speech in → claims → evidence-backed verdicts → a referee that
-interjects at pauses. Design: `whack-debate-factchecker-handoff.md`. Contracts: [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
+interjects at pauses. Plan: [`docs/B-PLAN.md`](docs/B-PLAN.md). Contracts: [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 How to plug your part in: [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 
 ## Run it
@@ -23,7 +23,7 @@ Replay options: `--speed 2` (2x faster), `--max-gap 5` (silences longer than 5 s
 default, `0` keeps them), `--all-sessions` (by default a log replays from its last `SessionStart`, so rehearsals
 earlier in the same log are skipped), `--only Utterance Pause` (re-drive the live pipeline from recorded speech).
 `logs/latest.jsonl` always points at the last run that wasn't itself a replay. A missing `--file` stops with an
-error. `run.sh` reinstalls packages whenever any `requirements*.txt` file changes. If pip fails (offline),
+error that says how to create it. `run.sh` reinstalls packages whenever any `requirements*.txt` file changes. If pip fails (offline),
 it warns and starts anyway with the existing `.venv`. `SKIP_PIP=1` never runs pip.
 
 Mix and match roles per run with env vars — each is `real | mock | off | external | pkg.module:function`:
@@ -87,8 +87,9 @@ if it should become official. Every run is logged; `./run.sh replay --file logs/
 L0 live mics → L1 `./run.sh drive` (recorded debate, live pipeline) → L2 `./run.sh replay --file fixtures/golden_run.jsonl`
 (no network) → L3 backup video. Keep the next command typed in a second terminal.
 
-Save the good run at the 20:00 checkpoint with `cp logs/latest.jsonl fixtures/golden_run.jsonl` (cp follows the
-symlink). Until that file exists, L2 stops with "No such file". A raw log from a live rehearsal works as it is:
-the replay starts at its last `SessionStart` and cuts idle gaps. The same log also works as a `drive` fixture
-(`FIXTURE=fixtures/golden_run.jsonl ./run.sh drive`). In that case mock ears re-emit only its
-SessionStart/Utterance/Pause lines and the live brain does the rest.
+**`fixtures/golden_run.jsonl` is not in the repo.** It exists only after you save a good run at the 20:00
+checkpoint with `cp logs/latest.jsonl fixtures/golden_run.jsonl` (cp follows the symlink). Until then L2 stops at
+once with "No such file" and that same `cp` hint, so check `ls fixtures/golden_run.jsonl` before judging. A raw
+log from a live rehearsal works as it is: the replay starts at its last `SessionStart` and cuts idle gaps. The
+same log also works as a `drive` fixture (`FIXTURE=fixtures/golden_run.jsonl ./run.sh drive`). In that case mock
+ears re-emit only its SessionStart/Utterance/Pause lines and the live brain does the rest.

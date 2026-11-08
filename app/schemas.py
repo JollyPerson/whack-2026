@@ -9,7 +9,7 @@ Rules
   * common spelling variants are accepted (Link "rel", verdict "Mostly false", ms timestamps, is_final);
   * cheap coercions: numbers -> str ids/speakers, numeric strings -> numbers, null -> the field's default,
     bare URL strings -> Evidence, float latency_ms -> int, "85"/"85%" confidence -> 0.85,
-    importance "2" (the LLM's 1..3) -> 0.67.
+    importance 1/2/3 or "1"/"2"/"3" (the LLM's 1..3) -> 0.33/0.67/1.0, but 1.0 (a float) is already 0..1.
 - The discriminator is `event` (not `type`: Claim.type is a §4 field).
 - Times are wall-clock epoch seconds (time.time()), stamped on the server. Milliseconds (JS Date.now())
   are converted automatically. 0 means "unknown": consumers fall back to the envelope `ts`.
@@ -57,10 +57,17 @@ def _unit(v: Any) -> Any:
     return v
 
 
+_IMP_SCALE = {"1": 0.33, "2": 0.67, "3": 1.0, "low": 0.33, "medium": 0.67, "high": 1.0}
+
+
 def _importance(v: Any) -> Any:
-    """0..1; the LLM's 1..3 score (also "2", "high") is scaled like the brain does: x/3."""
-    if isinstance(v, str) and v.strip().lower() in ("low", "medium", "high"):
-        return {"low": 0.33, "medium": 0.67, "high": 1.0}[v.strip().lower()]
+    """0..1. The 1..3 scale is an int 1/2/3 or the string "1"/"2"/"3" (also low/medium/high) -> 0.33/0.67/1.0,
+    so int 1 is low but float 1.0 (JSON `1.0`) is already 0..1 = max. Other numbers: <= 1 as is (clamped at 0),
+    > 1 scaled x/3 and capped at 1.0 (so 2.5 -> 0.83 and anything > 3 -> 1.0)."""
+    if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 3:
+        return _IMP_SCALE[str(v)]
+    if isinstance(v, str) and v.strip().lower() in _IMP_SCALE:
+        return _IMP_SCALE[v.strip().lower()]
     v = _num(v)
     if isinstance(v, (int, float)) and not isinstance(v, bool):
         return min(v / 3.0, 1.0) if v > 1 else max(v, 0.0)
@@ -160,7 +167,7 @@ class Claim(Event):
     links: list[Link] = Field(default_factory=list)
     # additions (optional) -----------------------------------------------------------------
     side: Optional[str] = None     # "prop" | "opp" (from SessionStart.speakers)
-    importance: Annotated[float, BeforeValidator(_importance)] = 0.5   # 0..1 (LLM 1..3 -> x/3): Director, C priority
+    importance: Annotated[float, BeforeValidator(_importance)] = 0.5   # 0..1 (int 1..3 -> 0.33..1.0): Director, C priority
     topic: str = ""                # <= 4 words, for the moderator's voice ("bus use outside London")
     canonical_key: Optional[str] = None   # normalised subject+numbers; same claim said twice -> same key
     t_end: Epoch = 0.0             # speech end of the source utterance (copied from Utterance.t_end)
@@ -258,7 +265,7 @@ class Interjection(Event):
     priority: float = 0.5          # higher = more urgent
     claim_id: Optional[str] = None   # None for moderator prompts ("Opposition, you haven't answered...")
     # additions (optional) -----------------------------------------------------------------
-    kind: str = "correction"       # correction | context | confirm | source_req | prompt | time
+    kind: str = "correction"       # correction | context | confirm | source_req | prompt | time | dry
     target: Optional[str] = None   # speaker id addressed
     evidence: EvidenceList = Field(default_factory=list)     # source card to show while speaking
     marks: Marks = Field(default_factory=dict)
@@ -276,6 +283,7 @@ class SessionStart(Event):
     motion: str = ""
     speakers: dict[Speaker, SpeakerInfo] = Field(default_factory=dict)
     mode: str = "live"             # live | drive | replay | mock
+    brief: str = ""                # debate brief typed by the organiser: steers pre-research, shown on the stage
 
 
 class ResearchProgress(Event):
@@ -284,6 +292,33 @@ class ResearchProgress(Event):
     done: int = 0
     total: int = 0
     detail: str = ""
+    motion: str = ""               # which Motion this is for (a ResearchRequest can run before its SessionStart)
+
+
+class ResearchRequest(Event):
+    """Research a Motion before the debate starts, without resetting anything. Evidence answers with
+    ResearchProgress (motion set) and a FactSheet; the later SessionStart with the same motion + brief loads it."""
+    event: Literal["ResearchRequest"] = "ResearchRequest"
+    motion: str
+    brief: str = ""
+
+
+class Fact(_Model):
+    statement: str                 # one self-contained, checkable sentence
+    side: str = "both"             # prop | opp | both: whose case it helps
+    quote: str = ""                # verbatim from the source (code-checked)
+    url: str = ""
+    title: str = ""
+    number: Optional[float] = None
+    unit: str = ""
+
+
+class FactSheet(Event):
+    """Key facts pulled out of a Motion's pre-research, each with a verbatim, code-checked quote."""
+    event: Literal["FactSheet"] = "FactSheet"
+    motion: str = ""
+    brief: str = ""
+    facts: list[Fact] = Field(default_factory=list)
 
 
 class MapNode(_Model):
@@ -395,7 +430,7 @@ class TTSState(Event):
     interjection_id: Optional[str] = None
 
 
-KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress,
+KNOWN = (Utterance, Pause, Claim, Verdict, SourceCard, Interjection, SessionStart, ResearchProgress, ResearchRequest, FactSheet,
          ArgMapSnapshot, DirectorDecision, DirectorStatus, Control, ModuleStatus, TTSState)
 EVENT_TYPES = {m.model_fields["event"].default: m for m in KNOWN}
 

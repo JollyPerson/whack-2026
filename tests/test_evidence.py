@@ -13,7 +13,8 @@ from app.evidence import cache as cache_module
 from app.evidence import deep, preresearch
 from app.evidence.cache import VerdictCache
 from app.evidence import run as run_module
-from app.evidence.checks import CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in, quote_in_source
+from app.evidence.checks import (CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in,
+                                 quote_in_source)
 from app.evidence.index import EvidenceIndex, chunk_text, tokens
 from app.evidence.run import Checker, EvidenceModule
 from app.schemas import Claim, SessionStart
@@ -126,6 +127,50 @@ def test_missing_context_is_not_overruled_by_numbers():
 def test_invented_numbers_are_discarded_and_capped(claimed, actual):
     g = apply_guards(raw(claimed=claimed, actual=actual), "It fell by 27%", SRC)
     assert g.numeric is None and "numeric_dropped" in g.notes and g.confidence == CONFIDENCE_CAP
+
+
+# --- figures said in words (most of docs/FACT-CARDS.md's WRONG facts)
+GHG = "Domestic transport was the largest emitting sector in 2023, producing 29% of UK greenhouse gas emissions."
+GHG_SRC, GHG_QUOTE = [Source("https://gov.uk/ghg", "GHG statistics", GHG)], "producing 29% of UK greenhouse gas emissions"
+HALF = "Transport produces half of the UK's greenhouse gas emissions."
+
+
+@pytest.mark.parametrize("text,value", [
+    ("about a quarter of a million vacancies", 250_000), ("more than half a million people were hurt", 500_000),
+    ("more than two million over-75s", 2e6), ("one and a half million", 1.5e6), ("half of the UK's emissions", 50),
+    ("Three-quarters of the world's countries", 75), ("three quarters of countries", .75), ("One in five people", 20),
+    ("1 in 20 people", .05), ("fallen by a third since 2010", 33), ("fallen by a third", 33.3), ("two-thirds of firms", 66.7),
+])
+def test_figures_said_in_words_appear(text, value):
+    assert number_appears(value, text)
+
+
+@pytest.mark.parametrize("text,value", [("a quarter of a million", 25), ("a third", 25), ("half a million", 5e6),
+                                        ("one in five", 5), ("the third runway", 3)])
+def test_figures_said_in_words_are_not_any_number(text, value):
+    assert not number_appears(value, text)
+
+
+def test_wrong_figure_in_words_is_compared_and_stays_on_air():
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE, claimed=50, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.numeric.claimed == 50 and g.notes == []
+
+
+def test_fraction_written_as_a_proportion_is_compared_as_a_percentage():
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE, claimed=.5, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.numeric.claimed == 50 and g.label == "contradicted" and g.confidence == .9
+
+
+def test_rounded_figure_in_words_is_not_overruled():
+    """\"About a quarter\" for 27% is fair: words get a looser band than digits (5%), so code doesn't call it wrong."""
+    g = apply_guards(raw(claimed=25, actual=27, unit="%"), "Bus use fell by about a quarter", SRC)
+    assert g.label == "supported" and g.confidence == .9 and g.notes == []
+
+
+def test_figure_in_words_left_out_by_the_model_is_not_capped():
+    """The prompt lets the model skip figures said in words; that must not count as an uncompared figure."""
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE), HALF, GHG_SRC)
+    assert g.confidence == .9 and g.notes == []
 
 
 # --- confidence
@@ -512,6 +557,13 @@ def test_cache_matches_a_rephrasing_with_the_same_figures_only():
     assert cache.lookup("Rail fares rose by 27% between 2010 and 2020") is None
 
 
+def test_cache_compares_figures_said_in_words():
+    cache = VerdictCache()
+    cache.add("A third of the pilot firms made the four-day week permanent", settled(), "index")
+    assert cache.lookup("Half of the pilot firms made the four-day week permanent") is None
+    assert cache.lookup("a third of pilot firms made the four-day week permanent") is not None
+
+
 @pytest.mark.parametrize("g", [settled(label="unverifiable"), settled(confidence=0.3), settled(quote="not in the source")])
 def test_cache_only_keeps_verdicts_worth_repeating(g):
     cache = VerdictCache()
@@ -589,3 +641,114 @@ async def test_slow_query_embedding_falls_back_to_bm25(monkeypatch):
     index = EvidenceIndex(chunks(), np.eye(3, dtype="float32"))
     found = await Checker(None, embedder=Slow(), index=index).retrieve("bus use in London")
     assert found[0].url.endswith("/0")
+
+
+# --- on-the-fly pre-research: brief, ResearchRequest, fact sheet
+PAGE = {"url": "https://gov.uk/bus", "title": "Bus statistics", "text": TEXT}
+FACT = {"statement": "Bus use outside London fell 27% from 2010 to 2020.", "side": "opp", "source": 0,
+        "quote": QUOTE, "number": 27, "unit": "%"}
+
+
+def test_brief_changes_the_cache_key_but_no_brief_keeps_the_old_one():
+    m = "This house would ban cars"
+    assert preresearch.index_path(m) == preresearch.index_path(m, brief="  ")
+    assert preresearch.index_path(m, brief="UK focus") != preresearch.index_path(m)
+    assert preresearch.index_path(m, brief="UK  focus") == preresearch.index_path(m, brief="UK focus")
+
+
+async def test_brief_reaches_the_query_planner():
+    class Spy(FakeLLM):
+        async def complete_json(self, system, user, *a, **k):
+            self.user = user
+            return {"queries": ["q1"]}
+    llm = Spy()
+    assert await preresearch.plan_queries("M", llm, brief="Mention Ghent") == ["q1"]
+    assert "Mention Ghent" in llm.user and "Brief" in llm.user
+
+
+async def test_fact_sheet_keeps_only_verbatim_quotes():
+    index = EvidenceIndex([PAGE])
+    made_up = {**FACT, "quote": "fell by 40% between 2010 and 2020"}
+    bad_source = {**FACT, "source": 7}
+    facts = await preresearch.extract_facts("M", index, FakeLLM({"facts": [FACT, made_up, bad_source, FACT]}),
+                                            queries=["bus use"])
+    assert len(facts) == 1
+    f = facts[0]
+    assert f["side"] == "opp" and f["url"] == PAGE["url"] and f["context"] == TEXT and f["number"] == 27
+
+
+async def test_fact_sheet_survives_a_failing_model():
+    assert await preresearch.extract_facts("M", EvidenceIndex([PAGE]), FakeLLM(RuntimeError("x")), queries=["q"]) == []
+
+
+async def test_matching_fact_is_put_first_for_the_judge():
+    other = [{"url": "https://x.org/a", "title": "A", "text": "Bus use outside London fell sharply."}]
+    c = Checker(None, index=EvidenceIndex(other), facts=[{**FACT, "url": PAGE["url"], "title": "Bus", "context": TEXT}])
+    found = await c.retrieve("bus use outside London fell 27%")
+    assert found[0].url == PAGE["url"] and found[0].text == TEXT and len(found) == 2
+
+
+async def test_research_request_builds_saves_and_publishes_a_fact_sheet(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet", "ResearchProgress", "SessionStart"})
+    mod = EvidenceModule(bus, FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), FakeSearch([PAGE]))
+    await mod.prepare("New motion", "UK only")
+    sheet = await wait_for(sub, "FactSheet")
+    assert sheet.motion == "New motion" and sheet.brief == "UK only" and sheet.facts[0].quote == QUOTE
+    assert not hasattr(sheet.facts[0], "context") or "context" not in sheet.facts[0].model_dump()
+    assert mod.session == 0                          # preparing never resets the running debate
+    path = preresearch.index_path("New motion", brief="UK only")
+    assert path.with_suffix(".json").exists() and preresearch.load_facts(path)[0]["context"] == TEXT
+
+
+async def test_progress_says_ready_only_after_the_fact_sheet(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet", "ResearchProgress"})
+    await EvidenceModule(bus, FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), FakeSearch([PAGE])).prepare("M2")
+    seen = []
+    while not sub.q.empty():
+        ev = sub.q.get_nowait()
+        seen.append(ev.stage if ev.event == "ResearchProgress" else ev.event)
+    assert seen.index("facts") < seen.index("ready") and seen.count("ready") == 1
+
+
+async def test_session_start_joins_a_build_already_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    search = FakeSearch([PAGE])
+    mod = EvidenceModule(Bus(), FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), search)
+    prep = asyncio.create_task(mod.prepare("Joined", "brief"))
+    await asyncio.sleep(0)
+    await mod.start_session("Joined", "brief")
+    await prep
+    assert search.calls == 1 and len(mod.checker.index) == 1 and mod.checker.facts[0]["quote"] == QUOTE
+
+
+async def test_saved_fact_sheet_loads_with_the_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    path = preresearch.index_path("Saved")
+    EvidenceIndex([PAGE]).save(path)
+    preresearch.save_facts(path, [{**FACT, "url": PAGE["url"], "title": "Bus", "context": TEXT}])
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet"})
+    mod = EvidenceModule(bus, FakeLLM(raw()), FakeSearch())
+    await mod.start_session("Saved", "a brief nobody researched")   # falls back to the demo Motion's index
+    assert len(mod.checker.facts) == 1 and (await sub.__anext__()).facts[0].statement == FACT["statement"]
+
+
+async def test_research_request_without_search_reports_it():
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    await EvidenceModule(bus, FakeLLM(raw())).prepare("Unprepared motion")
+    p = await sub.__anext__()
+    assert p.stage == "error" and p.motion == "Unprepared motion"
+
+
+async def test_mock_evidence_answers_a_research_request():
+    from app.mocks import mock_evidence
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet"})
+    await mock_evidence.fake_research(bus, "This house would test", "b", step=0)
+    sheet = await sub.__anext__()
+    assert sheet.motion == "This house would test" and {f.side for f in sheet.facts} == {"prop", "opp", "both"}

@@ -68,6 +68,19 @@ It publishes a Verdict with `via="deep"` only when it does better: it has a verd
 
 Two run at a time, and claims beyond 6 waiting are skipped, so a burst of claims can't build a backlog that makes every update late. The operator can turn it off with the `deep_check` flag. Settings: `EVIDENCE_DEEP_TIMEOUT_S`, `_CONCURRENCY`, `_MAX_WAITING`, `_MIN_IMPORTANCE` and `_EFFORT`. Measure it with `python -m eval.eval_verdicts --layer deep`, which also reports which verdicts it fixed and which it broke.
 
+## Research a new Motion on the fly
+
+The stage's setup screen (`/stage` → New debate) takes a Motion and a brief and sends a `ResearchRequest`. Evidence
+plans its search queries from both, searches, indexes, then pulls out a **fact sheet**: up to 40 short facts, each
+tagged with the side it helps, kept only if its quote is verbatim in the source. Both are saved in `cache/evidence/`,
+keyed by Motion + brief, and the `SessionStart` that follows loads them (or joins the build if it's still running).
+Checks put the matching facts in front of the index results. Progress arrives as `ResearchProgress` with `motion` set,
+the facts as a `FactSheet`. `PREPARE_DEADLINE_S` (default 150) caps the search; a debate started without preparing
+still researches live with 90 s. The brief steers *what* is searched, never the verdict: the judge only sees sources.
+
+From the command line: `.venv/bin/python -m app.evidence.preresearch "This house would…" --brief "…"`. Add fact sheets
+to indexes built before fact sheets existed with `--all --facts-only`.
+
 ## Build the demo indexes in advance
 
 The demo Motions are in `motions.json`. The four marked `eval` go in the eval set, and the `holdout` one is the unseen check.

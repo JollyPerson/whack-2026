@@ -2,8 +2,8 @@
 
 One JSON-lines file per Motion in the cache volume (cache/verdicts/), so it survives restarts and deploys. A claim
 matches a stored one when it's on the same Motion, has exactly the same figures, and shares at least 70% of its
-words (the argument map's duplicate threshold). Figures must match exactly, so "fell 27%" never reuses the verdict
-for "fell 30%". Negations are kept as words, so "did not rise" doesn't match "rose".
+words (the argument map's duplicate threshold). Figures, in digits or words, must match exactly, so "fell 27%"
+never reuses the verdict for "fell 30%", nor "a third" for "half". Negations are kept as words, so "did not rise" doesn't match "rose".
 
 Only verdicts worth repeating are stored: a label other than unverifiable, a quote the guard verified, and
 confidence of at least EVIDENCE_CACHE_MIN_CONF. A later, better verdict for the same claim (the deep check, say)
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.evidence import preresearch
-from app.evidence.checks import Guarded, numbers_in
+from app.evidence.checks import Guarded, numbers_in, word_numbers
 from app.evidence.index import tokens
 from app.schemas import Evidence, Numeric
 
@@ -36,7 +36,8 @@ def words(text: str) -> frozenset[str]:
 
 
 def figures(text: str) -> tuple[float, ...]:
-    return tuple(sorted(round(n, 6) for n in numbers_in(text)))
+    """Figures in digits and in words, so "a third of firms" never matches "half of firms"."""
+    return tuple(sorted({round(n, 6) for n in numbers_in(text) + word_numbers(text)}))
 
 
 def similarity(a: frozenset[str], b: frozenset[str]) -> float:
