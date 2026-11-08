@@ -1,5 +1,10 @@
 """Face: the page is served and the one-click replay fallback re-drives the pipeline."""
+import shutil
+import subprocess
 import time
+from pathlib import Path
+
+import pytest
 
 from tests.test_main import make_client  # noqa: F401  (fixture)
 
@@ -24,6 +29,29 @@ def test_page_and_assets_are_served(make_client):
     assert page.status_code == 200 and "/static/app.js" in page.text
     for asset in ("app.js", "style.css", "motions.json"):
         assert c.get(f"/static/{asset}").status_code == 200
+
+
+def test_arena_page_is_served(make_client):
+    """/arena: the backdrop the side-bot avatars stand on, with its own CSS and JS and the stage's cast."""
+    c = make_client()
+    page = c.get("/arena")
+    assert page.status_code == 200 and "text/html" in page.headers["content-type"]
+    for ref in ("/static/arena.css", "/static/arena.js", "/static/stage-cast.js", 'id="plat-for"', 'id="plat-against"'):
+        assert ref in page.text
+    for asset in ("arena.css", "arena.js", "stage-cast.js"):
+        assert c.get(f"/static/{asset}").status_code == 200
+    assert "http://" not in page.text and "https://" not in page.text   # no external assets: works offline
+
+
+@pytest.mark.skipif(not shutil.which("deno"), reason="needs deno to run arena.js")
+def test_arena_js_page_rules():
+    """The arena against a fake DOM: platform params, the cards under the platforms, the centre column, Judging… then
+    the winner's glow and the dances, a draw, escaping and hidden-when-empty (tests/js/arena_page.js)."""
+    root = Path(__file__).resolve().parent.parent
+    static = root / "app/face/static"
+    r = subprocess.run(["deno", "run", "--allow-read", str(root / "tests/js/arena_page.js"),
+                        str(static / "stage-cast.js"), str(static / "arena.js")], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "all passed" in r.stdout, r.stdout + r.stderr
 
 
 def test_replay_starts_a_session_with_fresh_timestamps(make_client):

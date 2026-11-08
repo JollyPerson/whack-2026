@@ -5,6 +5,7 @@ POST /face/replay       one-click fallback: the recorded debate re-drives the ru
                         the latency meter stay real. ?speed=2 plays it faster.
 POST /face/replay/stop  stops it.
 GET  /stage             the two-sided character view (static/stage.html).
+GET  /arena             the full-screen backdrop the two side-bot avatars stand on (static/arena.html).
 /face/tts, /face/mate/* the referee's voice and the Mate Engine avatar bridge: see speech.py.
 """
 from __future__ import annotations
@@ -67,3 +68,8 @@ async def stop_replay(req: Request):
 @router.get("/stage")
 async def stage():
     return FileResponse(Path(__file__).parent / "static" / "stage.html")
+
+
+@router.get("/arena")
+async def arena():
+    return FileResponse(Path(__file__).parent / "static" / "arena.html")
