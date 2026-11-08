@@ -174,6 +174,19 @@ def test_lenient_coercion_of_plausible_teammate_payloads():
         parse_event({"event": "Utterance", "speaker": None, "text": "x"})   # null on a required field: still an error
 
 
+def test_importance_one_to_three_scale_vs_unit_floats():
+    """Int 1 (or "1") is the LOW end of the 1..3 scale, not 1.0; a float 1.0 is the 0..1 max."""
+    imp = lambda raw: Claim(id="c1", speaker="A", text="x", importance=raw).importance
+    for raw, want in ((1, 0.33), (2, 0.67), (3, 1.0), ("1", 0.33), (" 2 ", 0.67), ("3", 1.0),
+                      (1.0, 1.0), (0.4, 0.4), (0, 0.0), (0.0, 0.0), ("0.5", 0.5), ("1.0", 1.0),
+                      ("low", 0.33), ("Medium", 0.67), ("HIGH", 1.0),
+                      (2.5, 0.83), (4, 1.0), (7.5, 1.0), ("9", 1.0), (-1, 0.0)):
+        assert imp(raw) == pytest.approx(want, abs=0.01), raw
+    for line, want in (('"importance":1', 0.33), ('"importance":1.0', 1.0), ('"importance":"1"', 0.33)):
+        raw = '{"event":"Claim","id":"c1","speaker":"A","text":"x",%s}' % line   # JSON 1 is int, 1.0 is float
+        assert parse_event(raw).importance == pytest.approx(want, abs=0.01), line
+
+
 def test_control_values_on_bool_flags_are_bools():
     assert Control(flag="agent_speaking", value="false").value is False    # bool("false") would be True
     assert Control(flag="mute", value="ON").value is True and Control(flag="tts", value=0).value is False

@@ -10,7 +10,8 @@ import pytest
 from app.bus import Bus
 from app.evidence import preresearch
 from app.evidence import run as run_module
-from app.evidence.checks import CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in, quote_in_source
+from app.evidence.checks import (CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in,
+                                 quote_in_source)
 from app.evidence.index import EvidenceIndex, chunk_text
 from app.evidence.run import Checker, EvidenceModule
 from app.schemas import Claim, SessionStart
@@ -111,6 +112,50 @@ def test_missing_context_is_not_overruled_by_numbers():
 def test_invented_numbers_are_discarded_and_capped(claimed, actual):
     g = apply_guards(raw(claimed=claimed, actual=actual), "It fell by 27%", SRC)
     assert g.numeric is None and "numeric_dropped" in g.notes and g.confidence == CONFIDENCE_CAP
+
+
+# --- figures said in words (most of docs/FACT-CARDS.md's WRONG facts)
+GHG = "Domestic transport was the largest emitting sector in 2023, producing 29% of UK greenhouse gas emissions."
+GHG_SRC, GHG_QUOTE = [Source("https://gov.uk/ghg", "GHG statistics", GHG)], "producing 29% of UK greenhouse gas emissions"
+HALF = "Transport produces half of the UK's greenhouse gas emissions."
+
+
+@pytest.mark.parametrize("text,value", [
+    ("about a quarter of a million vacancies", 250_000), ("more than half a million people were hurt", 500_000),
+    ("more than two million over-75s", 2e6), ("one and a half million", 1.5e6), ("half of the UK's emissions", 50),
+    ("Three-quarters of the world's countries", 75), ("three quarters of countries", .75), ("One in five people", 20),
+    ("1 in 20 people", .05), ("fallen by a third since 2010", 33), ("fallen by a third", 33.3), ("two-thirds of firms", 66.7),
+])
+def test_figures_said_in_words_appear(text, value):
+    assert number_appears(value, text)
+
+
+@pytest.mark.parametrize("text,value", [("a quarter of a million", 25), ("a third", 25), ("half a million", 5e6),
+                                        ("one in five", 5), ("the third runway", 3)])
+def test_figures_said_in_words_are_not_any_number(text, value):
+    assert not number_appears(value, text)
+
+
+def test_wrong_figure_in_words_is_compared_and_stays_on_air():
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE, claimed=50, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.label == "contradicted" and g.confidence == .9 and g.numeric.claimed == 50 and g.notes == []
+
+
+def test_fraction_written_as_a_proportion_is_compared_as_a_percentage():
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE, claimed=.5, actual=29, unit="%"), HALF, GHG_SRC)
+    assert g.numeric.claimed == 50 and g.label == "contradicted" and g.confidence == .9
+
+
+def test_rounded_figure_in_words_is_not_overruled():
+    """\"About a quarter\" for 27% is fair: words get a looser band than digits (5%), so code doesn't call it wrong."""
+    g = apply_guards(raw(claimed=25, actual=27, unit="%"), "Bus use fell by about a quarter", SRC)
+    assert g.label == "supported" and g.confidence == .9 and g.notes == []
+
+
+def test_figure_in_words_left_out_by_the_model_is_not_capped():
+    """The prompt lets the model skip figures said in words; that must not count as an uncompared figure."""
+    g = apply_guards(raw(label="contradicted", quote=GHG_QUOTE), HALF, GHG_SRC)
+    assert g.confidence == .9 and g.notes == []
 
 
 # --- confidence

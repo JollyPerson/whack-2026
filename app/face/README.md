@@ -25,5 +25,45 @@ It uses `FIXTURE`, then `fixtures/test_debate.jsonl`, then `fixtures/fake_debate
 with the debaters silent, because real mics stay open. In `mock`, `drive` or `dev-*` profiles, mock ears are already
 playing a debate, so a replay started before that finishes overlaps it.
 
-**Voice:** browser speech for now, so it works with no key and no network. To use a hosted voice, replace `say()` in
-`static/app.js`, which must call `done()` once when playback ends and return a function that cuts it off.
+## Voice
+
+The `?audio=1` tab is the only audio player. Its `say()` (`static/app.js`) plays `GET /face/tts?text=<line>`, a 24 kHz
+mono WAV made on the server (`tts.py`), and falls back to browser speech if that fails (503: no server voice; 504: not
+ready within `TTS_MISS_WAIT_S`; 502: every provider failed). `TTSState{speaking:true}` is sent when sound actually
+starts and `false` once it has stopped; the watchdog starts at the first sound, never fires before the WAV's own end,
+and cuts the audio before it says false.
+
+| Env (`.env`) | Default | |
+|---|---|---|
+| `ELEVENLABS_API_KEY` | — | Turns ElevenLabs on. Server only: never logged, cached or sent to a browser |
+| `ELEVENLABS_VOICE_ID` | `JBFqnCBsd6RMkjVDRZzb` | Premade "George" (British). Use a default or instant-clone voice: professional clones are slower |
+| `ELEVENLABS_MODEL` | `eleven_v4_turbo` | Text to Dialogue WebSocket, one connection per line |
+| `ELEVENLABS_HTTP_MODEL` | `eleven_multilingual_v2` | HTTP fallback. Not Flash v2.5, which doesn't normalise numbers |
+| `ELEVENLABS_STABILITY` | `0.6` | Higher = flatter, steadier delivery |
+| `TTS_PROVIDER` | `auto` | `auto` = every configured one in the order eleven → eleven_http → espeak; a name = only that one; `none` |
+| `TTS_MISS_WAIT_S` | `2.5` | How long `/face/tts` waits for a line it hasn't got (the late result is still cached) |
+| `TTS_PRESYNTH` | `lines` | `lines` = synthesise each Interjection as it's published; `candidates` = also the Director's candidate lines ahead of time (hides latency, ~10x the characters); `off` |
+
+- **Credits:** a free ElevenLabs plan is 10,000 characters a month (about 125 referee lines) and asks you to credit
+  ElevenLabs and keep it non-commercial. Keep `TTS_PRESYNTH=lines` on a free plan; cached lines cost nothing again.
+
+- **Cache:** `cache/tts/<sha1(provider|model|voice|speakable text)[:20]>.wav` (gitignored). Delete the folder after changing
+  voice, and before the demo if ElevenLabs failed during a rehearsal: a line cached from a fallback (espeak-ng) is reused.
+- **Pre-synthesis** (`FACE=real`, i.e. `drive`, `live`, `dev-d`, `replay`): `run.py` starts synthesising every
+  Interjection the moment it is published (and the Director's candidates too with `TTS_PRESYNTH=candidates`). With
+  `FACE=off` the routes still work, synthesising on first request.
+- **Numbers:** `speakable()` rewrites the audio only ("£3bn" → "3 billion pounds", "27%" → "27 percent",
+  "2009/10" → "2009 to 2010"). The banner shows the exact text.
+- **No key:** `espeak-ng` on the server if it is installed (`pacman -S espeak-ng`), else the browser's speech.
+  Firefox on Linux needs `speech-dispatcher` for that.
+- **Check it:** `curl -o line.wav 'localhost:8000/face/tts?text=Point%20of%20fact.' && pw-play line.wav`.
+
+## Mate Engine avatar (optional)
+
+A Mate Engine desktop avatar can show the referee's line in a speech bubble and move its mouth while the voice plays.
+It long-polls `GET /face/mate/next` (protocol: `docs/INTEGRATION.md`, D section) and only reads: if it crashes,
+the voice and the dashboard carry on. With `FACE=real` a `mate` dot goes green on its first poll and red 5 s after
+its last one. Dances are operator-only: `curl -XPOST localhost:8000/face/mate/dance -d '{"title":""}' -H
+'content-type: application/json'` and `curl -XPOST localhost:8000/face/mate/dance/stop`. Dance music reaches the
+mics, so only dance outside the live debate. While the avatar is polling, Ctrl-C waits for its open poll (up to its
+`wait`, 10 s) before the server exits: press Ctrl-C twice to stop at once.
