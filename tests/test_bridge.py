@@ -121,6 +121,20 @@ def test_the_other_mic_hearing_the_same_sentence_does_not_end_the_turn(clock):
     assert pub.kinds()[3:] == [("Utterance", "B"), ("Pause", "B"), ("Utterance", "A")]
     b.finish()
 
+def test_a_rebuttal_echoing_the_other_speaker_later_is_a_turn_not_bleed(clock):
+    # Bleed is a copy heard at the same time, as the brain's BleedGuard has it: B repeating A's words 6 s later is
+    # B's turn. Taken for bleed, it never ended A's turn and B, never due, got no Pause of its own.
+    pub = FakePublisher()
+    b = bridge.Bridge(pub, {"mic1": "A", "mic2": "B"}, 6.0)
+    b.sentence(said("mic1", 0.0, 3.0, "Nuclear power is the safest energy source."))
+    clock[0] += 6.0
+    b.sentence(said("mic2", 7.0, 9.0, "Nuclear power is not the safest energy source."))
+    assert pub.kinds() == [("Utterance", "A"), ("Pause", "A"), ("Utterance", "B")]
+    b.check(1006.0 + 6.0)
+    assert pub.kinds()[3:] == [("Pause", "B")]
+    b.finish()
+
+
 def test_more_speech_pushes_the_pause_back(clock):
     pub = FakePublisher()
     b = bridge.Bridge(pub, {"mic1": "A"}, 6.0)

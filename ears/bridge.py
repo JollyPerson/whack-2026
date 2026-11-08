@@ -33,6 +33,7 @@ PAUSE_GAP = 1.2         # added to a sentence's length to get the wait for the n
 MAX_PAUSE_GAP = 15.0    # ...capped, like the brain's
 BLEED_OVERLAP = 0.7     # share of a sentence's words the other mic sent just before: bleed, like the brain's BleedGuard
 BLEED_WINDOW = 10.0     # ...within this many seconds
+BLEED_SLACK = 1.5       # ...and overlapping it in time, give or take this: the brain's BleedGuard slack
 WORD = re.compile(r"[a-z0-9]+")
 
 
@@ -121,7 +122,7 @@ class Bridge:
         self.publisher, self.speakers, self.pause_after = publisher, speakers, pause_after
         self.lock = threading.Lock()
         self.due: dict[str, float] = {}         # speaker mid-turn -> wall time their Pause is due
-        self.heard: list[tuple[str, float, set]] = []   # recent sentences: (speaker, arrival, words)
+        self.heard: list[tuple[str, float, float, set]] = []    # recent sentences: (speaker, start, end, words)
         self.stopped = threading.Event()
         threading.Thread(target=self._watch, daemon=True, name="pauses").start()
 
@@ -139,7 +140,7 @@ class Bridge:
         with self.lock:
             # Both mics hear both debaters: a copy of the other one's sentence is not this speaker starting. The
             # brain drops it as bleed; here it must not end the other's turn (a Pause lets the Moderator cut in).
-            if not self._bleed(speaker, set(WORD.findall(text.lower())), now):
+            if not self._bleed(speaker, set(WORD.findall(text.lower())), now - length, now):
                 for other in [s for s in self.due if s != speaker]:     # the other speaker starting ends their turn
                     self._pause(other, now)
                 self.due[speaker] = now + gap
@@ -162,12 +163,15 @@ class Bridge:
             for speaker in list(self.due):
                 self._pause(speaker, now)
 
-    def _bleed(self, speaker: str, words: set, now: float) -> bool:
-        self.heard = [h for h in self.heard if now - h[1] <= BLEED_WINDOW]
-        if len(words) >= 4 and any(other != speaker and len(words & theirs) / len(words) >= BLEED_OVERLAP
-                                   for other, _, theirs in self.heard):
+    def _bleed(self, speaker: str, words: set, start: float, end: float) -> bool:
+        """The brain's BleedGuard rule on the times sent with the Utterance: a copy heard at the same time."""
+        self.heard = [h for h in self.heard if end - h[2] <= BLEED_WINDOW]
+        if len(words) >= 4 and any(other != speaker and start <= their_end + BLEED_SLACK
+                                   and their_start <= end + BLEED_SLACK
+                                   and len(words & theirs) / len(words) >= BLEED_OVERLAP
+                                   for other, their_start, their_end, theirs in self.heard):
             return True
-        self.heard.append((speaker, now, words))
+        self.heard.append((speaker, start, end, words))
         return False
 
     def _pause(self, speaker: str, now: float) -> None:
