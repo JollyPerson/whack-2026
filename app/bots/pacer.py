@@ -2,8 +2,8 @@
 
 One queue per bot. A line posts the moment it is ready unless its bot posted less than a gap ago, where the gap is
 max(min_gap, the previous bubble's hold_s): a bubble is never replaced while it is still up. When a bot is free
-again it posts its best queued line (priority rebut > challenge > concede > nudge > followup > banter, then the
-newest).
+again it posts its best queued line (priority rebut > uturn > challenge > concede > nudge > conceded > followup >
+banter, then the newest).
 - A queued line expires after `ttl` seconds (banter after `banter_ttl`: a late reply makes no sense).
 - Banter is lowest of all: a bot's queued banter is dropped when a real line for that bot is pushed (or by
   drop_banter, when one may be on its way), and banter is refused while one is queued.

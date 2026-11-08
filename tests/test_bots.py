@@ -1,4 +1,5 @@
-"""app/bots: the For/Against side bots (wording, guards, pacing, the claim pipeline, nudges, banter, wiring).
+"""app/bots: the For/Against side bots (wording, guards, pacing, the claim pipeline, nudges, U-turns and concessions,
+banter, wiring).
 
 The engine runs on a fake clock that only moves when a test says so (the pacer's gaps, TTLs and hold_s); asyncio
 waits (the verdict wait, LLM calls) stay real but tiny. The LLM is a FakeLLM with canned answers, never the network.
@@ -18,8 +19,8 @@ from app.bots.run import Bots
 from app.bots.writer import Writer
 from app.brain.llm import AnthropicLLM, LLMTimeout
 from app.bus import Bus
-from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Control, Evidence, MapNode, Numeric, SessionStart,
-                         SpeakerInfo, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, MapNode, Numeric,
+                         SessionStart, SpeakerInfo, Verdict)
 
 T0 = 1_762_600_000.0
 ONS = [Evidence(url="https://www.ons.gov.uk/x", title="Labour market overview", quote="the rate was 4.2%")]
@@ -408,8 +409,17 @@ def test_one_fact_line_per_claim_across_rebut_challenge_and_concede():
 
 def test_priority_order():
     assert sorted(lines.PRIORITY, key=lines.PRIORITY.get, reverse=True) == [
-        "rebut", "challenge", "concede", "nudge", "followup", "banter"]
-    assert lines.FACT_KINDS == ("rebut", "challenge", "concede")
+        "rebut", "uturn", "challenge", "concede", "nudge", "conceded", "followup", "banter"]
+    assert lines.FACT_KINDS == ("rebut", "challenge", "concede") and lines.TAGGED == ("challenge", "concede")
+    p = Pacer(min_gap=10, ttl=600)
+    p.push(L(text="First?"), 0)
+    p.tick(0)
+    for kind in ("followup", "conceded", "concede", "nudge", "uturn", "challenge", "rebut"):
+        tag = " (unsourced)" if kind in lines.TAGGED else ""
+        assert p.push(L(text=f"A {kind} line.{tag}", kind=kind, claim_id=f"c-{kind}"), 1)
+    assert [p.queued("for")[0].kind, len(p.queued("for"))] == ["followup", 7]
+    assert [b.kind for t in range(10, 80, 10) for b in p.tick(t) if isinstance(b, BotLine)] == [
+        "rebut", "uturn", "challenge", "concede", "nudge", "conceded", "followup"]
 
 
 @pytest.mark.parametrize("check,verdict,want", [
@@ -675,6 +685,143 @@ async def test_no_nudge_from_a_turn_that_is_still_open():
     bots.handle(ArgMapSnapshot(version=2, nodes=nodes, nonresponsive=[{**open_turn, "final": True}]))
     [b] = said(out)
     assert (b.kind, b.persona, b.target, b.claim_id) == ("nudge", "for", "B", "c1")
+
+
+# ----------------------------------------------------------------------------- the debate record (Consistency)
+OTHER_SIDE = {"prop": "opp", "opp": "prop"}
+
+
+def K(kid, kind="self_contradiction", side="opp", spk="B", then="cut it by 6%", now="about 4%", topic="", **kw):
+    """A Consistency finding: claim c2 (by `side`) against the earlier c1 (same side for a U-turn or a correction)."""
+    kw.setdefault("earlier_side", side if kind in ("self_contradiction", "correction") else OTHER_SIDE[side])
+    return Consistency(id=kid, kind=kind, claim_id="c2", earlier_claim_id="c1", side=side, speaker=spk, then=then,
+                       now=now, topic=topic, explanation="The same side gave a different figure.", confidence=0.9, **kw)
+
+
+UTURN_TEXT = "Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?"
+
+
+@pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
+async def test_a_self_contradiction_gets_a_uturn_from_the_opposing_bot_quoting_both_claims(spk, side, persona):
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=false_check()))
+    bots.handle(K("k1", side=side, spk=spk, then="We would cut it by 6%.", now="about 4%"))
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.claim_id, b.sourced, b.evidence) == ("uturn", persona, spk, "c2", False, [])
+    assert lines.OWN_SIDE[persona] != side
+    assert b.text == "Earlier: 'We would cut it by 6%'. Now: 'about 4%'. Which is it?"   # both quotes verbatim
+    assert "unsourced" not in b.text.lower() and len(b.text.split()) <= 18 and b.hold_s == lines.hold_s(b.text)
+    assert bots.writer.fast.calls == [] and bots.writer.checker.calls == []             # a template: no LLM
+
+
+def test_a_uturn_trims_long_quotes_with_an_ellipsis_keeping_their_figures():
+    then = "Our plan would cut child poverty by 6% within two years of taking office, and it is fully costed."
+    now = "In fact the figure we gave was about 4% over the parliament as a whole."
+    text = lines.uturn(then, now)
+    assert text == ("Earlier: '…child poverty by 6% within two…'. Now: '…gave was about 4% over the parliament…'. "
+                    "Which is it?")
+    assert len(text.split()) == lines.REBUT_MAX_WORDS
+    assert lines.uturn("cut it by 6%", now) == \
+        "Earlier: 'cut it by 6%'. Now: 'In fact the figure we gave was about 4%…'. Which is it?"   # the rest
+    assert lines.excerpt("one two three four", 4) == "one two three four" and lines.excerpt("a b c", 0) == ""
+    assert lines.excerpt("a b c d e f", 3) == "a b c…"
+    assert lines.guard(" ".join(["word"] * 18), "uturn") and not lines.guard(" ".join(["word"] * 19), "uturn")
+    assert lines.guard("Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?", "uturn", "cut it by 6%") is None
+
+
+def test_a_uturn_whose_quotes_fail_the_guards_drops_them():
+    plain = "That's not what you said earlier. Which is it?"
+    assert lines.uturn("That figure is false", "about 4%") == plain                      # a judgement word
+    assert lines.uturn("Bob admits it fell by 6%", "about 4%", names=["Bob"]) == plain   # a debater's name
+    assert lines.uturn("", "about 4%") == plain
+    assert lines.uturn("cut it by 6%", "about 4%", used=[UTURN_TEXT]) == "You said 'cut it by 6%'. Now it's 'about 4%'?"
+    assert lines.uturn("cut it by 6%", "about 4%", used=[UTURN_TEXT, "You said 'cut it by 6%'. Now it's 'about 4%'?",
+                                                           plain]) is None
+
+
+@pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
+async def test_a_concession_gets_conceded_from_the_bot_whose_point_was_granted(spk, side, persona):
+    bots, out, clock = make()
+    bots.handle(K("k1", "concession", side=side, spk=spk, then="childcare costs rose", topic="childcare costs",
+                  now="I'll grant that childcare costs rose"))
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.claim_id, b.sourced) == ("conceded", persona, spk, "c2", False)
+    assert lines.OWN_SIDE[persona] == OTHER_SIDE[side]                                  # the conceded-to side
+    assert b.text == "Noted: you just conceded the childcare costs point." and "unsourced" not in b.text.lower()
+
+
+def test_conceded_wording():
+    assert lines.conceded("cost") == "Noted: you just conceded the cost point."
+    assert lines.conceded("") == lines.conceded("absurd claims") == "Noted: you just conceded our point."
+    assert lines.conceded("The 6% target", "about 6%") == "Noted: you just conceded the 6% target point."
+    assert lines.conceded("the 9% target", "about 6%") == "Noted: you just conceded our point."   # not their figure
+    assert lines.conceded("cost", used=["Noted: you just conceded the cost point."]) == \
+        "So you grant the cost point. Noted."
+
+
+async def test_conceded_takes_the_earlier_claims_topic_when_the_finding_has_none():
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", "Tuition debt tops 45,000 pounds.", topic="graduate debt", typ="value",
+                  checkable=False, imp=0.3))
+    bots.handle(K("k1", "concession", then="Tuition debt tops 45,000 pounds", now="that debt figure is right"))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.text) == ("conceded", "for", "B", "Noted: you just conceded the graduate "
+                                                                             "debt point.")
+
+
+@pytest.mark.parametrize("finding", [
+    K("k1", "agreement"), K("k1", "correction"),
+    K("k1", "concession", earlier_side="opp"),                    # a concession to your own side: malformed
+    K("k1", earlier_side="prop"),                                 # a U-turn against the other side: malformed
+    K("k1", side=None, spk=None),                                 # no side, and no claim to take it from
+])
+async def test_agreements_corrections_and_malformed_findings_get_no_line(finding):
+    bots, out, clock = make()
+    bots.handle(finding)
+    clock.t += 30
+    bots.tick()
+    assert said(out) == [] and bots.findings == {"k1"}
+
+
+async def test_a_findings_side_and_speaker_default_to_its_claims():
+    bots, out, clock = make()
+    bots.handle(C("c2", "A", "prop", "It is about 4%.", typ="value", checkable=False, imp=0.3))
+    bots.handle(K("k1", side=None, spk=None, earlier_side=None))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target) == ("uturn", "against", "A")
+
+
+async def test_one_line_per_consistency_finding(caplog):
+    caplog.set_level(logging.INFO, logger="bots")
+    bots, out, clock = make()
+    bots.handle(K("k1"))
+    clock.t += 30
+    bots.handle(K("k1"))                                          # re-sent: the same finding
+    bots.tick()
+    assert [b.text for b in said(out)] == [UTURN_TEXT]
+    bots.handle(K("k2"))                                          # another pair, the same words: never the same text
+    clock.t += 30
+    bots.tick()
+    assert [b.text for b in said(out)] == [UTURN_TEXT, "You said 'cut it by 6%'. Now it's 'about 4%'?"]
+    assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [
+        "bots: self_contradiction k1 by opp -> uturn queued", "bots: self_contradiction k2 by opp -> uturn queued"]
+
+
+async def test_a_uturn_jumps_the_queue_but_never_cuts_a_bubble():
+    config.BOTS_LINE_TTL_S = 60.0
+    bots, out, clock = make()
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c3", typ="causal", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    bots.handle(K("k1", "concession", then="wages rose", now="I accept wages rose", topic="wages"))
+    bots.handle(K("k2"))
+    assert [b.kind for b in said(out)] == ["followup"]            # For's bubble is still up
+    assert sorted(b.kind for b in bots.pacer.queued("for")) == ["conceded", "followup", "uturn"]
+    for _ in range(3):
+        clock.t += 10
+        bots.tick()
+    assert [b.kind for b in said(out)] == ["followup", "uturn", "conceded", "followup"]
 
 
 # ----------------------------------------------------------------------------- banter
@@ -971,6 +1118,23 @@ async def test_restore_after_a_crash_remembers_what_was_said():
     assert len(said(out2)) == 1                                                 # already unanswered: no nudge
 
 
+async def test_restore_remembers_the_findings():
+    bots, out, clock = make()
+    bots.handle(K("k1"))
+    [b] = said(out)
+    start = SessionStart(motion="m", speakers=SPEAKERS, ts=T0)
+    history = [start, K("k1"), b, K("k2", "agreement")]
+    again, out2, clock2 = make()
+    again.restore(history)
+    assert again.findings == {"k1", "k2"}
+    again.handle(K("k1"))                                         # answered before the crash
+    clock2.t += 30
+    again.tick()
+    assert said(out2) == []
+    again.handle(K("k3"))                                         # a new finding, the same words: not the same text
+    assert [x.text for x in said(out2)] == ["You said 'cut it by 6%'. Now it's 'about 4%'?"]
+
+
 async def test_restore_closes_a_mouth_the_crash_left_open():
     bots, out, clock = make()
     bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
@@ -1051,6 +1215,27 @@ async def test_module_on_the_bus_answers_and_survives_a_failing_handler(monkeypa
         bus.publish(V("c1", numeric=Numeric(claimed=6, actual=4.2, unit="%")), src="evidence")
         b = await wait_for(lambda: next((e for e in bus.history if e.event == "BotLine"), None))
         assert (b.src, b.kind, b.persona, b.sourced) == ("bots", "rebut", "for", True)
+        assert not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_module_on_the_bus_heckles_a_u_turn(monkeypatch):
+    from app.bots import run as bots_run
+    monkeypatch.setattr(writer_mod, "make_writer", lambda: Writer(None, None))
+    bus = Bus()
+    task = asyncio.create_task(bots_run.run(bus))
+
+    def lines_() -> list[BotLine]:
+        return [e for e in bus.history if e.event == "BotLine"]
+
+    try:
+        await wait_for(lambda: any(e.event == "ModuleStatus" and e.module == "bots" for e in bus.history))
+        bus.publish(SessionStart(motion="m", speakers=SPEAKERS))
+        bus.publish(K("k1"), src="brain")
+        [b] = await wait_for(lines_)
+        assert (b.src, b.kind, b.persona, b.target, b.text) == ("bots", "uturn", "for", "B", UTURN_TEXT)
         assert not task.done()
     finally:
         task.cancel()

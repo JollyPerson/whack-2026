@@ -79,9 +79,13 @@ BOTS=real ./run.sh live                    # or drive, mock, ...
   ("Annoyingly, that one checks out.", 0.80). At most one of these per claim, and never against the claim's
   Verdict. Otherwise a `followup` question. Every check result is logged at INFO with the bar that applied
   ("bots: check c7: misleading 0.59 (misleading bar 0.60) -> not fired: below the bar"), to tune at rehearsal.
+- The brain's consistency checker feeds them too: a self-contradiction gets a `uturn` from the other side's bot,
+  quoting both claims as said ("Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?"), and a concession a
+  `conceded` from the bot whose point was granted ("Noted: you just conceded the cost point."). The debater's own
+  words, so no "(unsourced)" tag. Agreements and corrections get no line.
 - Unanswered points get a `nudge`. The bots trade a dry `banter` line at most every `BOTS_BANTER_GAP_S` (20 s),
   only while nothing more important is running or queued for either bot (`BOTS_BANTER=0` turns it off).
-  Priority: rebut > challenge > concede > nudge > followup > banter.
+  Priority: rebut > uturn > challenge > concede > nudge > conceded > followup > banter.
 - Each bot posts at most one bubble every `BOTS_MIN_GAP_S` (10 s). The admin flag `bots` pauses both; mute hides
   everything. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
 - They use the same Anthropic key as the brain (`BOTS_MODEL` for follow-ups and banter, `BOTS_CHECK_MODEL` for the

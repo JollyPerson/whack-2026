@@ -2,12 +2,14 @@
 
 Two bots heckle the opposing debater in speech bubbles: the For bot is Prop's second and answers Opp's claims, the
 Against bot is Opp's second and answers Prop's. Every line, templated or written by the LLM, goes through guard():
-- at most MAX_WORDS words (a rebut, which names its source, REBUT_MAX_WORDS);
+- at most MAX_WORDS words (a rebut, which names its source, or a uturn, which quotes the debater twice,
+  REBUT_MAX_WORDS);
 - no judgement or insult words (voice.BANNED and its stems, INSULTS, PUT_DOWNS), no URLs, no emojis or hashtags;
 - figures only if the `allowed` text has them (the claim, the Verdict, the line a banter replies to), in digits
   or in words ("two", "half", "forty"); a challenge may carry Claude's own figure because it ends with UNSOURCED
   (a "true, but" challenge only the claim's and its context phrase's); a concede is tagged too, with the claim's
-  figures only;
+  figures only; a uturn or conceded line (from the debate record: Consistency) only the two claims' figures, and
+  no tag, as its quotes are the debater's own words;
 - LLM-written lines (strict=True) also may not mention people (PERSONAL) or the debaters' names; banter, which is
   between the two bots, may not mention the debaters at all (DEBATERS) or cite sources.
 A line that fails is dropped (or the next template is tried), never trimmed into shape.
@@ -24,11 +26,13 @@ ANSWERS = {"opp": "for", "prop": "against"}     # claim side -> the bot that ans
 OWN_SIDE = {"for": "prop", "against": "opp"}    # the side each bot seconds
 SECOND = {"prop": "for", "opp": "against"}      # side -> its own second (only for nudges about that side's points)
 OTHER = {"for": "against", "against": "for"}
-PRIORITY = {"rebut": 6, "challenge": 5, "concede": 4, "nudge": 3, "followup": 2, "banter": 1}
+PRIORITY = {"rebut": 8, "uturn": 7, "challenge": 6, "concede": 5, "nudge": 4, "conceded": 3, "followup": 2,
+            "banter": 1}
 FACT_KINDS = ("rebut", "challenge", "concede")  # at most one of these per claim
 TAGGED = ("challenge", "concede")               # AI knowledge: the text ends with UNSOURCED
 MAX_WORDS = voice.MAX_WORDS
 REBUT_MAX_WORDS = 18
+LONG = ("rebut", "uturn")                       # a source's name or two quotes: up to REBUT_MAX_WORDS
 UNSOURCED = "(unsourced)"
 IMPORTANT = 0.5                                 # importance >= this: worth a follow-up or a knowledge check
 NO_CHECK = {"value", "prediction"}              # never checkable, whatever the extractor said (as argmap.NO_CHECK)
@@ -118,7 +122,7 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
     if not s:
         return None
     words = s.split()
-    if len(words) > (REBUT_MAX_WORDS if kind == "rebut" else MAX_WORDS):
+    if len(words) > (REBUT_MAX_WORDS if kind in LONG else MAX_WORDS):
         return None
     low = s.lower()
     toks = set(_WORD.findall(low))
@@ -318,3 +322,58 @@ def nudge(topic: Any = "", text: str = "", used: Iterable[str] = ()) -> Optional
         if line.lower() not in used and (ok := guard(line, "nudge", f"{t} {text}")):
             return ok
     return None
+
+
+# ----------------------------------------------------------------------------- the debate record (Consistency)
+UTURN = ["Earlier: '{then}'. Now: '{now}'. Which is it?", "You said '{then}'. Now it's '{now}'?",
+         "That's not what you said earlier. Which is it?"]
+CONCEDED = ["Noted: you just conceded the {topic} point.", "So you grant the {topic} point. Noted.",
+            "Noted: you just conceded our point.", "So you grant our point. Noted."]
+QUOTE_WORDS = REBUT_MAX_WORDS - 5               # what UTURN's quoted templates leave for the two quotes
+_QUOTE_ENDS = " .,;:!?\"'“”‘’"
+_ARTICLE = re.compile(r"^(?:the|a|an|our|your)\s+", re.I)   # "the cost" -> "the cost point", not "the the"
+
+
+def excerpt(text: Any, n: int) -> str:
+    """At most `n` words of a quote, verbatim, with an ellipsis where it was cut; a cut keeps the quote's first
+    figure in view ("…would cut it by 6% within…")."""
+    words = tidy(text).strip(_QUOTE_ENDS).split()
+    if n <= 0 or not words:
+        return ""
+    if len(words) <= n:
+        return " ".join(words)
+    at = next((i for i, w in enumerate(words) if any(ch.isdigit() for ch in w)), 0)
+    start = max(min(at - n // 2, len(words) - n), 0) if at >= n else 0
+    s = " ".join(words[start:start + n]).strip(_QUOTE_ENDS)
+    return ("…" if start else "") + s + ("…" if start + n < len(words) else "")
+
+
+def _pick(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str]):
+    """The first template that fills (every field it names is non-empty), is new and passes guard()."""
+    used = {u.lower() for u in used}
+    for tpl in tpls:
+        try:
+            line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
+        except KeyError:
+            continue
+        if line.lower() not in used and (ok := guard(line, kind, allowed, names=names)):
+            return ok
+    return None
+
+
+def uturn(then: Any, now: Any, names: Iterable[str] = (), used: Iterable[str] = ()) -> Optional[str]:
+    """The heckle for a self-contradiction, quoting the debater's two claims verbatim (Consistency.then and .now,
+    code-checked against the claims upstream), each trimmed to fit: "Earlier: 'cut it by 6%'. Now: 'about 4%'.
+    Which is it?" The quotes' figures are the debater's own, so allowed; no tag. Quotes that fail the guards (a
+    judgement word, a debater's name) give way to a line without them."""
+    t, w = tidy(then).split(), tidy(now).split()
+    first = min(len(t), max(QUOTE_WORDS - len(w), QUOTE_WORDS // 2))     # then gets what now leaves, at least half
+    f = {"then": excerpt(then, first), "now": excerpt(now, QUOTE_WORDS - first)}
+    return _pick("uturn", UTURN, f, f"{tidy(then)} {tidy(now)}", names, used)
+
+
+def conceded(topic: Any = "", text: str = "", names: Iterable[str] = (), used: Iterable[str] = ()) -> Optional[str]:
+    """'Noted: you just conceded the cost point.' `topic`: the conceded point's; `text`: the two claims' words (the
+    only figures the line may carry)."""
+    t = _ARTICLE.sub("", voice.clean(topic))
+    return _pick("conceded", CONCEDED, {"topic": " ".join(t.split()[:4]) if t else ""}, text, names, used)
