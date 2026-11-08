@@ -20,6 +20,44 @@ def contradicted_text() -> str:
                 if mock_evidence.LABELS[mock_evidence._h(t) % 4] == "contradicted")
 
 
+async def test_mock_verdict_from_a_previous_session_is_dropped(monkeypatch):
+    """A check started before New debate still published its Verdict into the new session; mock_brain then fired
+    'Point of fact...' about a claim no longer on screen."""
+    monkeypatch.setenv("MOCK_EVIDENCE_DELAY", "0.15")
+    b = Bus()
+    seen = b.subscribe("t", {"Verdict", "SourceCard", "Interjection"})
+    tasks = [asyncio.create_task(mock_evidence.run(b)), asyncio.create_task(mock_brain.run(b))]
+    try:
+        await asyncio.sleep(0)
+        b.publish(Claim(id="c1", speaker="A", text=contradicted_text(), checkable=True))
+        await asyncio.sleep(0.02)
+        b.publish(SessionStart(motion="new debate"))
+        await asyncio.sleep(0.3)
+        b.publish(Pause(speaker="A"))
+        await asyncio.sleep(0.05)
+    finally:
+        for t in tasks:
+            t.cancel()
+    assert [(e.event, getattr(e, "claim_id", None)) for e in drain(seen)] == []
+
+
+async def test_mock_brain_ignores_a_verdict_for_a_claim_it_does_not_know():
+    b = Bus()
+    seen = b.subscribe("t", {"Interjection", "DirectorDecision"})
+    t = asyncio.create_task(mock_brain.run(b))
+    try:
+        await asyncio.sleep(0)
+        v = b.publish(Verdict(claim_id="ghost", label="contradicted", confidence=0.9,
+                              evidence=[{"url": "https://x.org", "quote": "q"}]))
+        assert v.label == "contradicted"
+        b.publish(Pause(speaker="A"))
+        for _ in range(10):
+            await asyncio.sleep(0)
+    finally:
+        t.cancel()
+    assert drain(seen) == []
+
+
 async def test_mock_ears_non_positive_speed_env_falls_back_to_real_time(tmp_path, monkeypatch):
     """SPEED=0 divided by zero on the first event; the supervisor then crash-looped mock ears forever."""
     p = tmp_path / "f.jsonl"
