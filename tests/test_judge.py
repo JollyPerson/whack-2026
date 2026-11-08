@@ -31,6 +31,7 @@ def _tunables(monkeypatch, tmp_path):
     for k, v in dict(JUDGE_DIR=str(tmp_path / "summaries"), JUDGE_TIMEOUT_S=5.0, JUDGE_DANCE_WIN=WIN,
                      JUDGE_DANCE_LOSE=LOSE, JUDGE_DANCE_DRAW=DRAW, JUDGE_DANCE_S=30.0, JUDGE_MUSIC="winner").items():
         monkeypatch.setattr(config, k, v)
+    monkeypatch.setattr(judge_run, "SETTLE_S", 0.2)          # a click waits this long at most for checks in flight
 
 
 def U(uid, spk, text, t0=0.0, t1=0.0, final=True):
@@ -160,7 +161,8 @@ def test_scorecard_on_a_synthetic_session():
 def test_confirmations_and_time_calls_are_not_pressure_on_a_side():
     """The Director voices confirms to balance its pressure: they must not read as the system picking on a side."""
     rec = sc.collect([
-        SessionStart(motion="m", speakers=SPEAKERS), U("u1", "A", "Prop speaks", 1, 3), U("u2", "B", "Opp speaks", 4, 6),
+        SessionStart(motion="m", speakers=SPEAKERS),
+        U("u1", "A", "Prop speaks", 1, 3), U("u2", "B", "Opp speaks", 4, 6),
         C("c1", "A", "prop"), C("c2", "A", "prop"), C("c3", "B", "opp"),
         V("c1", "supported"), V("c2", "supported"), V("c3", "contradicted"),
         Interjection(id="i-1", text="That checks out.", kind="confirm", claim_id="c1", target="A"),
@@ -494,6 +496,101 @@ async def test_a_click_while_judging_is_ignored_and_a_new_session_cancels_the_ju
     judge.handle(bus.publish(SessionStart(motion="Next", speakers=SPEAKERS)))     # mid-judgement
     await asyncio.sleep(0.3)
     assert task.cancelled() and len(results(judge)) == 1
+
+
+async def test_a_click_waits_for_fact_checks_in_flight(monkeypatch):
+    """A click right after the closing speech: its claim's verdict is still on its way, and it is judged."""
+    monkeypatch.setattr(judge_run, "SETTLE_S", 3.0)
+    bus = Bus()
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)
+    for e in [*synthetic(), U("u-B-0003", "B", "Closing: bus use fell by a third", 40, 44),
+              C("c9", "B", "opp", text="bus use fell by a third"),
+              Claim(id="c0", speaker="B", side="opp", type="statistic", text="an old unchecked claim",
+                    ts=time.time() - 2 * judge_run.RECENT_S)]:                   # never waited for
+        judge.handle(bus.publish(e))
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.2)
+    assert results(judge) == [] and "waiting up to 3 s for 1 fact check in flight" in statuses(judge)[-1]
+    judge.handle(bus.publish(V("c9", "supported")))
+    await wait_for(lambda: results(judge))
+    assert time.monotonic() - t < 1.5                                          # not the whole SETTLE_S
+    assert '- c9 Opposition (Bob Baker): "bus use fell by a third" -> supported' in llm.calls[0][1]
+
+
+async def test_the_wait_for_fact_checks_is_bounded():
+    bus = Bus()
+    judge = make_judge(bus)
+    for e in [*synthetic(), C("c9", "B", "opp")]:
+        judge.handle(bus.publish(e))
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert time.monotonic() - t >= judge_run.SETTLE_S and r.via == "formula"
+
+
+async def test_a_new_or_revised_verdict_lets_a_click_judge_again():
+    bus = Bus()
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: results(judge))
+    await wait_for(lambda: judge.task.done())
+    judge.handle(bus.publish(V("c1", "supported", conf=0.95)))                  # the same verdict again
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 1
+    judge.handle(bus.publish(V("c1", "contradicted")))                          # a deep check revised it
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: len(results(judge)) == 2)
+    assert "\"claim c1\" -> contradicted" in llm.calls[1][1]
+
+
+async def test_a_replayed_click_is_ignored_and_a_replayed_result_is_the_verdict():
+    """Replaying a log recorded with JUDGE=real, with JUDGE=real still set: one verdict, the recorded one."""
+    bus = Bus()
+    llm = FakeLLM(delay=0.3)
+    judge = make_judge(bus, llm)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(Control(flag="screen", value="final", src="replay:dashboard")))
+    assert judge.task is None
+    judge.handle(bus.publish(FINAL))                                            # a live click while it replays...
+    await asyncio.sleep(0.05)
+    task = judge.task
+    judge.handle(bus.publish(DebateResult(winner="opp", margin="clear", src="replay:judge")))   # ...then the recorded
+    await asyncio.sleep(0.4)
+    assert task.cancelled() and results(judge) == []
+    judge.handle(bus.publish(FINAL))                                            # judged: nothing new since
+    await asyncio.sleep(0.05)
+    assert judge.task is None and len(llm.calls) == 1
+
+
+async def test_a_summary_that_cannot_be_written_still_publishes_the_verdict(monkeypatch):
+    def fail(*a, **kw):
+        raise OSError("disk full")
+    monkeypatch.setattr(report, "write", fail)
+    bus = Bus()
+    judge = make_judge(bus, FakeLLM())
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert (r.winner, r.report, r.dances["for"]) == ("prop", "", WIN)              # the dances still happen
+    status = [e for e in judge.sent if e.event == "ModuleStatus"][-1]
+    assert status.state == "degraded" and status.detail.endswith("summary not written")
+
+
+def test_restore_resolves_a_repo_relative_report_path():
+    bus = on_bus(synthetic())
+    bus.publish(DebateResult(winner="prop", margin="clear", report="logs/summaries/run-summary.md", src="judge"))
+    judge = make_judge(bus)
+    judge.restore(list(bus.history))
+    assert judge.path == report.ROOT / "logs" / "summaries" / "run-summary.md"
+    assert judge.judged == judge_run.progress(sc.collect(bus.history))
 
 
 async def test_the_record_survives_the_history_cap():

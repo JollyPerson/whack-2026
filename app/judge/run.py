@@ -1,20 +1,25 @@
 """The judge, wired onto the bus. Owner: B. Runs only with JUDGE=real (no profile starts it).
 
-Consumes: SessionStart, Control (flag screen, value final), and the session's record: Utterance (final), Claim,
-          Verdict, BotLine, Interjection, ArgMapSnapshot
+Consumes: SessionStart, Control (flag screen, value final), DebateResult (from another src), and the session's
+          record: Utterance (final), Claim, Verdict, BotLine, Interjection, ArgMapSnapshot
 Produces: DebateResult (src="judge"), ModuleStatus(judge); writes {JUDGE_DIR}/<run>-summary.md and .json
 
 When the operator shows the final screen, the judge rates the CURRENT session: the bus history since the last
-SessionStart, merged with what this module saw itself (in case the history cap trimmed rows). scorecard.py computes
+SessionStart, merged with what this module saw itself (in case the history cap trimmed rows). It first waits up to
+SETTLE_S for fact checks in flight (checkable claims from the last RECENT_S with no Verdict yet: verdicts trail their
+speech by a few seconds, and a click right after the closing speech is the natural demo flow). scorecard.py computes
 the fixed scorecard, writer.py has Claude weigh it with the transcript (or the formula decides), report.py writes the
 summary, and one DebateResult goes out: winner, margin, headline, scores, the report path, a dance per side bot
 (dances_for: the winner's bot JUDGE_DANCE_WIN, the loser's JUDGE_DANCE_LOSE, both JUDGE_DANCE_DRAW on a draw; the For
 bot is Prop's), music per JUDGE_MUSIC (music_for: winner = only the winner's bot, so a draw is silent; none; both)
 and dance_s = JUDGE_DANCE_S. The face turns it into the bots' dances.
-Once per session: a later final click judges again only if new final Utterances arrived since the last judgement,
-otherwise it publishes nothing. The judgement runs as a background task (the bus loop never waits on Claude); a click
-while one runs is ignored. SessionStart resets everything and cancels a judgement in flight. After a crash-restart,
-a DebateResult already in the history counts as judged.
+Once per session: a later final click judges again only if new final Utterances or new (or revised) Verdicts
+arrived since the last judgement, otherwise it publishes nothing. The judgement runs as a background task (the bus
+loop never waits on Claude); a click while one runs is ignored. SessionStart resets everything and cancels a
+judgement in flight. After a crash-restart, a DebateResult already in the history counts as judged.
+Replays: a final click replayed from a log (src "replay:...") is ignored, only a live click judges; a DebateResult
+from another src (a replayed one) counts as this session's judgement and cancels one in flight, so a replayed log
+never shows two verdicts.
 """
 from __future__ import annotations
 
@@ -30,6 +35,8 @@ from app.schemas import ArgMapSnapshot, DebateResult, Event, ModuleStatus, Sessi
 
 log = logging.getLogger("judge")
 RECORD = {"Utterance", "Claim", "Verdict", "BotLine", "Interjection", "ArgMapSnapshot"}
+SETTLE_S = 8.0            # at a final click, wait at most this long for fact checks still in flight
+RECENT_S = 60.0           # ... for checkable claims this recent (older ones with no verdict won't get one)
 BOT = {"prop": "for", "opp": "against"}       # the side -> the bot that seconds it
 PERSONAS = ("for", "against")
 MUSIC_MODES = ("winner", "none", "both")
@@ -60,6 +67,23 @@ def is_final_screen(ev: Event) -> bool:
     return ev.event == "Control" and ev.flag == "screen" and str(ev.value).strip().lower() == "final"
 
 
+def replayed(ev: Event) -> bool:
+    return str(ev.src or "").startswith("replay")
+
+
+def progress(rec: scorecard.Record) -> frozenset:
+    """What a judgement of `rec` rests on: its final Utterances and its Verdicts as counted. A later click re-judges
+    only if this grew or changed."""
+    return frozenset([("u", u.id) for u in rec.utterances]
+                     + [("v", cid, scorecard.counted_label(v)) for cid, v in rec.verdicts.items()])
+
+
+def in_flight(rec: scorecard.Record, now: float) -> set[str]:
+    """Checkable claims from the last RECENT_S with no Verdict yet."""
+    return {c.id for c in rec.claims.values()
+            if scorecard.checkable(c) and c.id not in rec.verdicts and now - (c.ts or now) < RECENT_S}
+
+
 class Judge:
     """The judge's state for one session. handle() takes bus events; a final-screen click spawns judge()."""
 
@@ -70,6 +94,7 @@ class Judge:
         self.run_name = Path(log_path).stem if log_path else time.strftime("%Y%m%d-%H%M%S")
         self.task: Optional[asyncio.Task] = None
         self.session = 0
+        self.verdict = asyncio.Event()                         # set when a Verdict arrives (ends a settle early)
         self.reset()
 
     def reset(self, ev: Optional[SessionStart] = None) -> None:
@@ -77,7 +102,7 @@ class Judge:
         self.session += 1
         self.seen: list[Event] = [ev] if ev is not None else []   # this session's record as this module saw it
         self.snapshot: Optional[ArgMapSnapshot] = None           # only the newest (they come several times a second)
-        self.judged: Optional[frozenset] = None                  # final Utterance ids at the last judgement
+        self.judged: Optional[frozenset] = None                  # progress() at the last judgement
         self.path: Optional[Path] = None                         # this session's summary (re-judging rewrites it)
 
     def cancel(self) -> None:
@@ -94,12 +119,20 @@ class Judge:
         if name == "SessionStart":
             self.reset(ev)
         elif is_final_screen(ev):
-            self.on_final()
+            if replayed(ev):
+                log.info("judge: a replayed final screen click (%s) ignored; only a live click judges", ev.src)
+            else:
+                self.on_final()
+        elif name == "DebateResult":
+            if ev.src != "judge":
+                self.on_foreign_result(ev)
         elif name == "ArgMapSnapshot":
             if self.snapshot is None or ev.version >= self.snapshot.version:
                 self.snapshot = ev
         elif name in RECORD and (name != "Utterance" or ev.final):
             self.seen.append(ev)
+            if name == "Verdict":
+                self.verdict.set()
 
     def events(self) -> list[Event]:
         """The session's events in publish order: the bus history plus what this module saw, each once."""
@@ -114,18 +147,43 @@ class Judge:
             log.info("judge: still judging; final screen click ignored")
             return
         rec = scorecard.collect(self.events())
-        speech = frozenset(u.id for u in rec.utterances)
-        if not speech:
+        if not rec.utterances:
             self.status("up", "nothing to judge: no speech this session")
             return
-        if self.judged is not None and not speech - self.judged:
-            log.info("judge: this session is judged and nobody spoke since; nothing re-published")
+        if self.judged is not None and progress(rec) <= self.judged:
+            log.info("judge: this session is judged and nothing new was said or checked since; nothing re-published")
             return
-        self.task = asyncio.create_task(self.judge(rec, speech, self.session))
+        self.task = asyncio.create_task(self.judge(self.session))
+
+    def on_foreign_result(self, ev: DebateResult) -> None:
+        """A DebateResult from another src (a replayed log's): it is this session's verdict. One verdict only."""
+        if self.task is not None and not self.task.done():
+            log.info("judge: a DebateResult from %s arrived; the judgement in flight is dropped", ev.src)
+        self.cancel()
+        self.judged = progress(scorecard.collect(self.events()))
 
     # ------------------------------------------------------------------------------------------- judging
-    async def judge(self, rec: scorecard.Record, speech: frozenset, session: int) -> None:
+    async def settle(self) -> scorecard.Record:
+        """The session's record once the fact checks in flight have landed, or after SETTLE_S at most."""
+        end, told = time.monotonic() + SETTLE_S, False
+        while True:
+            rec = scorecard.collect(self.events())
+            waiting, left = in_flight(rec, time.time()), end - time.monotonic()
+            if not waiting or left <= 0:
+                return rec
+            if not told:
+                told = True
+                n = len(waiting)
+                self.status("up", f"waiting up to {left:.0f} s for {n} fact check{'s' if n != 1 else ''} in flight")
+            self.verdict.clear()
+            try:
+                await asyncio.wait_for(self.verdict.wait(), left)
+            except TimeoutError:
+                pass
+
+    async def judge(self, session: int) -> None:
         try:
+            rec = await self.settle()
             self.status("up", f"judging: {len(rec.utterances)} utterances, {len(rec.claims)} claims")
             card = scorecard.scorecard(rec)
             j = await writer.decide(self.llm, rec, card)
@@ -142,7 +200,7 @@ class Judge:
                 return
             self.publish(DebateResult(winner=j.winner, margin=j.margin, headline=j.headline, scores=j.scores,
                                       report=where, dances=dances, music=music, dance_s=dance_s, via=j.via))
-            self.judged = speech
+            self.judged = progress(rec)
             verdict = "draw" if j.winner == "draw" else f"{j.winner} wins ({j.margin})"
             log.info("judge: %s via %s: %s -> %s", verdict, j.via, j.headline, where or "no summary file")
             self.status("up" if where else "degraded",
@@ -154,24 +212,24 @@ class Judge:
             self.status("degraded", f"judging failed: {e!r}")
 
     def restore(self, history: list[Event]) -> None:
-        """After a crash-restart: this session's judgement, if there was one (its speech and its summary file)."""
-        speech: set[str] = set()
+        """After a crash-restart: this session's judgement, if there was one (what it rested on and its summary file;
+        a replayed DebateResult counts as judged too, but its file is not ours to rewrite)."""
+        session: list[Event] = []
         for ev in history:
             if ev.event == "SessionStart":
                 self.reset(ev)
-                speech = set()
-            elif ev.event == "Utterance" and ev.final and ev.text.strip():
-                speech.add(ev.id)
-            elif ev.event == "DebateResult" and ev.src == "judge":
-                self.judged = frozenset(speech)
-                if ev.report:
+                session = []
+            session.append(ev)
+            if ev.event == "DebateResult":
+                self.judged = progress(scorecard.collect(session))
+                if ev.report and ev.src == "judge":
                     p = Path(ev.report)
                     self.path = p if p.is_absolute() else report.ROOT / p
 
 
 async def run(bus) -> None:
     # Subscribe and snapshot the history in one synchronous step (as app/bots does).
-    sub = bus.subscribe("judge", {"SessionStart", "Control", *RECORD},
+    sub = bus.subscribe("judge", {"SessionStart", "Control", "DebateResult", *RECORD},
                         where=lambda e: e.event != "Utterance" or e.final, maxsize=4096)
     history = list(bus.history)
     try:
