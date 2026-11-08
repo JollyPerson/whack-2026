@@ -1006,3 +1006,14 @@ async def test_an_older_summary_is_waited_past_then_used_with_a_note(monkeypatch
     md = Path(r.report).read_text()
     assert ("argument map version 1; the newest predates the click and the end of the record (argument map version 1 "
             "of 2): the last points may be missing)") in md
+
+
+def test_the_report_names_a_bot_that_does_not_dance_and_a_dance_to_the_end():
+    """JUDGE_DANCE_LOSE="" (the loser stays still) and JUDGE_DANCE_S=0 (to the end), as the face plays them."""
+    rec = sc.collect(synthetic())
+    card = sc.scorecard(rec)
+    j = writer.from_formula(card, "no LLM")
+    md = report.render(rec, card, j, {"for": WIN, "against": ""}, {"for": True, "against": False}, 0.0, T0)
+    dances = md.split("## Verdict dances")[1]
+    assert "****" not in dances and "AGAINST bot (the Opposition's second): does not dance" in dances
+    assert "after 0 s" not in dances and "play to the end" in dances
