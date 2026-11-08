@@ -6,7 +6,7 @@ Dev loop: `./run.sh dev-d` (no keys needed). Protocol reference: `app/tools/ws_d
 | URL | Use |
 |---|---|
 | `/` | The projected view |
-| `/?admin=1` | Operator controls. Keys: M mute, Esc mute, F say next now, 1–5 talkativeness, W web search, I interims, H hide controls |
+| `/?admin=1` | Operator controls. Keys: M mute, Esc mute, F say next now, 1–5 talkativeness, W web search, I interims, B side bots, H hide controls |
 | `/?audio=1` | The one tab that speaks. Click **Enable audio** once, because browsers block speech until the page has had a click |
 | `/?admin=1&audio=1` | Both, for a single demo laptop |
 | `/stage` | Opens on a **setup screen** (motion, brief, speaker names): "Research this debate" pre-researches it with a progress bar, then "Start debate" starts the session with the brief. During the debate the brief sits under the motion. Two-sided character view: each fact check pops a character onto the side that made the claim (Sunny = supported, Grumble = contradicted, Professor Hoot = missing context), with a sign and a speech bubble giving the context and source. Display only, it never speaks. Takes `?theme=light`; `?all=1` also shows unverifiable checks (Shrug the ghost). Click a past check to bring it back |
@@ -67,3 +67,18 @@ its last one. Dances are operator-only: `curl -XPOST localhost:8000/face/mate/da
 'content-type: application/json'` and `curl -XPOST localhost:8000/face/mate/dance/stop`. Dance music reaches the
 mics, so only dance outside the live debate. While the avatar is polling, Ctrl-C waits for its open poll (up to its
 `wait`, 10 s) before the server exits: press Ctrl-C twice to stop at once.
+
+**Side bots (`BOTS=real`).** Two more avatars can show the For bot (Prop's second) and the Against bot (Opp's second).
+Each Mate Engine instance polls its own channel, set with `pollPath` in its own `speech_bridge.json`:
+`/face/mate/next/for` or `/face/mate/next/against` (`/face/mate/next/referee` is the route above; any other channel is
+a 404). A bot's channel carries only its own `BotLine`s, as a text-only bubble with the mouth open, and `BotTalk`
+closes the mouth after the line's `hold_s`. `SessionStart`, mute and the `bots` flag going off clear its bubble. The
+referee's lines never reach a bot's channel, and bot lines never reach the referee's. Each channel has its own dot
+(`mate_for`, `mate_against`), shown only once that avatar has polled. Dances take an optional `"channel"`:
+`-d '{"title":"","channel":"for"}'`; without one (or `""`), every avatar dances, and `dance/stop` likewise.
+
+The dashboard shows a **For / Against strip** above the panels with each bot's latest line, in its side's colour. An
+unsourced `challenge` (Claude's own knowledge) is tagged **AI knowledge**, and a sourced `rebut` names its source. The
+strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown on the final
+screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(flag="bots")`: off stops new lines and clears the
+bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
