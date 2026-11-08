@@ -159,3 +159,21 @@ def test_punctuation_split_off_a_word_already_emitted_is_dropped():
     assert texts(sb, 20) == ["It works."]
     sb.add_words([w(" works.", .2, .6), w("%", .6, .62), w(" Then", 1.0, 1.2), w(" more.", 1.2, 1.5)], window_start=0.0)
     assert texts(sb, 20) == ["Then more."]
+
+
+@pytest.mark.parametrize("words, text", [
+    ([w(" The", 0, .2), w(" U.S.", .2, .6), w(" imported", .6, 1.0), w(" grain.", 1.0, 1.4)],
+     "The U.S. imported grain."),
+    ([w(" Dr.", 0, .3), w(" Smith", .3, .6), w(" agrees.", .6, 1.0)], "Dr. Smith agrees."),
+    ([w(" Cities,", 0, .4), w(" e.g.", .4, .8), w(" London.", .8, 1.2)], "Cities, e.g. London."),
+])
+def test_abbreviations_do_not_end_a_sentence(words, text):
+    sb = ears.SentenceBuffer()
+    sb.add_words(words, window_start=0.0)
+    assert texts(sb, 20) == [text]
+
+
+@pytest.mark.parametrize("word, end", [("29.", True), ("U.S.?", True), ("Plan A.", True), ("so...", False),
+                                       ("so…", False), ("U.S.", False), ("Mr.", False), ("vs.", False)])
+def test_sentence_end(word, end):
+    assert ears.SentenceBuffer.is_sentence_end(" " + word) is end

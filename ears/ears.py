@@ -21,6 +21,8 @@ RING_CHUNKS = 160
 HEAD_MARGIN = 0.4
 # The same word this soon after the previous one is one word heard twice.
 DUPLICATE_GAP = 0.3
+# Ends in a period but rarely ends a sentence: "U.S.", "e.g.", "Dr.".
+ABBREVIATION = re.compile(r"(?:[a-z]\.){2,}|(?:mr|mrs|ms|dr|prof|st|vs|jr|sr)\.", re.IGNORECASE)
 
 
 class AudioBuffer:
@@ -77,6 +79,10 @@ class SentenceBuffer:
 
         # An ellipsis is not a sentence boundary.
         if cleaned.endswith("...") or cleaned.endswith("…"):
+            return False
+
+        # Nor is an abbreviation: "The U.S. imported grain." is one claim.
+        if cleaned and ABBREVIATION.fullmatch(cleaned.split()[-1].lstrip("\"'([")):
             return False
 
         return bool(re.search(r"[.!?][\"')\]]*\s*$", cleaned))
