@@ -38,7 +38,8 @@ only the opposing debater, in a short speech bubble on screen.
 Write ONE pointed follow-up question addressed directly to the opposing debater ("you") about the claim they \
 just made.
 - Dry and sharp, like a good heckle. One short question of at most 10 words: the bubble cuts anything longer.
-- Ask for what is missing: a source, a definition, a baseline, a mechanism, a consequence.
+- Ask for what is missing: a source, a definition, a baseline, a mechanism, a consequence. Vary the angle, and \
+don't open the way a line already said did.
 - Add no facts, figures, dates, names or sources of your own. You may repeat a figure from the claim.
 {_RULES}
 Return JSON: {{"question": "..."}}"""
