@@ -9,7 +9,7 @@ Dev loop: `./run.sh dev-d` (no keys needed). Protocol reference: `app/tools/ws_d
 | `/?admin=1` | Operator controls. Keys: M mute, Esc mute, F say next now, 1–5 talkativeness, W web search, I interims, H hide controls |
 | `/?audio=1` | The one tab that speaks. Click **Enable audio** once, because browsers block speech until the page has had a click |
 | `/?admin=1&audio=1` | Both, for a single demo laptop |
-| `/stage` | Two-sided character view: each fact check pops a character onto the side that made the claim (Sunny = supported, Grumble = contradicted, Professor Hoot = missing context), with a sign and a speech bubble giving the context and source. Display only, it never speaks. Takes `?theme=light`; `?all=1` also shows unverifiable checks (Shrug the ghost). Click a past check to bring it back |
+| `/stage` | Opens on a **setup screen** (motion, brief, speaker names): "Research this debate" pre-researches it with a progress bar, then "Start debate" starts the session with the brief. During the debate the brief sits under the motion. Two-sided character view: each fact check pops a character onto the side that made the claim (Sunny = supported, Grumble = contradicted, Professor Hoot = missing context), with a sign and a speech bubble giving the context and source. Display only, it never speaks. Takes `?theme=light`; `?all=1` also shows unverifiable checks (Shrug the ghost). Click a past check to bring it back |
 | `/?theme=light` | Light theme, for a projector that washes out dark screens. Combines with the others |
 
 **Silent-demo warning:** the admin view warns if the Director spoke a line and no tab said it within 3 seconds.
