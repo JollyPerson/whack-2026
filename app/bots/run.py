@@ -4,8 +4,10 @@ Consumes: SessionStart, Claim, Verdict, ArgMapSnapshot, Consistency, Control, Bo
 Produces: BotLine, BotTalk (src="bots"), ModuleStatus(bots)
 
 The For bot is Prop's second and answers Opp's claims; the Against bot mirrors it (Claim.side, set by the brain).
-A claim with no side is ignored, and a bot never answers its own side, nor a claim that is mostly the other side's
-words of the last BLEED_S (mic bleed the brain's guard missed: it would heckle the wrong debater). Per opponent claim:
+A claim with no side is ignored, and a bot never answers its own side, nor a claim that is mostly the words of an
+other-side claim whose speech ended within BLEED_SLACK_S of its own (mic bleed the brain's guard missed: it would
+heckle the wrong debater); a claim that links to that one, or differs from it in negation, is a reply, not bleed.
+Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
   Supported -> no fact line. Otherwise the check's assessment decides, every line tagged "(unsourced)":
@@ -61,9 +63,11 @@ TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
 BANTER_FRESH_S = 8.0      # banter answers a line at most this old (it waits for the bots to be quiet)
-BLEED_S = 10.0            # a claim this soon after the other side's near-identical one is mic bleed: not answered
+BLEED_SLACK_S = 1.5       # an other-side claim whose speech ended this close with mostly its words is mic bleed
 BLEED_OVERLAP = 0.7       # (as the brain's BleedGuard: the share of its words in the other side's claim)
+BLEED_KEEP_S = 30.0       # how long a claim is kept to compare (claims reach the bus seconds after the speech)
 _TOKEN = re.compile(r"[a-z0-9%£$€]+")
+_NEGATION = re.compile(r"\b(?:not|no|never|none|nobody|nothing|neither|nor|cannot|without)\b|n't\b")
 
 
 class Bots:
@@ -97,7 +101,7 @@ class Bots:
             self.names += [w for w in info.name.split() if len(w) > 2]
         self.last_speaker: dict[str, str] = {}        # side -> who spoke for it last
         self.claims: dict[str, Claim] = {}
-        self.heard: list[tuple[float, str, set]] = []   # (when, side, words) of the last BLEED_S of claims
+        self.heard: list[tuple[float, str, str, float, set, bool]] = []   # (when, side, id, t_end, words, negated)
         self.verdicts: dict[str, Verdict] = {}
         self.waiting: dict[str, asyncio.Event] = {}
         self.statuses: dict[str, str] = {}            # claim id -> node status in the last ArgMapSnapshot
@@ -173,14 +177,18 @@ class Bots:
         return lines.answering(side) if first else None
 
     def bleed(self, c: Claim) -> bool:
-        """True if `c` is mostly the words of the other side's claim of the last BLEED_S: the other debater's mic
-        heard it too (the brain's bleed guard compares utterances; a later or longer segment can slip past it)."""
-        now, side = self.clock(), str(c.side or "").lower()
-        words = set(_TOKEN.findall(c.text.lower()))
-        self.heard = [h for h in self.heard if now - h[0] <= BLEED_S]
-        hit = len(words) >= 4 and any(s != side and len(words & w) / len(words) >= BLEED_OVERLAP
-                                      for _, s, w in self.heard)
-        self.heard.append((now, side, words))
+        """True if `c` is mostly the words of an other-side claim whose speech ended within BLEED_SLACK_S of its own:
+        the other debater's mic heard it too (the brain's bleed guard compares utterances; a different segment can
+        slip past it). Narrow on purpose, as the commonest reply denies the claim in its own words: a claim that
+        links to it, differs from it in negation, or has no speech time (t_end 0) is never bleed."""
+        now, side, text = self.clock(), str(c.side or "").lower(), c.text.lower()
+        words, neg = set(_TOKEN.findall(text)), bool(_NEGATION.search(text))
+        linked = {ln.claim_id for ln in c.links}
+        self.heard = [h for h in self.heard if now - h[0] <= BLEED_KEEP_S]
+        hit = len(words) >= 4 and bool(c.t_end) and any(
+            s != side and cid not in linked and t and abs(c.t_end - t) <= BLEED_SLACK_S and n == neg
+            and len(words & w) / len(words) >= BLEED_OVERLAP for _, s, cid, t, w, n in self.heard)
+        self.heard.append((now, side, c.id, c.t_end, words, neg))
         return hit
 
     def on_claim(self, c: Claim) -> None:

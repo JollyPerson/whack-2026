@@ -19,8 +19,8 @@ from app.bots.run import Bots
 from app.bots.writer import Writer
 from app.brain.llm import AnthropicLLM, LLMTimeout
 from app.bus import Bus
-from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, MapNode, Numeric,
-                         SessionStart, SpeakerInfo, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, Link, MapNode,
+                         Numeric, SessionStart, SpeakerInfo, Verdict)
 
 T0 = 1_762_600_000.0
 ONS = [Evidence(url="https://www.ons.gov.uk/x", title="Labour market overview", quote="the rate was 4.2%")]
@@ -1377,15 +1377,37 @@ async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides(
     """Mic bleed the brain's guard missed (the phone's Wi-Fi lag, a different segment): Prop's words come back as an
     Opp claim. Heckling Opp for them is heckling the wrong debater."""
     bots, out, clock = make()
-    bots.handle(C("c1", "A", "prop", "Raising wages always destroys small businesses.", typ="causal", checkable=False))
+    bots.handle(C("c1", "A", "prop", "Raising wages always destroys small businesses.", typ="causal", checkable=False,
+                  t_end=T0 - 3))
     clock.t += 2
-    bots.handle(C("c2", "B", "opp", "raising wages always destroys small businesses", typ="causal", checkable=False))
+    bots.handle(C("c2", "B", "opp", "raising wages always destroys small businesses", typ="causal", checkable=False,
+                  t_end=T0 - 2))                                        # the same speech, its segment ends 1 s later
     bots.handle(C("c3", "B", "opp", "Higher wages pay for themselves in productivity.", typ="causal",
-                  checkable=False))                                     # a real Opp claim at the same moment
+                  checkable=False, t_end=T0 - 2))                       # a real Opp claim at the same moment
     await settle(bots)
     clock.t += 10
     bots.tick()
     assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c3")]
+
+
+@pytest.mark.parametrize("first,reply,gap,kw", [
+    ("Raising the minimum wage costs 400,000 jobs.", "Raising the minimum wage does not cost 400,000 jobs.", 5, {}),
+    ("Immigration raises wages for local workers.", "Immigration lowers wages for local workers.", 6, {}),
+    ("Raising the minimum wage costs 400,000 jobs.", "Raising the minimum wage costs no jobs.", 1, {}),
+    ("Immigration raises wages for local workers.", "Immigration lowers wages for local workers.", 1,
+     {"links": [Link(claim_id="c1", relation="attacks")]}),
+], ids=["denial", "antonym", "interrupting-denial", "linked-rebuttal"])
+async def test_a_reply_in_the_other_sides_words_is_still_answered(first, reply, gap, kw):
+    """The commonest debate move is to deny the opponent's claim at once, mostly in their words (the brain's LLM
+    words both sides' claims alike). That is a new claim, not mic bleed: the bot answers it."""
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", first, typ="causal", checkable=False, t_end=T0))
+    clock.t += gap + 2
+    bots.handle(C("c2", "B", "opp", reply, typ="causal", checkable=False, t_end=T0 + gap, **kw))
+    await settle(bots)
+    clock.t += 10
+    bots.tick()
+    assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c2")]
 
 
 def test_a_nudge_topic_that_starts_with_an_article_is_not_doubled():
