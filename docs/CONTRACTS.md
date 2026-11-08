@@ -59,7 +59,7 @@ downgraded to `unverifiable` on parse. Every verdict shows its source.
 **Upserts** (what the Snapshot, the reference dashboard and the argument map keep):
 - A re-sent `Claim` with the same `id` replaces the old one.
 - A later `Verdict` for the same `claim_id` replaces the earlier one on screen and in the map, e.g. an index
-  verdict followed by a web verdict. Spoken lines are different: the referee gives each claim at most one
+  verdict followed by a web verdict, or a `via="deep"` verdict from the background deep check about 30 s later. Spoken lines are different: the referee gives each claim at most one
   verdict line (correction, context or confirm). A better verdict that arrives after that line updates the chip
   but is not spoken. A source request ("what's your source?") doesn't count as a verdict line, so a later
   verdict can still be spoken after one.

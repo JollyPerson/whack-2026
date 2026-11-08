@@ -43,7 +43,7 @@ echo "Deployed $new"
 # never holds up or fails a deploy. --missing makes it a no-op once they're built. flock stops two running at once.
 if grep -Eq "^EXA_API_KEY=['\"]?[^'\"[:space:]]" app.env 2>/dev/null; then
   # shellcheck disable=SC2016  # the $ expands in the container's sh
-  if compose exec -d -T app sh -c 'exec >>/srv/logs/preresearch.log 2>&1; echo "$(date -u +%FT%TZ) pre-research started"; flock -n -E 75 /tmp/preresearch.lock python -m app.evidence.preresearch --all --missing; echo "$(date -u +%FT%TZ) pre-research finished: exit $? (75 = one was already running)"'; then
+  if compose exec -d -T app sh -c 'exec >>/srv/logs/preresearch.log 2>&1; echo "$(date -u +%FT%TZ) pre-research started"; flock -n -E 75 /tmp/preresearch.lock env EVIDENCE_EMBEDDER=none python -m app.evidence.preresearch --all --missing; echo "$(date -u +%FT%TZ) pre-research finished: exit $? (75 = one was already running)"'; then
     echo "Pre-research running in the background, logging to /srv/logs/preresearch.log in the app container"
   else
     echo "WARN: couldn't start pre-research" >&2

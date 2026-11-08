@@ -7,7 +7,9 @@ services:
     command: ["python", "-m", "app.main", "${APP_PROFILE:-mock}"]
     env_file: app.env   # API keys and role overrides (EARS=, BRAIN=, ...)
     environment:
-      EVIDENCE_INDEX_DIR: /srv/cache/evidence   # pre-research saves here; the cache volume keeps it between deploys
+      # Pre-research saves here; the cache volume keeps it between deploys. evidence-v2 holds the big indexes with
+      # vectors, built off the server (docs/DEPLOY.md). /srv/cache/evidence keeps the old BM25 ones for rollback.
+      EVIDENCE_INDEX_DIR: /srv/cache/evidence-v2
     restart: unless-stopped
     volumes:
       - logs:/srv/logs

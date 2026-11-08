@@ -1,2 +1,4 @@
 # C (evidence): add your dependencies here, one per line.
 numpy>=2.0
+# Local embeddings. No wheels for Python 3.14 yet; the server image is 3.12. Without it, retrieval is BM25 only.
+fastembed>=0.9; python_version < "3.14"

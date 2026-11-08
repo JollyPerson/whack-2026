@@ -1,2 +1,42 @@
 time	layer	model	correct	total	fabricated	swaps	p95_ms	passed	note
 2026-11-07 21:28	verdict	anthropic:claude-haiku-5-5	14	20	0	0	1627	True	
+2026-11-07 21:44	verdict	anthropic:claude-opus-5-5	14	20	0	0	3002	False	
+2026-11-07 21:45	verdict	anthropic:claude-opus-5-5	16	20	0	0	2667	False	
+2026-11-07 21:46	verdict	anthropic:claude-opus-5-5	15	20	0	0	2851	False	
+2026-11-07 21:47	verdict	anthropic:claude-haiku-5-5	13	20	0	0	1567	False	
+2026-11-07 21:47	verdict	anthropic:claude-haiku-5-5	13	20	0	0	1578	False	
+2026-11-07 21:47	verdict	anthropic:claude-haiku-5-5	13	20	0	0	1600	False	
+2026-11-07 21:48	verdict	anthropic:claude-opus-5-5	15	20	0	0	3261	False	opus, 8s timeout probe
+2026-11-07 21:49	verdict	anthropic:claude-opus-5-5	16	20	0	0	3301	False	opus, 8s timeout probe
+2026-11-07 21:52	verdict	anthropic:claude-opus-5-5	15	20	0	0	3017	False	opus, 4s timeout
+2026-11-07 21:53	verdict	anthropic:claude-opus-5-5	15	20	0	0	2844	False	opus, 4s timeout
+2026-11-07 21:53	verdict	anthropic:claude-opus-5-5	15	20	0	0	2781	False	opus, 4s timeout
+2026-11-07 23:35	full	anthropic:claude-opus-5-5	17	20	0	0	2869	False	old index, bm25, no web
+2026-11-07 23:36	full	anthropic:claude-opus-5-5	17	20	0	0	2923	False	old index, bm25, no web
+2026-11-07 23:36	full	anthropic:claude-opus-5-5	17	20	0	0	2749	False	old index, bm25, no web
+2026-11-07 23:38	full	anthropic:claude-opus-5-5	13	20	0	0	3729	False	big index, bm25, no web
+2026-11-07 23:38	full	anthropic:claude-opus-5-5	12	20	0	0	3951	False	big index, bm25, no web
+2026-11-07 23:39	full	anthropic:claude-opus-5-5	14	20	0	0	3200	False	big index, bm25, no web
+2026-11-07 23:41	full	anthropic:claude-opus-5-5	14	20	0	0	3652	False	old index, bm25+vectors, no web
+2026-11-07 23:41	full	anthropic:claude-opus-5-5	14	20	0	0	3802	False	old index, bm25+vectors, no web
+2026-11-07 23:42	full	anthropic:claude-opus-5-5	14	20	0	0	3972	False	old index, bm25+vectors, no web
+2026-11-07 23:48	full	anthropic:claude-opus-5-5	15	20	0	0	2688	False	mid index (20q + primary pass), bm25, no web
+2026-11-07 23:48	full	anthropic:claude-opus-5-5	15	20	0	0	3226	False	mid index (20q + primary pass), bm25, no web
+2026-11-07 23:49	full	anthropic:claude-opus-5-5	16	20	0	0	2899	False	mid index (20q + primary pass), bm25, no web
+2026-11-08 00:04	full	anthropic:claude-opus-5-5	16	20	0	0	2877	False	big index, bm25+vectors, no web
+2026-11-08 00:04	full	anthropic:claude-opus-5-5	15	20	0	0	2634	False	big index, bm25+vectors, no web
+2026-11-08 00:05	full	anthropic:claude-opus-5-5	16	20	0	0	2664	False	big index, bm25+vectors, no web
+2026-11-08 00:06	full	anthropic:claude-opus-5-5	15	20	0	0	3170	False	old index, bm25+vectors, no web, cpu free
+2026-11-08 00:07	full	anthropic:claude-opus-5-5	14	20	0	0	3743	False	old index, bm25+vectors, no web, cpu free
+2026-11-08 00:08	full	anthropic:claude-opus-5-5	15	20	0	0	3984	False	old index, bm25+vectors, no web, cpu free
+2026-11-08 00:08	full	anthropic:claude-opus-5-5	18	20	0	0	2972	False	big index, bm25+vectors, top 8, no web
+2026-11-08 00:09	full	anthropic:claude-opus-5-5	18	20	0	0	2712	False	big index, bm25+vectors, top 8, no web
+2026-11-08 00:10	full	anthropic:claude-opus-5-5	18	20	0	0	2656	False	big index, bm25+vectors, top 8, no web
+2026-11-08 00:11	full	anthropic:claude-opus-5-5	15	20	0	0	2686	False	old index, bm25, top 8, no web
+2026-11-08 00:12	full	anthropic:claude-opus-5-5	15	20	0	0	2566	False	old index, bm25, top 8, no web
+2026-11-08 00:12	full	anthropic:claude-opus-5-5	15	20	0	0	2675	False	old index, bm25, top 8, no web
+2026-11-08 00:13	full-holdout	anthropic:claude-opus-5-5	1	5	0	0	1817	False	holdout: old index, bm25, top 5, no web
+2026-11-08 00:13	full-holdout	anthropic:claude-opus-5-5	3	5	0	0	2970	True	holdout: big index, bm25+vectors, top 8, no web
+2026-11-08 00:17	full	anthropic:claude-opus-5-5	17	20	0	0	2763	False	old index, bm25, web on
+2026-11-08 00:18	full	anthropic:claude-opus-5-5	17	20	0	0	2909	False	old index, bm25, web on
+2026-11-08 01:07	deep	openai:moonshotai/kimi-k2.6	13	20	0	0	43878	False	kimi-k2.6, big index, vectors, top 8, web on, deep

@@ -76,7 +76,21 @@ A deploy restarts the app, which stops a build part way through; the next deploy
 docker compose --env-file .env --env-file image.env exec app tail -f /srv/logs/preresearch.log
 ```
 
-To rebuild one, delete its `.json` and `.npy` (`exec app sh -c 'rm /srv/cache/evidence/<name>.*'`) and redeploy.
+The app reads `/srv/cache/evidence-v2` (set in `compose.yml`): big indexes with vectors, built on a laptop because
+embedding them takes hours on this server's single vCPU, and copied in. The deploy's pre-research runs with
+`EVIDENCE_EMBEDDER=none`, so a Motion missing from the folder gets a small BM25 index rather than tying up the CPU.
+`/srv/cache/evidence` keeps the older BM25 indexes for a rollback to an image from before the switch.
+`/srv/cache/fastembed` holds the embedding model, so the app doesn't download it on start.
+
+To add or rebuild one with vectors, build it on a laptop with a Python 3.12 venv (see `app/evidence/README.md`),
+then copy it in:
+
+```bash
+scp cache/evidence/<name>.* root@<ip>:/root/
+ssh root@<ip> 'cd /opt/debate-ref && for f in /root/<name>.*; do docker compose --env-file .env --env-file image.env cp "$f" app:/srv/cache/evidence-v2/; done && docker compose --env-file .env --env-file image.env exec -T -u root app chown -R app:app /srv/cache/evidence-v2'
+```
+
+To rebuild one on the server instead, delete its `.json` and `.npy` (`exec app sh -c 'rm /srv/cache/evidence-v2/<name>.*'`) and redeploy.
 
 **Look at the server.** Run these from `/opt/debate-ref` as `deploy`. Event logs are in the `logs` volume, and
 `deploys.log` lists past deploys.

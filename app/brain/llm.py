@@ -89,6 +89,8 @@ def parse_json_text(text: Any) -> dict:
         data = json.loads(_FENCE.sub("", text))
     except ValueError as e:
         raise LLMInvalid(f"invalid JSON ({e}): {text[:80]!r}") from e
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict):
+        data = data[0]                      # some servers (Kimi on Canopy Wave) wrap the object in a list
     if not isinstance(data, dict):
         raise LLMInvalid(f"expected a JSON object, got {type(data).__name__}")
     return data

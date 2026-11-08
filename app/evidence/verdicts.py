@@ -48,6 +48,7 @@ def user_prompt(claim: str, motion: str, sources: list[Source]) -> str:
     return f"Motion: {motion}\n\nClaim: {claim}\n\nSources:\n{listed}"
 
 
-async def judge(llm, claim: str, motion: str, sources: list[Source], timeout: float) -> Guarded:
-    raw = await llm.complete_json(SYSTEM, user_prompt(claim, motion, sources), SCHEMA, timeout=timeout, max_tokens=500)
+async def judge(llm, claim: str, motion: str, sources: list[Source], timeout: float, max_tokens: int = 500) -> Guarded:
+    raw = await llm.complete_json(SYSTEM, user_prompt(claim, motion, sources), SCHEMA, timeout=timeout,
+                                  max_tokens=max_tokens)
     return apply_guards(raw, claim, sources)

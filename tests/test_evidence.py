@@ -8,16 +8,23 @@ import time
 import pytest
 
 from app.bus import Bus
-from app.evidence import preresearch
+from app import config
+from app.evidence import deep, preresearch
 from app.evidence import run as run_module
 from app.evidence.checks import CONFIDENCE_CAP, Source, apply_guards, normalise, number_appears, numbers_in, quote_in_source
-from app.evidence.index import EvidenceIndex, chunk_text
+from app.evidence.index import EvidenceIndex, chunk_text, tokens
 from app.evidence.run import Checker, EvidenceModule
 from app.schemas import Claim, SessionStart
 
 TEXT = "Bus use outside London fell by 27% between 2010 and 2020, according to the Department for Transport's annual statistics."
 SRC = [Source("https://gov.uk/bus", "Bus statistics", TEXT)]
 QUOTE = "fell by 27% between 2010 and 2020"
+
+
+@pytest.fixture(autouse=True)
+def no_deep_check(monkeypatch):
+    """The deep check runs in the background after each verdict; tests that want it turn it back on."""
+    monkeypatch.setitem(config.FLAGS, "deep_check", False)
 
 
 def raw(**kw):
@@ -46,7 +53,7 @@ class FakeSearch:
     def __init__(self, pages=None):
         self.pages, self.calls = pages or [], 0
 
-    async def search(self, query, kind="auto", results=10, max_chars=4000, timeout=10.0):
+    async def search(self, query, kind="auto", results=10, max_chars=4000, timeout=10.0, include_domains=None):
         self.calls += 1
         return self.pages
 
@@ -148,6 +155,12 @@ def test_chunking_covers_text_and_keeps_sentences_whole():
     assert "Sentence number 199 ends here." in pieces[-1] and "Sentence number 100 " in " ".join(pieces)
 
 
+def test_written_figures_match_how_they_are_said():
+    assert tokens("Evasion was 12.52% (£617m), up 5 per cent to £3.8bn") == [
+        "evasion", "12.52", "percent", "pounds", "617", "million", "up", "5", "percent", "pounds", "3.8", "billion"]
+    assert {"12", "percent", "600", "million", "pounds"} <= set(tokens("12 percent, 600 million pounds"))
+
+
 def test_bm25_finds_the_relevant_chunk():
     assert EvidenceIndex(chunks()).search("bus use in London", 1)[0]["url"].endswith("/0")
 
@@ -223,6 +236,48 @@ async def test_build_index_survives_failed_searches():
         async def search(self, *a, **k):
             raise RuntimeError("down")
     assert len(await preresearch.build_index("Motion", Down())) == 0
+
+
+class SplitSearch(FakeSearch):
+    """One page per search, titled by whether the search was limited to primary sources."""
+    async def search(self, query, include_domains=None, max_chars=4000, **k):
+        self.calls += 1
+        self.max_chars = max_chars
+        kind = "primary" if include_domains == preresearch.PRIMARY_DOMAINS else "open"
+        return [{"url": f"https://{kind}.org/{query}", "title": kind, "text": TEXT}]
+
+
+class FakeEmbedder:
+    name = "fake"
+
+    def embed(self, texts):
+        return [[1.0, 0.0]] * len(texts)
+
+
+async def test_build_with_vectors_adds_a_primary_pass_and_keeps_its_pages_first(monkeypatch):
+    monkeypatch.delenv("PRERESEARCH_PRIMARY", raising=False)
+    searcher = SplitSearch()
+    index = await preresearch.build_index("Motion", searcher, embedder=FakeEmbedder())
+    queries = preresearch.template_queries("Motion")
+    assert searcher.calls == 2 * len(queries) and searcher.max_chars == preresearch.WITH_VECTORS.max_chars
+    assert [c["title"] for c in index.chunks] == ["primary"] * len(queries) + ["open"] * len(queries)
+    assert index.vectors is not None
+
+
+async def test_retrieval_shows_more_chunks_when_vectors_rank_them():
+    import numpy as np
+    many = [{"url": f"https://x.org/{i}", "title": str(i), "text": f"Bus use fell {i}"} for i in range(20)]
+    with_vectors = EvidenceIndex(many, np.ones((20, 2), dtype="float32") / np.sqrt(2), "fake")
+    assert len(await Checker(None, embedder=FakeEmbedder(), index=with_vectors).retrieve("Bus use")) == 8
+    assert len(await Checker(None, index=EvidenceIndex(many)).retrieve("Bus use")) == 5
+
+
+async def test_build_without_vectors_stays_small(monkeypatch):
+    monkeypatch.delenv("PRERESEARCH_PRIMARY", raising=False)
+    searcher = SplitSearch()
+    index = await preresearch.build_index("Motion", searcher)
+    assert searcher.calls == len(preresearch.template_queries("Motion")) and searcher.max_chars == 4000
+    assert {c["title"] for c in index.chunks} == {"open"}
 
 
 async def test_query_planning_falls_back_to_templates():
@@ -303,6 +358,14 @@ async def test_saved_index_is_used_without_searching(tmp_path, monkeypatch):
     assert progress.stage == "ready" and progress.detail == "built in advance" and web.calls == 0 and len(mod.checker.index) == 3
 
 
+async def test_live_build_skips_embedding_so_the_server_cpu_stays_free(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    mod = EvidenceModule(Bus(), FakeLLM(RuntimeError("no plan")), FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}]),
+                         embedder=FakeEmbedder())
+    await mod.start_session("A Motion nobody prepared")
+    assert len(mod.checker.index) and mod.checker.index.vectors is None
+
+
 async def test_motion_with_no_index_and_no_search_reports_it():
     bus = Bus()
     sub = bus.subscribe("t", {"ResearchProgress"})
@@ -321,6 +384,107 @@ async def test_run_loop_only_checks_checkable_claims():
     verdict = await asyncio.wait_for(sub.__anext__(), 2)
     task.cancel()
     assert verdict.claim_id == "yes"
+
+
+# --- deep check
+def guarded(label="supported", confidence=0.9):
+    from app.evidence.checks import Guarded
+    return Guarded(label=label, confidence=confidence)
+
+
+@pytest.mark.parametrize("fast,deep_verdict,replaced", [
+    (("unverifiable", 0), ("supported", .8), True),        # found what the fast check couldn't
+    (("supported", .9), ("unverifiable", 0), False),       # not finding it again doesn't undo a verified quote
+    (("unverifiable", 0), ("unverifiable", 0), False),
+    (("supported", .6), ("supported", .8), True),          # surer, so it may now be said aloud
+    (("supported", .8), ("supported", .8), False),
+    (("contradicted", .7), ("missing_context", .8), True), # disagrees and is at least as sure
+    (("contradicted", .9), ("supported", .7), False),      # disagrees but less sure
+])
+def test_deep_verdict_only_replaces_the_fast_one_when_it_does_better(fast, deep_verdict, replaced):
+    assert deep.replaces(guarded(*fast), guarded(*deep_verdict)) is replaced
+
+
+class RecordingSearch(FakeSearch):
+    def __init__(self, pages=None):
+        super().__init__(pages)
+        self.queries = []
+
+    async def search(self, query, include_domains=None, **k):
+        self.queries.append((query, include_domains is not None))
+        return await super().search(query)
+
+
+async def test_deep_check_searches_written_queries_in_primary_sources_and_the_open_web():
+    plan = {"queries": ["DfT bus statistics 2020 local bus passenger journeys"]}
+    searcher = RecordingSearch([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    checking = deep.DeepChecker(FakeLLM(raw()), searcher, "Motion", plan_llm=FakeLLM(plan))
+    got, sources = await checking.check("Bus use outside London fell", [])
+    assert got.label == "supported" and sources[0].url == "https://gov.uk/bus"
+    assert sorted(searcher.queries) == sorted([(q, p) for q in ("Bus use outside London fell", plan["queries"][0])
+                                               for p in (True, False)])
+
+
+async def test_deep_check_survives_failed_planning_and_search():
+    class Down(FakeSearch):
+        async def search(self, *a, **k):
+            raise RuntimeError("down")
+    index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    checking = deep.DeepChecker(FakeLLM(raw()), Down(), "Motion", index, plan_llm=FakeLLM(RuntimeError("no")))
+    got, sources = await checking.check("Bus use outside London fell", [])
+    assert got.label == "supported" and [s.url for s in sources] == ["https://gov.uk/bus"]
+
+
+def test_written_queries_rank_a_passage_the_spoken_claim_misses():
+    pages = [{"url": "https://other.org", "title": "x", "text": "Households said things about licences and pounds."},
+             {"url": "https://gov.uk/trust", "title": "Trust Statement", "text": "The estimated evasion rate was 12.52%."}]
+    queries = ["TV licence evasion rate", "Licence Fee Trust Statement estimated evasion rate"]
+    top = deep.DeepChecker.rank("Over twelve in a hundred households dodge it", queries, pages, [])
+    assert top[0].url == "https://gov.uk/trust"
+
+
+async def test_module_publishes_a_deep_verdict_after_an_unverifiable_fast_one(monkeypatch):
+    monkeypatch.setitem(config.FLAGS, "deep_check", True)
+    bus = Bus()
+    sub = bus.subscribe("t", {"Verdict"})
+    unsure = raw(label="unverifiable")
+    llm = FakeLLM(unsure, unsure, {"queries": []}, raw())   # index verdict, web verdict, deep plan, deep verdict
+    mod = EvidenceModule(bus, llm, RecordingSearch([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}]))
+    mod.checker.index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    await mod.handle_claim(claim())
+    first = await sub.__anext__()
+    second = await asyncio.wait_for(sub.__anext__(), 2)
+    assert (first.label, first.via) == ("unverifiable", "web")
+    assert (second.label, second.via) == ("supported", "deep") and second.evidence
+
+
+async def test_module_skips_the_deep_check_for_minor_claims(monkeypatch):
+    monkeypatch.setitem(config.FLAGS, "deep_check", True)
+    bus = Bus()
+    llm = FakeLLM(raw(label="unverifiable"))
+    mod = EvidenceModule(bus, llm)
+    mod.checker.index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    await mod.handle_claim(claim(importance=0.2))
+    await asyncio.sleep(0.05)
+    assert llm.calls == 1 and not mod.tasks
+
+
+async def test_deep_verdict_from_an_old_session_is_dropped(monkeypatch):
+    monkeypatch.setitem(config.FLAGS, "deep_check", True)
+    bus = Bus()
+    sub = bus.subscribe("t", {"Verdict"})
+
+    class NewSessionDuringDeepCheck(FakeLLM):
+        async def complete_json(self, *a, **k):
+            if self.calls == 1:                 # the fast verdict is done: now the Motion changes
+                mod.session += 1
+            return await super().complete_json(*a, **k)
+    mod = EvidenceModule(bus, NewSessionDuringDeepCheck(raw(label="unverifiable"), {"queries": []}, raw()))
+    mod.checker.index = EvidenceIndex([{"url": "https://gov.uk/bus", "title": "Bus", "text": TEXT}])
+    await mod.handle_claim(claim())
+    await sub.__anext__()
+    await asyncio.gather(*mod.tasks)
+    assert sub.q.empty()
 
 
 def test_normalise_only_forgives_typography():

@@ -1,7 +1,8 @@
 """Evidence: Claim -> Verdict + SourceCard, index first and web as the fallback. Owner: C.
 
 Indexes are built in advance (see preresearch.py). A Motion without one is researched live in the background, and
-claims that arrive meanwhile go straight to the web.
+claims that arrive meanwhile go straight to the web. After the fast verdict, important claims get a slower deep
+check in the background (deep.py), which publishes a second Verdict when it does better.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app import config, latency
-from app.evidence import preresearch
+from app.evidence import deep, preresearch
 from app.evidence.checks import Guarded, Source
 from app.evidence.index import EvidenceIndex, chunk_text, make_embedder
 from app.evidence.llm import make_verdict_llm
@@ -23,8 +24,11 @@ from app.schemas import Claim, ResearchProgress, SourceCard, Verdict
 
 log = logging.getLogger("evidence")
 
-TOP_K = 5
-INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 3.0))
+# Chunks shown to the verdict model. With vectors, 8 scored best on the eval (18/20 vs 16/20 at 5); BM25 alone does
+# better at 5, as extra keyword matches are mostly noise.
+TOP_K = int(os.environ.get("EVIDENCE_TOP_K", 5))
+TOP_K_WITH_VECTORS = int(os.environ.get("EVIDENCE_TOP_K_VECTORS", 8))
+INDEX_LLM_TIMEOUT_S = float(os.environ.get("EVIDENCE_LLM_TIMEOUT_S", 4.0))   # Opus verdicts: p95 about 3.3 s
 WEB_SEARCH_TIMEOUT_S = float(os.environ.get("EVIDENCE_WEB_TIMEOUT_S", 3.0))
 QUERY_EMBED_TIMEOUT_S = float(os.environ.get("EVIDENCE_EMBED_TIMEOUT_S", 1.0))   # then BM25 alone
 CONCURRENCY = int(os.environ.get("EVIDENCE_CONCURRENCY", 6))
@@ -53,7 +57,8 @@ class Checker:
                 vector = (await asyncio.wait_for(asyncio.to_thread(self.embedder.embed, [claim]), QUERY_EMBED_TIMEOUT_S))[0]
             except Exception as e:
                 log.warning("query embedding failed, using BM25: %r", e)
-        return [Source(c["url"], c["title"], c["text"]) for c in self.index.search(claim, TOP_K, vector)]
+        k = TOP_K_WITH_VECTORS if vector is not None else TOP_K
+        return [Source(c["url"], c["title"], c["text"]) for c in self.index.search(claim, k, vector)]
 
     async def web_sources(self, claim: str) -> list[Source]:
         pages = await self.searcher.search(claim, kind="lite", results=5, max_chars=2500, timeout=WEB_SEARCH_TIMEOUT_S)
@@ -100,6 +105,10 @@ class EvidenceModule:
         self.session = 0
         self.limit = asyncio.Semaphore(CONCURRENCY)
         self.tasks: set[asyncio.Task] = set()
+        self.deep_llm = deep.make_deep_llm(llm) if llm is not None else None
+        self.deep_limit = asyncio.Semaphore(deep.DEEP_CONCURRENCY)
+        self.deep_search_limit = asyncio.Semaphore(6)    # shared by every deep check: Exa allows 10 queries a second
+        self.deep_waiting = 0
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -122,7 +131,9 @@ class EvidenceModule:
             self._progress("error", 0, 0, "No saved index, and live research isn't available")
             return
         try:
-            index = await preresearch.build_index(motion, self.searcher, self.llm, self.embedder, self._progress)
+            # No embedder for a live build: embedding a big build takes 20+ minutes on the server's single vCPU,
+            # mid-debate. The small BM25 build is what scored best without vectors anyway.
+            index = await preresearch.build_index(motion, self.searcher, self.llm, None, self._progress)
         except Exception as e:
             log.warning("pre-research failed: %r", e)
             self._progress("error", 0, 0, "Pre-research failed, using web search only")
@@ -147,10 +158,39 @@ class EvidenceModule:
                 outcome = Outcome(Guarded(explanation="The check failed."), via="error")
         if session != self.session:
             return                              # the debate moved on to a new Motion
+        self._publish(claim, outcome)
+        if self.deep_llm is not None and deep.enabled() and deep.wants_deep(claim.checkable, claim.importance):
+            self._spawn(self.deepen(claim, outcome, session, checker))
+
+    def _publish(self, claim: Claim, outcome: Outcome) -> None:
         verdict = to_verdict(claim, outcome)
         for e in verdict.evidence:
             self.bus.publish(SourceCard(claim_id=claim.id, url=e.url, title=e.title, snippet=e.quote), src="evidence")
         self.bus.publish(verdict, src="evidence")
+
+    async def deepen(self, claim: Claim, fast: Outcome, session: int, checker: Checker) -> None:
+        """The deep check for one claim. Publishes only if it beats the fast verdict and the Motion hasn't changed."""
+        if self.deep_waiting >= deep.DEEP_MAX_WAITING:
+            log.info("deep check skipped for %s: %d already waiting", claim.id, self.deep_waiting)
+            return
+        self.deep_waiting += 1
+        waiting = True
+        try:
+            async with self.deep_limit:
+                self.deep_waiting, waiting = self.deep_waiting - 1, False
+                checking = deep.DeepChecker(self.deep_llm, self.searcher, checker.motion, checker.index,
+                                            self.deep_search_limit, plan_llm=self.llm)
+                started = time.time()
+                guarded, sources = await asyncio.wait_for(checking.check(claim.text, fast.sources), deep.DEEP_TIMEOUT_S)
+        except Exception as e:                  # includes running out of time: the fast verdict stands
+            log.warning("deep check failed for %s: %r", claim.id, e)
+            return
+        finally:
+            if waiting:                         # cancelled before a slot came free
+                self.deep_waiting -= 1
+        if session != self.session or not deep.replaces(fast.guarded, guarded):
+            return
+        self._publish(claim, Outcome(guarded, "deep", sources, started))
 
     async def run(self) -> None:
         async for ev in self.bus.subscribe("evidence", {"Claim", "SessionStart"}):
