@@ -138,3 +138,24 @@ def test_a_repeated_word_well_apart_is_still_two_words():
     sb.add_words([w(" No,", 1.0, 1.3), w(" no.", 2.0, 2.3)], window_start=0.0)
     sb.add_words([w(" No,", 1.0, 1.3), w(" no.", 2.0, 2.3)], window_start=1.2)
     assert texts(sb, 20) == ["No, no."]
+
+
+@pytest.mark.parametrize("words, text", [
+    ([w(" 29", .5, .9), w("%", .9, 1.1), w(" of", 1.1, 1.2), w(" people.", 1.2, 1.6)], "29% of people."),
+    ([w(" rose", 0, .4), w(" 57", .5, .9), w("%,", .9, 1.1), w(" which", 1.1, 1.4), w(" is", 1.4, 1.5),
+      w(" a", 1.5, 1.6), w(" lot.", 1.6, 2.0)], "rose 57%, which is a lot."),
+    ([w(" about", 0, .4), w(" 2", .5, .8), w("%.", .8, 1.0)], "about 2%."),
+])
+def test_punctuation_whisper_splits_off_stays_on_its_word(words, text):
+    # faster-whisper makes "%" a word of its own and doesn't merge it back like "." or ",".
+    sb = ears.SentenceBuffer()
+    sb.add_words(words, window_start=0.0)
+    assert texts(sb, 20) == [text]
+
+
+def test_punctuation_split_off_a_word_already_emitted_is_dropped():
+    sb = ears.SentenceBuffer()
+    sb.add_words([w(" It", 0, .2), w(" works.", .2, .6)], window_start=0.0)
+    assert texts(sb, 20) == ["It works."]
+    sb.add_words([w(" works.", .2, .6), w("%", .6, .62), w(" Then", 1.0, 1.2), w(" more.", 1.2, 1.5)], window_start=0.0)
+    assert texts(sb, 20) == ["Then more."]

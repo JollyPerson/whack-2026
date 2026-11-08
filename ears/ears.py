@@ -102,7 +102,13 @@ class SentenceBuffer:
             if (new["start"] + new["end"]) / 2 <= self.committed_until:
                 continue
 
-            if not self.is_sentence_end(new["word"]) and not self.normalize_word(new["word"]):
+            # Punctuation on its own: faster-whisper splits "%" off "57%" (and
+            # "%," or "%."), and only merges some marks back. Put it back on
+            # its word; with no word before it in this window, drop it.
+            if not self.normalize_word(new["word"]):
+                if fresh:
+                    fresh[-1]["word"] += new["word"]
+                    fresh[-1]["end"] = max(fresh[-1]["end"], new["end"])
                 continue
 
             fresh.append(dict(new))
