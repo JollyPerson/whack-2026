@@ -31,7 +31,8 @@ def _tunables(monkeypatch, tmp_path):
     for k, v in dict(JUDGE_DIR=str(tmp_path / "summaries"), JUDGE_TIMEOUT_S=5.0, JUDGE_DANCE_WIN=WIN,
                      JUDGE_DANCE_LOSE=LOSE, JUDGE_DANCE_DRAW=DRAW, JUDGE_DANCE_S=30.0, JUDGE_MUSIC="winner").items():
         monkeypatch.setattr(config, k, v)
-    monkeypatch.setattr(judge_run, "SETTLE_S", 0.2)          # a click waits this long at most for checks in flight
+    monkeypatch.setattr(judge_run, "SETTLE_S", 0.2)          # a click waits this long at most for the record...
+    monkeypatch.setattr(judge_run, "QUIET_S", 0.02)          # ...to stop growing
 
 
 def U(uid, spk, text, t0=0.0, t1=0.0, final=True):
@@ -549,11 +550,50 @@ async def test_a_click_waits_for_fact_checks_in_flight(monkeypatch):
     t = time.monotonic()
     judge.handle(bus.publish(FINAL))
     await asyncio.sleep(0.2)
-    assert results(judge) == [] and "waiting up to 3 s for 1 fact check in flight" in statuses(judge)[-1]
+    assert results(judge) == []
+    assert statuses(judge)[-1] == "waiting up to 3 s for the record to settle: 1 fact check in flight"
     judge.handle(bus.publish(V("c9", "supported")))
     await wait_for(lambda: results(judge))
     assert time.monotonic() - t < 1.5                                          # not the whole SETTLE_S
     assert '- c9 Opposition (Bob Baker): "bus use fell by a third" -> supported' in llm.calls[0][1]
+
+
+async def test_a_click_right_after_the_last_speech_waits_for_its_claims(monkeypatch):
+    """Claims and the final argument map trail the speech by ~1 s: a click before they land still judges them."""
+    monkeypatch.setattr(judge_run, "SETTLE_S", 3.0)
+    monkeypatch.setattr(judge_run, "QUIET_S", 0.4)
+    bus = Bus()
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)
+    for e in [*synthetic(), U("u-B-0003", "B", "Closing: bus use fell by a third", 40, 44)]:
+        judge.handle(bus.publish(e))
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.2)
+    assert results(judge) == [] and statuses(judge)[-1] == "waiting up to 3 s for the record to settle"
+    judge.handle(bus.publish(C("c9", "B", "opp", text="bus use fell by a third")))      # extracted after the click
+    await asyncio.sleep(0.2)
+    judge.handle(bus.publish(V("c9", "contradicted")))
+    judge.handle(bus.publish(ArgMapSnapshot(version=3, nodes=[MapNode(claim_id="c9", speaker="B", side="opp",
+                                                                      status="unanswered")])))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert 0.75 < time.monotonic() - t < 2.0                                   # QUIET_S after the last arrival
+    assert '- c9 Opposition (Bob Baker): "bus use fell by a third" -> contradicted' in llm.calls[0][1]
+    assert r.via == "llm"
+
+
+async def test_a_quiet_record_is_judged_at_once(monkeypatch):
+    monkeypatch.setattr(judge_run, "SETTLE_S", 3.0)
+    monkeypatch.setattr(judge_run, "QUIET_S", 0.3)
+    bus = Bus()
+    judge = make_judge(bus)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    await asyncio.sleep(0.35)
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: results(judge))
+    assert time.monotonic() - t < 0.2
 
 
 async def test_the_wait_for_fact_checks_is_bounded():

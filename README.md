@@ -101,10 +101,10 @@ JUDGE=real BOTS=real ./run.sh live         # or drive, replay, ...
 - The summary goes to `logs/summaries/<run>-summary.md`, with the same content as `.json` beside it (`JUDGE_DIR`;
   `<run>` is the run's log name). It holds the verdict, the scorecard, the scores with reasons, bias, factuality,
   the reasoning, the fact checks (sourced kept apart from "AI knowledge, unsourced"), the system's balance and the
-  dances. A click first waits up to 8 s for fact checks still in flight (verdicts trail the speech by a few
-  seconds). The judgement runs once per session: Final screen again re-judges only if someone spoke or a fact check
-  landed (or was revised) since. Replaying a log recorded with the judge on shows its recorded verdict: a replayed
-  Final screen click never starts a second judgement.
+  dances. A click first lets the record settle, for 8 s at most (the last claims, verdicts and the argument map
+  trail the speech by 1-6 s). The judgement runs once per session: Final screen again re-judges only if someone
+  spoke or a fact check landed (or was revised) since. Replaying a log recorded with the judge on shows its recorded
+  verdict: a replayed Final screen click never starts a second judgement.
 - **Verdict dances.** The `DebateResult` makes both side bots dance on their Mate Engine channels (see
   [`docs/INTEGRATION.md`](docs/INTEGRATION.md) "Verdict dances"): the winner's bot `MMD-Conqueror` with its music,
   the loser's `MMD-Lost One_s Weeping` without; on a draw both do `MMD-皆大欢喜-卜逻desu`, silently. The titles are

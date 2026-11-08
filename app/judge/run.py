@@ -5,9 +5,11 @@ Consumes: SessionStart, Control (flag screen, value final), DebateResult (from a
 Produces: DebateResult (src="judge"), ModuleStatus(judge); writes {JUDGE_DIR}/<run>-summary.md and .json
 
 When the operator shows the final screen, the judge rates the CURRENT session: the bus history since the last
-SessionStart, merged with what this module saw itself (in case the history cap trimmed rows). It first waits up to
-SETTLE_S for fact checks in flight (checkable claims from the last RECENT_S with no Verdict yet: verdicts trail their
-speech by a few seconds, and a click right after the closing speech is the natural demo flow). scorecard.py computes
+SessionStart, merged with what this module saw itself (in case the history cap trimmed rows). It first lets the
+record settle, for SETTLE_S at most: until no checkable claim from the last RECENT_S is still without a Verdict and
+nothing new (speech, claim, verdict, interjection, argument map) arrived for QUIET_S. A click right after the closing
+speech is the natural demo flow, and its claims, verdicts and the final argument map trail it by 1-6 s. Otherwise it
+judges at once. scorecard.py computes
 the fixed scorecard, writer.py has Claude weigh it with the transcript (or the formula decides), report.py writes the
 summary, and one DebateResult goes out: winner, margin, headline, scores, the report path, a dance per side bot
 (dances_for: the winner's bot JUDGE_DANCE_WIN, the loser's JUDGE_DANCE_LOSE, both JUDGE_DANCE_DRAW on a draw; the For
@@ -35,8 +37,9 @@ from app.schemas import ArgMapSnapshot, DebateResult, Event, ModuleStatus, Sessi
 
 log = logging.getLogger("judge")
 RECORD = {"Utterance", "Claim", "Verdict", "BotLine", "Interjection", "ArgMapSnapshot"}
-SETTLE_S = 8.0            # at a final click, wait at most this long for fact checks still in flight
-RECENT_S = 60.0           # ... for checkable claims this recent (older ones with no verdict won't get one)
+SETTLE_S = 8.0            # at a final click, wait at most this long for the record to settle
+RECENT_S = 60.0           # ... for verdicts on checkable claims this recent (older ones with no verdict won't get one)
+QUIET_S = 3.0             # ... and until nothing new arrived for this long (claims trail speech by ~1 s)
 BOT = {"prop": "for", "opp": "against"}       # the side -> the bot that seconds it
 PERSONAS = ("for", "against")
 MUSIC_MODES = ("winner", "none", "both")
@@ -94,7 +97,8 @@ class Judge:
         self.run_name = Path(log_path).stem if log_path else time.strftime("%Y%m%d-%H%M%S")
         self.task: Optional[asyncio.Task] = None
         self.session = 0
-        self.verdict = asyncio.Event()                         # set when a Verdict arrives (ends a settle early)
+        self.arrived = asyncio.Event()                         # set when the record grows (wakes a settle)
+        self.heard = float("-inf")                             # when it last grew (monotonic)
         self.reset()
 
     def reset(self, ev: Optional[SessionStart] = None) -> None:
@@ -128,11 +132,17 @@ class Judge:
                 self.on_foreign_result(ev)
         elif name == "ArgMapSnapshot":
             if self.snapshot is None or ev.version >= self.snapshot.version:
+                if self.snapshot is None or ev.version > self.snapshot.version:
+                    self.grew()
                 self.snapshot = ev
         elif name in RECORD and (name != "Utterance" or ev.final):
             self.seen.append(ev)
-            if name == "Verdict":
-                self.verdict.set()
+            if name != "BotLine":                              # the bots may banter on; the record is the rest
+                self.grew()
+
+    def grew(self) -> None:
+        self.heard = time.monotonic()
+        self.arrived.set()
 
     def events(self) -> list[Event]:
         """The session's events in publish order: the bus history plus what this module saw, each once."""
@@ -164,20 +174,22 @@ class Judge:
 
     # ------------------------------------------------------------------------------------------- judging
     async def settle(self) -> scorecard.Record:
-        """The session's record once the fact checks in flight have landed, or after SETTLE_S at most."""
+        """The session's record once the fact checks in flight have landed and nothing new arrived for QUIET_S, or
+        after SETTLE_S at most."""
         end, told = time.monotonic() + SETTLE_S, False
         while True:
+            now = time.monotonic()
             rec = scorecard.collect(self.events())
-            waiting, left = in_flight(rec, time.time()), end - time.monotonic()
-            if not waiting or left <= 0:
+            waiting, quiet_at = in_flight(rec, time.time()), self.heard + QUIET_S
+            if now >= end or (not waiting and now >= quiet_at):
                 return rec
             if not told:
-                told = True
-                n = len(waiting)
-                self.status("up", f"waiting up to {left:.0f} s for {n} fact check{'s' if n != 1 else ''} in flight")
-            self.verdict.clear()
+                told, n = True, len(waiting)
+                self.status("up", f"waiting up to {end - now:.0f} s for the record to settle"
+                                  + (f": {n} fact check{'s' if n != 1 else ''} in flight" if n else ""))
+            self.arrived.clear()
             try:
-                await asyncio.wait_for(self.verdict.wait(), left)
+                await asyncio.wait_for(self.arrived.wait(), (end if waiting else min(end, quiet_at)) - now)
             except TimeoutError:
                 pass
 
