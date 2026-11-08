@@ -93,9 +93,12 @@ def _mmss(s: float) -> str:
 
 
 def verdict_line(j: Judgement) -> str:
+    """The verdict, then the headline on its own line (no "A draw: A draw: ..." when the headline says it too)."""
     if j.winner == "draw":
-        return "**A draw** (too close to call)"
-    return f"**The {SIDE_LABEL[j.winner]} wins** ({j.margin} margin)"
+        head = "**A draw**" + ("" if "too close to call" in j.headline.lower() else " (too close to call)")
+    else:
+        head = f"**The {SIDE_LABEL[j.winner]} wins** ({j.margin} margin)"
+    return f"{head}\n\n> {j.headline}" if j.headline else head
 
 
 def decided_by(j: Judgement) -> str:
@@ -111,7 +114,7 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
     out = [f"# Debate summary: {rec.motion or '(no motion given)'}", "",
            f"{time.strftime('%A %d %B %Y, %H:%M', time.localtime(when))}" + (f" · run `{run}`" if run else ""), ""]
 
-    out += ["## Verdict", "", f"{verdict_line(j)}: {j.headline}", "",
+    out += ["## Verdict", "", verdict_line(j), "",
             f"- Overall: Proposition **{j.scores['prop']['overall']:.1f}**, Opposition "
             f"**{j.scores['opp']['overall']:.1f}** (out of 10)",
             f"- Decided by: {decided_by(j)}",
@@ -148,8 +151,10 @@ def render(rec: Record, card: dict, j: Judgement, dances: dict, music: dict, dan
             f"- **Opposition:** {j.bias.get('opp') or '-'}",
             f"- **The system's interventions:** {j.bias.get('system') or '-'}", ""]
     out += ["## Factuality", "", j.factuality or "-", ""]
-    if j.observations:
-        out += ["## Other observations", "", *(f"- {o}" for o in j.observations), ""]
+    none = "- None: the scorecard formula decided, and only the AI judge adds observations." if j.via == "formula" \
+        else "- None."
+    out += ["## Other observations", "", *(f"- {o}" for o in j.observations or []), *([] if j.observations else [none]),
+            ""]
     out += ["## Reasoning", "", j.reasoning or "-", ""]
 
     fc = sc.fact_checks(rec)

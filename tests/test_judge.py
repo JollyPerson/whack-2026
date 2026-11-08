@@ -675,6 +675,23 @@ async def test_the_module_on_the_bus(monkeypatch, tmp_path):
         await asyncio.gather(task, return_exceptions=True)
 
 
+def test_the_report_verdict_and_observations_on_a_draw_and_on_the_formula():
+    rec = sc.collect(synthetic())
+    card = sc.scorecard(rec)
+    j = writer.from_llm(answer("draw", "narrow", prop=6.2, opp=6.0, observations=[],
+                               headline="A draw: the Proposition's figures held, the Opposition's rebuttals did too."))
+    md = report.render(rec, card, j, dances_for("draw"), music_for("draw"), 30.0, T0)
+    assert "**A draw** (too close to call)\n\n> A draw: the Proposition's figures held" in md
+    assert "## Other observations\n\n- None.\n" in md
+    j = writer.from_llm(answer("prop", "clear", prop=6.1, opp=6.0))                # narrow: the code's draw
+    md = report.render(rec, card, j, dances_for("draw"), music_for("draw"), 30.0, T0)
+    assert "**A draw**\n\n> Too close to call: 6.1 to 6.0. A draw." in md
+    j = writer.from_formula(card, "no LLM is configured")
+    md = report.render(rec, card, j, dances_for(j.winner), music_for(j.winner), 30.0, T0)
+    assert "**The Proposition wins** (decisive margin)\n\n> Proposition wins decisively on the scorecard" in md
+    assert "## Other observations\n\n- None: the scorecard formula decided" in md
+
+
 def test_report_paths_are_relative_to_the_repo_inside_it(monkeypatch):
     monkeypatch.setattr(config, "JUDGE_DIR", "logs/summaries")
     assert report.summary_dir() == ROOT / "logs" / "summaries"
