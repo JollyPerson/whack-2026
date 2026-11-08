@@ -18,8 +18,10 @@ finished non-responsive turn), that bot nudges the opponent: "Still waiting on t
 Banter (BOTS_BANTER), lowest priority: after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S
 across both, the other bot may answer it with one dry line. It starts only when nothing important is running or
 waiting: no claim being answered for either bot (its knowledge check, its Verdict wait or its line being written),
-no non-banter line queued for either bot, and the replying bot idle. If that only comes true later, it may still
-start within BANTER_FRESH_S of the line. A real line ready first drops a queued banter. Banter is never answered.
+no non-banter line queued for either bot, and the replying bot idle; all of it is checked again when the line is
+written, before it is queued. If that only comes true later, it may still start within BANTER_FRESH_S of the line.
+A queued banter is dropped when a real line for its bot is ready first or a claim for its bot comes in, and then
+gives the gap back. Banter is never answered.
 Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
@@ -87,7 +89,7 @@ class Bots:
         self.nudged: set[str] = set()
         self.said: list[str] = []                     # texts posted this session, newest last (LLM "don't repeat")
         self.banters: list[str] = []                  # the banter among them
-        self.last_banter = -1e18
+        self.last_banter = self.banter_posted = -1e18   # the gap starts when a banter starts; given back if none posts
         self.banter_busy = False
         self.pending: set[str] = set()                # claims being answered (check, Verdict wait, line writing)
         self.cue: Optional[tuple[BotLine, float]] = None   # the latest real line banter may answer, and when
@@ -314,6 +316,10 @@ class Bots:
         """Nothing important running or waiting for either bot: no claim being answered, no real line queued."""
         return not self.pending and all(ln.kind == "banter" for p in lines.PERSONAS for ln in self.pacer.queued(p))
 
+    def answering_now(self) -> set[str]:
+        """The bots with a claim being answered."""
+        return {lines.answering(self.claims[cid].side) for cid in self.pending if cid in self.claims}
+
     def on_botline(self, line: BotLine) -> None:
         if line.src != "bots" or line.kind == "banter" or line.reply_to:
             return                                    # never chained; replayed or foreign lines don't count
@@ -335,17 +341,18 @@ class Bots:
                 self.clock() - self.last_banter < config.BOTS_BANTER_GAP_S:
             return
         self.cue = None
-        prev, self.last_banter, self.banter_busy = self.last_banter, self.clock(), True   # reserves the gap
-        self.spawn(self.banter(line, other, prev, self.session))
+        self.last_banter, self.banter_busy = self.clock(), True     # reserves the gap
+        self.spawn(self.banter(line, at, other, self.session))
 
-    async def banter(self, line: BotLine, persona: str, prev: float, session: int) -> None:
-        ok = False
+    async def banter(self, line: BotLine, at: float, persona: str, session: int) -> None:
+        ok = late = False
         try:
             raw = await self.writer.banter(line.text, persona, line.persona, tuple(self.banters))
             text = lines.guard(raw, "banter", line.text, strict=True, names=self.names) if raw else None
             if raw and not text:
                 log.info("bots: banter dropped by the guards: %r", raw)
-            ok = bool(text) and self.idle(persona, BANTER_SOON_S) and \
+            late = bool(text) and not (self.quiet() and self.idle(persona, BANTER_SOON_S))   # something came up
+            ok = bool(text) and not late and \
                 self.queue(session, persona=persona, text=text, kind="banter", reply_to=line.id)
         except asyncio.CancelledError:
             raise
@@ -355,17 +362,23 @@ class Bots:
             if session == self.session:
                 self.banter_busy = False
                 if not ok:
-                    self.last_banter = prev           # nothing queued: the gap doesn't start yet
+                    self.last_banter = self.banter_posted   # nothing queued: the gap doesn't start yet
+                if late and self.cue is None:
+                    self.cue = (line, at)             # try again once quiet, while the line is still fresh
 
     # ------------------------------------------------------------------------------------------- output
     def tick(self) -> None:
+        for persona in self.answering_now():
+            self.pacer.drop_banter(persona)           # a real line may be on its way: banter never pushes it back
         for ev in self.pacer.tick(self.clock()):
             if isinstance(ev, BotLine):
                 self.said.append(ev.text)
                 if ev.kind == "banter":
-                    self.last_banter = self.clock()
+                    self.last_banter = self.banter_posted = self.clock()
                     self.banters.append(ev.text)
             self.publish(ev)
+        if not self.banter_busy and not any(ln.kind == "banter" for p in lines.PERSONAS for ln in self.pacer.queued(p)):
+            self.last_banter = self.banter_posted     # a queued banter dropped or expired: it gives the gap back
         self.maybe_banter()
 
     def restore(self, history: list[Event]) -> None:
@@ -391,7 +404,7 @@ class Bots:
                     if ev.kind == "nudge" and ev.claim_id:
                         self.nudged.add(ev.claim_id)
                     if ev.kind == "banter":
-                        self.last_banter = ev.ts
+                        self.last_banter = self.banter_posted = ev.ts
                         self.banters.append(ev.text)
                 elif ev.event == "BotTalk" and ev.src == "bots" and not ev.on:
                     open_lines.pop(ev.line_id, None)

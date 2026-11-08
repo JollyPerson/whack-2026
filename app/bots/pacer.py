@@ -5,8 +5,8 @@ max(min_gap, the previous bubble's hold_s): a bubble is never replaced while it 
 again it posts its best queued line (priority rebut > challenge > concede > nudge > followup > banter, then the
 newest).
 - A queued line expires after `ttl` seconds (banter after `banter_ttl`: a late reply makes no sense).
-- Banter is lowest of all: a bot's queued banter is dropped when a real line for that bot is pushed, and banter is
-  refused while one is queued.
+- Banter is lowest of all: a bot's queued banter is dropped when a real line for that bot is pushed (or by
+  drop_banter, when one may be on its way), and banter is refused while one is queued.
 - No text twice in a session, and at most one fact line (rebut, challenge or concede) per claim.
 - Every posted BotLine gets its BotTalk(on=false) hold_s later, from tick().
 - paused (bots=false, mute): push() drops everything; it survives reset(), like the operator's switches.
@@ -68,12 +68,16 @@ class Pacer:
         if line.kind == "banter" and any(x.line.kind != "banter" for x in q):
             return False                              # banter never waits behind a real line
         if line.kind != "banter":
-            q[:] = [x for x in q if x.line.kind != "banter"]   # a real line ready first: the banter goes
+            self.drop_banter(line.persona)            # a real line ready first: the banter goes
         ttl = min(self.banter_ttl, self.ttl) if line.kind == "banter" else self.ttl
         q.append(Queued(line, now, now + ttl))
         if len(q) > self.max_queue:
             q.remove(min(q, key=lambda x: x.rank))
         return True
+
+    def drop_banter(self, persona: str) -> None:
+        q = self.queues.get(persona, [])
+        q[:] = [x for x in q if x.line.kind != "banter"]
 
     def free(self, persona: str, now: float) -> bool:
         return now - self.last[persona] >= max(self.min_gap, self.last_hold[persona])

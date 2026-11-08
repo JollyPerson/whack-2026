@@ -784,6 +784,67 @@ async def test_banter_gap_is_20_s_across_both_bots():
     assert [(b.persona, b.kind) for b in said(out)[3:]] == [("against", "banter")] and banters(fast) == 2
 
 
+async def test_a_claim_that_comes_in_while_banter_is_written_stops_it_and_its_rebut_posts_at_once():
+    config.BOTS_BANTER, config.BOTS_VERDICT_WAIT_S = True, 5.0
+    fast = FakeLLM(delay=0.2)
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await asyncio.sleep(0.3)                                      # For's follow-up is up; Against's banter is coming
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")] and banters(fast) == 1
+    bots.handle(C("c2", "A", "prop", imp=0.3))                    # then Against waits for c2's Verdict
+    await asyncio.sleep(0.2)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")]   # the banter came back: not posted
+    assert bots.last_banter == bots.banter_posted                 # and the gap was given back
+    clock.t += 1
+    bots.handle(V("c2"))
+    await settle(bots, 1.0)
+    assert [(b.persona, b.kind, b.ts) for b in said(out)][1:] == [("against", "rebut", T0 + 1)]   # no 10 s gap
+
+
+async def test_a_banter_cut_short_by_a_claim_is_tried_again_once_all_is_quiet():
+    config.BOTS_BANTER, config.BOTS_VERDICT_WAIT_S = True, 5.0
+    fast = FakeLLM(delay=0.2)
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await asyncio.sleep(0.3)                                      # Against's banter is on its way
+    bots.handle(C("c2", "B", "opp", imp=0.3))                     # For now waits for c2's Verdict: not quiet
+    await asyncio.sleep(0.2)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup")] and bots.cue is not None
+    clock.t += 2
+    bots.handle(V("c2", label="unverifiable", evidence=[]))       # c2 ends with no line: quiet again
+    await settle(bots, 1.0)
+    assert [(b.persona, b.kind) for b in said(out)] == [("for", "followup"), ("against", "banter")]
+    assert said(out)[1].reply_to == said(out)[0].id and banters(fast) == 2
+
+
+@pytest.mark.parametrize("how", ["claim", "line"])
+async def test_a_queued_banter_goes_when_its_bot_gets_a_claim_or_a_line_and_gives_the_gap_back(how):
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    fast = FakeLLM()
+    bots, out, clock = make(fast=fast)
+    bots.handle(C("c0", "A", "prop", typ="value", checkable=False, text="Fair pay is a moral duty."))
+    await settle(bots)                                            # Against posts at T0 (banter still off)
+    config.BOTS_BANTER = True
+    clock.t += 8
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)                                            # For posts; Against is free within 3 s: banter
+    assert [b.kind for b in bots.pacer.queued("against")] == ["banter"] and bots.last_banter == T0 + 8
+    if how == "claim":
+        bots.handle(C("c2", "A", "prop", imp=0.3))                # Against may have a rebut on its way
+        bots.tick()
+    else:
+        bots.queue(bots.session, persona="against", text="Still waiting on the cost point.", kind="nudge", target="A")
+    assert [b.kind for b in bots.pacer.queued("against")] in ([], ["nudge"])
+    assert bots.last_banter == bots.banter_posted == -1e18        # nothing posted: the gap is free again
+    clock.t += 2
+    if how == "claim":
+        bots.handle(V("c2"))
+    await settle(bots, 1.0)
+    bots.tick()
+    want = "rebut" if how == "claim" else "nudge"
+    assert [(b.persona, b.kind) for b in said(out)] == [("against", "followup"), ("for", "followup"), ("against", want)]
+
+
 @pytest.mark.parametrize("how", ["pause", "session"])
 async def test_a_pause_or_new_session_forgets_the_claims_in_flight(how):
     config.BOTS_VERDICT_WAIT_S = 5.0
