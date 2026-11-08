@@ -168,11 +168,35 @@ async def test_eleven_ttd_quiet_gap_and_error():
 
     async with serve(handler, "127.0.0.1", 0, logger=_quiet()) as server:
         url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/"
-        mode["error"] = False
-        assert await ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.1).synth("Hi.") == b"\x07\x08"
+        mode["error"] = False                  # audio, then silence with the socket open: a stall, not the end
+        with pytest.raises(TTSError, match="stalled"):
+            await ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.1).synth("Hi.")
         mode["error"] = True
         with pytest.raises(TTSError, match="quota_exceeded"):
             await ElevenTTD("k", "v", "m", 0.5, url=url).synth("Hi.")
+
+
+async def test_a_stalled_eleven_stream_is_not_cached_as_the_line(tmp_path):
+    """Venue wifi stalls mid-line: the first chunk lands, then nothing for longer than quiet_s. That half line must
+    not become the line's cached audio for good: the chain moves on, and later requests hit the complete line."""
+    from websockets.asyncio.server import serve
+    connections = []
+
+    async def handler(ws):
+        connections.append(ws)
+        for _ in range(4):
+            await ws.recv()
+        await ws.send(json.dumps({"audio": base64.b64encode(b"\x07\x08" * 100).decode()}))   # then the stall
+        await ws.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0, logger=_quiet()) as server:
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/"
+        eleven, http = ElevenTTD("k", "v", "m", 0.5, url=url, quiet_s=0.2), Fake("eleven_http")
+        tts = TTS([eleven, http], cache_dir=tmp_path)
+        path = await tts.wav("Point of fact.")
+        assert path == tts._path(http, "Point of fact.") and not tts._path(eleven, "Point of fact.").exists()
+        assert len(path.read_bytes()) == 44 + 4800 and http.calls == ["Point of fact."]
+        assert await tts.wav("Point of fact.") == path and len(connections) == 1                # a hit from now on
 
 
 async def test_eleven_http_against_a_mock_transport():

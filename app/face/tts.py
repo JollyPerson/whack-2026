@@ -75,11 +75,13 @@ class ElevenTTD(Provider):
                             {"inputs": [{"text": text, "voice_id": self.voice, "new_turn": False}]},
                             {"flush": True}, {"close_socket": True}):
                     await ws.send(json.dumps(msg))
-                while True:
-                    try:   # after the first chunk, a long silence also ends the line (the end marker got lost)
+                while True:   # the line ends with is_final or the server closing; silence after audio is a stall
+                    try:
                         raw = await (asyncio.wait_for(ws.recv(), self.quiet_s) if pcm else ws.recv())
-                    except (TimeoutError, ConnectionClosedOK):
+                    except ConnectionClosedOK:
                         break
+                    except TimeoutError:          # never cache half a line: the next provider says all of it
+                        raise TTSError(f"stream stalled: no audio for {self.quiet_s:g} s") from None
                     msg = json.loads(raw)
                     if msg.get("error"):
                         raise TTSError(f"{msg.get('error')}: {msg.get('message')}")
