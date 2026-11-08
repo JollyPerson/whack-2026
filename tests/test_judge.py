@@ -30,7 +30,8 @@ WIN, LOSE, DRAW = "MMD-Conqueror", "MMD-Lost One_s Weeping", "MMD-皆大欢喜-�
 @pytest.fixture(autouse=True)
 def _tunables(monkeypatch, tmp_path):
     for k, v in dict(JUDGE_DIR=str(tmp_path / "summaries"), JUDGE_TIMEOUT_S=5.0, JUDGE_DANCE_WIN=WIN,
-                     JUDGE_DANCE_LOSE=LOSE, JUDGE_DANCE_DRAW=DRAW, JUDGE_DANCE_S=30.0, JUDGE_MUSIC="winner").items():
+                     JUDGE_DANCE_LOSE=LOSE, JUDGE_DANCE_DRAW=DRAW, JUDGE_DANCE_S=30.0, JUDGE_MUSIC="winner",
+                     JUDGE_SUMMARY_WAIT_S=0.0).items():                  # no brain here: no DebateSummary to wait for
         monkeypatch.setattr(config, k, v)
     monkeypatch.setattr(judge_run, "SETTLE_S", 0.2)          # a click waits this long at most for the record...
     monkeypatch.setattr(judge_run, "QUIET_S", 0.02)          # ...to stop growing
@@ -923,3 +924,85 @@ def test_the_report_says_when_the_summary_was_not_available(tmp_path):
     assert data["debate_summary"] == {"available": False, "note": rec.summary_note}
     assert writer.summary_lines(rec) == ["DEBATE SUMMARY: not available (it did not arrive within 15 s of the Final "
                                          "screen click). Weigh consistency from the findings below and the transcript."]
+
+
+async def test_the_judge_waits_for_the_summary_that_arrives_after_the_click(monkeypatch):
+    """On the bus: the brain answers the same click a few seconds later, its last findings first."""
+    monkeypatch.setattr(config, "JUDGE_SUMMARY_WAIT_S", 3.0)
+    llm = FakeLLM()
+    monkeypatch.setattr(writer, "make_judge_llm", lambda: llm)
+    bus = Bus()
+    task = asyncio.create_task(judge_run.run(bus))
+    try:
+        await wait_for(lambda: any("fake:judge" in d for d in statuses(bus)))
+        on_bus(synthetic(), bus)
+        await asyncio.sleep(0.05)
+        t = time.monotonic()
+        bus.publish(FINAL, src="dashboard")
+        await asyncio.sleep(0.3)
+        assert results(bus) == [] and statuses(bus)[-1].startswith("waiting up to 3 s for the brain's debate summary")
+        on_bus([*findings(), summary(version=3)], bus)
+        r = (await wait_for(lambda: results(bus)))[0]
+        assert time.monotonic() - t < 1.5 and r.via == "llm"
+        user = llm.calls[0][1]
+        assert '- "Unemployment is falling." [c1, c7]' in user and "Wages fell by two percent" in user
+        md = Path(r.report).read_text()
+        assert "- Unemployment is falling." in md and "argument map version 3)" in md and "not available" not in md
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_without_a_summary_the_judge_goes_ahead_after_the_wait(monkeypatch):
+    monkeypatch.setattr(config, "JUDGE_SUMMARY_WAIT_S", 0.3)
+    bus = Bus()
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)
+    for e in synthetic():
+        judge.handle(bus.publish(e))
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert 0.3 <= time.monotonic() - t < 1.0 and r.via == "llm"
+    assert "DEBATE SUMMARY: not available (it did not arrive within 0.3 s of the Final screen click)" in llm.calls[0][1]
+    assert "not available (it did not arrive within 0.3 s of the Final screen click); judged without it" in \
+        Path(r.report).read_text()
+    await wait_for(lambda: judge.task.done())
+    judge.handle(bus.publish(summary()))                                         # too late for that judgement...
+    judge.handle(bus.publish(FINAL))
+    await wait_for(lambda: len(results(judge)) == 2)                             # ...the next click uses it
+    assert '- "Unemployment is falling."' in llm.calls[1][1] and results(judge)[1].report == r.report
+    judge.handle(bus.publish(summary()))                                         # the brain answers every click
+    judge.handle(bus.publish(FINAL))
+    await asyncio.sleep(0.05)
+    assert len(results(judge)) == 2 and len(llm.calls) == 2                      # nothing new: not judged again
+
+
+async def test_a_summary_already_in_the_history_is_used_at_once(monkeypatch):
+    monkeypatch.setattr(config, "JUDGE_SUMMARY_WAIT_S", 3.0)
+    bus = on_bus([*synthetic(), *findings(), summary(version=1, source="heuristic"),
+                  summary(version=2, source="heuristic")])                       # e.g. an earlier "summary" click
+    assert [e.version for e in bus.history if e.event == "DebateSummary"] == [2]
+    llm = FakeLLM()
+    judge = make_judge(bus, llm)                                                 # saw none of it: the history only
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert time.monotonic() - t < 0.5                                            # no wait: it covers the whole map
+    md = Path(r.report).read_text()
+    assert "source `heuristic`, argument map version 2)" in md and "built by a heuristic" in llm.calls[0][1]
+
+
+async def test_an_older_summary_is_waited_past_then_used_with_a_note(monkeypatch):
+    monkeypatch.setattr(config, "JUDGE_SUMMARY_WAIT_S", 0.3)
+    bus = Bus()
+    judge = make_judge(bus, FakeLLM())
+    for e in [*synthetic()[:3], summary(version=1), *synthetic()[3:]]:          # made before the map's version 2
+        judge.handle(bus.publish(e))
+    t = time.monotonic()
+    judge.handle(bus.publish(FINAL))
+    r = (await wait_for(lambda: results(judge)))[0]
+    assert time.monotonic() - t >= 0.3
+    md = Path(r.report).read_text()
+    assert ("argument map version 1; the newest predates the click and the end of the record (argument map version 1 "
+            "of 2): the last points may be missing)") in md
