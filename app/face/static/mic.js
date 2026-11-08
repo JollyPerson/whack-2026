@@ -23,7 +23,8 @@
   };
   const INSECURE = 'Not a secure context: the browser only lets a page use the microphone over HTTPS or on ' +
     'localhost. Open it as http://localhost:8000/mic?ch=' + (CH || 'A') + ' via adb reverse (adb reverse tcp:8000 ' +
-    'tcp:8000), or over HTTPS (SSL_CERTFILE / SSL_KEYFILE on the server).';
+    'tcp:8000), or over HTTPS on the laptop\'s second port: https://<laptop IP>:8443/mic (SSL_CERTFILE / ' +
+    'SSL_KEYFILE on the server).';
   const $ = id => document.getElementById(id);
 
   let running = false, stream = null, ctx = null, src = null, node = null, ws = null, wake = null;

@@ -84,7 +84,8 @@ ears terminal's warnings mean, recovery mid-demo, checklist) see [`docs/LIVE-MIC
 | `JUDGE_DANCE_S` | 30 | How long the dances last |
 | `PHONE_MICS` | off | `A,B` (or `A`, `B`): the phone-browser microphones. Creates the null sinks `whack_phone_A`/`_B` at start-up and unloads them at shutdown; phones open `/mic?ch=A` |
 | `MIC_TOKEN` | unset | When set, a phone needs `?token=<MIC_TOKEN>` on `/mic`. Set it whenever the server binds to the LAN |
-| `SSL_CERTFILE`, `SSL_KEYFILE` | unset | Both set: the server speaks HTTPS, which a phone on Wi-Fi needs to use its mic. Self-signed certificate: `LIVE-MICS.md` section 12 |
+| `SSL_CERTFILE`, `SSL_KEYFILE` | unset | Both set: a second, HTTPS-only port for phones on Wi-Fi (they need HTTPS to use their mic). The main port stays plain HTTP for the ears and the avatars. Self-signed certificate: `LIVE-MICS.md` section 12 |
+| `SSL_PORT`, `SSL_HOST` | 8443, 0.0.0.0 | Where that HTTPS port listens; `SSL_PORT` must differ from the main port |
 
 ## Troubleshooting
 - **No avatar.** On a fresh config, Mate Engine's first-run tutorial hides the avatar. The launcher seeds

@@ -459,8 +459,10 @@ LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
 def ssl_options(env=os.environ) -> dict:
-    """SSL_CERTFILE + SSL_KEYFILE -> uvicorn's ssl_certfile/ssl_keyfile (HTTPS, so a phone on Wi-Fi may use its mic
-    on /mic). Neither set -> {} (plain HTTP, as before). One without the other, or a missing file: ValueError."""
+    """SSL_CERTFILE + SSL_KEYFILE -> uvicorn's ssl_certfile/ssl_keyfile for a SECOND, HTTPS-only port (SSL_PORT), so a
+    phone on Wi-Fi may use its mic on /mic. Neither set -> {} (no second port, as before). One without the other, a
+    missing file, or a pair that doesn't load: ValueError."""
+    import ssl
     cert, key = env.get("SSL_CERTFILE", "").strip(), env.get("SSL_KEYFILE", "").strip()
     if not cert and not key:
         return {}
@@ -469,15 +471,59 @@ def ssl_options(env=os.environ) -> dict:
     for name, path in (("SSL_CERTFILE", cert), ("SSL_KEYFILE", key)):
         if not Path(path).is_file():
             raise ValueError(f"{name}={path}: no such file")
+    try:
+        ssl.create_default_context(ssl.Purpose.CLIENT_AUTH).load_cert_chain(cert, key)
+    except (ssl.SSLError, OSError) as e:
+        raise ValueError(f"SSL_CERTFILE/SSL_KEYFILE don't load as a certificate + key: {e}") from None
     return {"ssl_certfile": cert, "ssl_keyfile": key}
+
+
+def ssl_bind(port: int, env=os.environ) -> tuple[str, int]:
+    """Where the phones' HTTPS port listens: SSL_HOST (default 0.0.0.0, the point is Wi-Fi) and SSL_PORT (default
+    8443). It must differ from the main port, which stays plain HTTP for the ears, the avatars and the dashboard."""
+    host = env.get("SSL_HOST", "").strip() or "0.0.0.0"
+    try:
+        ssl_port = int(env.get("SSL_PORT", "").strip() or 8443)
+    except ValueError:
+        raise ValueError(f"SSL_PORT={env.get('SSL_PORT')!r}: not a port number") from None
+    if ssl_port == port:
+        raise ValueError(f"SSL_PORT={ssl_port} is the main port: the main port stays plain HTTP for the ears and the "
+                         f"avatars; pick another (default 8443)")
+    return host, ssl_port
+
+
+def make_servers(app, host: str, port: int, ssl: dict, ssl_host: str, ssl_port: int):
+    """The main server (plain HTTP, runs the app's lifespan) and the phones' HTTPS server on the same app (no
+    lifespan of its own: one set of sinks, one bus)."""
+    import uvicorn
+    main = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
+    phones = uvicorn.Server(uvicorn.Config(app, host=ssl_host, port=ssl_port, log_level="warning", lifespan="off",
+                                           **ssl))
+    return main, phones
+
+
+async def serve_both(main, phones) -> None:
+    """Start the HTTPS server once the main one has started (the lifespan made the sinks); either stopping (Ctrl-C,
+    a failed bind) stops the other, so the main server's lifespan always shuts down."""
+    m = asyncio.create_task(main.serve())
+    while not main.started and not m.done():
+        await asyncio.sleep(0.05)
+    tasks = [m]
+    if not m.done():
+        tasks.append(asyncio.create_task(phones.serve()))
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    main.should_exit = phones.should_exit = True
+    for t, r in zip(tasks, await asyncio.gather(*tasks, return_exceptions=True)):
+        if isinstance(r, BaseException) and not isinstance(r, asyncio.CancelledError):
+            log.error("%s server stopped: %r", "main" if t is m else "HTTPS (phones)", r)
 
 
 def exposure_warning(host: str, env=os.environ) -> str:
     """A LAN bind serves /face/tts (no login) and, with PHONE_MICS, the mic socket to the whole network."""
     if host in LOOPBACK or not env.get("PHONE_MICS", "").strip() or env.get("MIC_TOKEN"):
         return ""
-    return (f"HOST={host} with PHONE_MICS and no MIC_TOKEN: anyone on this network can open /mic/ws and speak as a "
-            f"debater (and use /face/tts). Set MIC_TOKEN, or bind HOST=127.0.0.1 and use adb reverse")
+    return (f"listening on {host} with PHONE_MICS and no MIC_TOKEN: anyone on this network can open /mic/ws and "
+            f"speak as a debater (and use /face/tts). Set MIC_TOKEN, or bind HOST=127.0.0.1 and use adb reverse")
 
 
 def main():
@@ -506,21 +552,32 @@ def main():
         p.error(f"port {a.port} is already in use: is another ./run.sh running? Stop it or pass --port")
     try:
         ssl = ssl_options()
+        ssl_host, ssl_port = ssl_bind(a.port) if ssl else ("", 0)
     except ValueError as e:
         p.error(str(e))
-    if warning := exposure_warning(a.host):
-        log.warning("%s", warning)
+    if ssl and port_in_use(ssl_host, ssl_port):
+        p.error(f"SSL_PORT {ssl_port} is already in use: stop whatever holds it or set SSL_PORT")
+    for host in (a.host, ssl_host) if ssl else (a.host,):
+        if warning := exposure_warning(host):
+            log.warning("%s", warning)
     if os.environ.get("PHONE_MICS", "").strip():
-        scheme = "https" if ssl else "http"
-        log.warning("phone mics: over USB run adb reverse tcp:%d tcp:%d, then open %s://localhost:%d/mic?ch=A (or B) "
-                    "on the phone%s", a.port, a.port, scheme, a.port,
-                    "" if a.host in LOOPBACK else f"; on Wi-Fi: {scheme}://<this laptop's IP>:{a.port}/mic?ch=A")
+        log.warning("phone mics: over USB run adb reverse tcp:%d tcp:%d, then open http://localhost:%d/mic?ch=A (or B) "
+                    "on the phone%s", a.port, a.port, a.port,
+                    f"; on Wi-Fi: https://<this laptop's IP>:{ssl_port}/mic?ch=A (HTTPS on {ssl_host}:{ssl_port}; "
+                    f"port {a.port} stays plain HTTP)" if ssl else
+                    "" if a.host in LOOPBACK else "; on Wi-Fi a phone needs HTTPS: set SSL_CERTFILE/SSL_KEYFILE")
     applied = apply_profile_env(a.profile)
     if PROFILE_ENV.get(a.profile):
         log.warning("profile %s: %s", a.profile, ", ".join(f"{k}={os.environ[k]}" for k in PROFILE_ENV[a.profile])
                     + (f" (set by the profile: {', '.join(applied)})" if applied else ""))
     app = build_app(a.profile, file, a.speed, a.only, last=not a.all_sessions, max_gap=a.max_gap)
-    uvicorn.run(app, host=a.host, port=a.port, log_level="warning", **ssl)
+    if not ssl:
+        uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
+        return
+    try:
+        asyncio.run(serve_both(*make_servers(app, a.host, a.port, ssl, ssl_host, ssl_port)))
+    except KeyboardInterrupt:                        # what uvicorn.run does too
+        pass
 
 
 if __name__ == "__main__":

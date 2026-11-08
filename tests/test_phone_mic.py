@@ -464,18 +464,40 @@ def test_mic_page_rules():
 
 
 # ---------------------------------------------------------------- app/main.py: HTTPS and the LAN warning
-def test_ssl_options(tmp_path):
-    from app.main import ssl_options
+@pytest.fixture
+def selfsigned(tmp_path):
+    if not shutil.which("openssl"):
+        pytest.skip("openssl not installed")
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
-    cert.write_text("x")
-    key.write_text("y")
-    assert ssl_options({}) == {}                                           # plain HTTP, as before
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(cert),
+                    "-days", "1", "-subj", "/CN=localhost"], check=True, capture_output=True, timeout=60)
+    return cert, key
+
+
+def test_ssl_options(tmp_path, selfsigned):
+    from app.main import ssl_options
+    cert, key = selfsigned
+    assert ssl_options({}) == {}                                           # plain HTTP only, as before
     assert ssl_options({"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key)}) == {
         "ssl_certfile": str(cert), "ssl_keyfile": str(key)}
     with pytest.raises(ValueError, match="both"):
         ssl_options({"SSL_CERTFILE": str(cert)})
     with pytest.raises(ValueError, match="no such file"):
         ssl_options({"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(tmp_path / "missing.pem")})
+    junk = tmp_path / "junk.pem"
+    junk.write_text("x")
+    with pytest.raises(ValueError, match="don't load"):                   # found before the app (and sinks) start
+        ssl_options({"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(junk)})
+
+
+def test_ssl_bind():
+    from app.main import ssl_bind
+    assert ssl_bind(8000, {}) == ("0.0.0.0", 8443)
+    assert ssl_bind(8000, {"SSL_HOST": "192.168.1.5", "SSL_PORT": "9443"}) == ("192.168.1.5", 9443)
+    with pytest.raises(ValueError, match="main port"):
+        ssl_bind(8443, {})
+    with pytest.raises(ValueError, match="not a port"):
+        ssl_bind(8000, {"SSL_PORT": "https"})
 
 
 def test_exposure_warning():
@@ -494,23 +516,109 @@ def _run_main(monkeypatch, tmp_path, env):
     monkeypatch.setattr(mainmod, "ROOT", tmp_path)
     for k in ("EARS", "BRAIN", "EVIDENCE", "FACE", "BOTS", "JUDGE"):
         monkeypatch.setenv(k, "off")
-    for k in ("SSL_CERTFILE", "SSL_KEYFILE", "PHONE_MICS", "MIC_TOKEN"):
+    for k in ("SSL_CERTFILE", "SSL_KEYFILE", "SSL_HOST", "SSL_PORT", "PHONE_MICS", "MIC_TOKEN"):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(run=kw))
+    monkeypatch.setattr(mainmod, "make_servers", lambda *a: seen.update(servers=a[1:]) or ("main", "phones"))
+
+    async def serve_both(m, p):
+        seen["both"] = (m, p)
+    monkeypatch.setattr(mainmod, "serve_both", serve_both)
     monkeypatch.setattr(sys, "argv", ["app.main", "mock", "--host", "127.0.0.1", "--port", "0"])
     mainmod.main()
     return seen
 
 
-def test_main_passes_ssl_to_uvicorn_only_when_set(monkeypatch, tmp_path, capsys):
-    assert "ssl_certfile" not in _run_main(monkeypatch, tmp_path, {})
-    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
-    cert.write_text("x")
-    key.write_text("y")
-    kw = _run_main(monkeypatch, tmp_path, {"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key)})
-    assert kw["ssl_certfile"] == str(cert) and kw["ssl_keyfile"] == str(key)
+def _free_port():
+    import socket
+    with socket.create_server(("127.0.0.1", 0)) as s:
+        return s.getsockname()[1]
+
+
+def test_main_keeps_the_port_plain_and_adds_an_https_port_only_when_set(monkeypatch, tmp_path, capsys, selfsigned):
+    """SSL used to turn the main port TLS-only, and the ears, the bridge and the avatars (plain http://127.0.0.1:8000,
+    no way to trust a self-signed certificate) all lost the server."""
+    seen = _run_main(monkeypatch, tmp_path, {})
+    assert seen["run"] == {"host": "127.0.0.1", "port": 0, "log_level": "warning"} and "servers" not in seen
+    cert, key = selfsigned
+    port = _free_port()
+    seen = _run_main(monkeypatch, tmp_path, {"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key),
+                                             "SSL_HOST": "127.0.0.1", "SSL_PORT": str(port)})
+    assert "run" not in seen and seen["both"] == ("main", "phones")
+    assert seen["servers"] == ("127.0.0.1", 0, {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}, "127.0.0.1", port)
     with pytest.raises(SystemExit) as e:
         _run_main(monkeypatch, tmp_path, {"SSL_KEYFILE": str(key)})
     assert e.value.code == 2 and "SSL_CERTFILE" in capsys.readouterr().err
+    import socket
+    with socket.create_server(("127.0.0.1", 0)) as busy:
+        with pytest.raises(SystemExit) as e:
+            _run_main(monkeypatch, tmp_path, {"SSL_CERTFILE": str(cert), "SSL_KEYFILE": str(key),
+                                              "SSL_HOST": "127.0.0.1", "SSL_PORT": str(busy.getsockname()[1])})
+    assert e.value.code == 2 and "SSL_PORT" in capsys.readouterr().err
+
+
+def test_the_http_port_stays_plain_while_the_https_port_serves_phones(selfsigned):
+    """Real uvicorn, both servers on one app: http:// works on the main port (what the ears and the avatars use),
+    https:// on SSL_PORT (what a phone on Wi-Fi uses), the lifespan runs once, and stopping one stops both."""
+    import ssl
+    import threading
+    import urllib.error
+    import urllib.request
+    from contextlib import asynccontextmanager as acm
+
+    from fastapi import FastAPI
+
+    from app.main import make_servers, serve_both
+    runs = []
+
+    @acm
+    async def life(app):
+        runs.append("up")
+        yield
+        runs.append("down")
+    app = FastAPI(lifespan=life)
+    app.get("/ping")(lambda: {"ok": True})
+    cert, key = selfsigned
+    port, sport = _free_port(), _free_port()
+    main, phones = make_servers(app, "127.0.0.1", port, {"ssl_certfile": str(cert), "ssl_keyfile": str(key)},
+                                "127.0.0.1", sport)
+    t = threading.Thread(target=lambda: asyncio.run(serve_both(main, phones)), daemon=True)
+    t.start()
+    try:
+        until(lambda: main.started and phones.started, timeout=10)
+        assert urllib.request.urlopen(f"http://127.0.0.1:{port}/ping", timeout=5).read() == b'{"ok":true}'
+        ctx = ssl.create_default_context()
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+        assert urllib.request.urlopen(f"https://127.0.0.1:{sport}/ping", context=ctx, timeout=5).status == 200
+        with pytest.raises(urllib.error.URLError, match="SSL"):             # the main port speaks no TLS
+            urllib.request.urlopen(f"https://127.0.0.1:{port}/ping", context=ctx, timeout=5)
+        assert runs == ["up"]                                               # one lifespan: one set of sinks
+    finally:
+        phones.should_exit = True                                           # either one stopping stops both
+        t.join(10)
+    assert not t.is_alive() and runs == ["up", "down"]
+
+
+def test_serve_both_stops_the_main_server_when_the_https_one_fails():
+    """A phones' server that dies (e.g. its socket) must not leave the main one running half the show, nor skip the
+    main server's shutdown (which unloads the sinks)."""
+    from app.main import serve_both
+
+    class Fake:
+        def __init__(self, fail=False):
+            self.started = self.should_exit = self.stopped = False
+            self.fail = fail
+
+        async def serve(self):
+            if self.fail:
+                raise OSError("address in use")
+            self.started = True
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+            self.stopped = True
+
+    main, phones = Fake(), Fake(fail=True)
+    asyncio.run(asyncio.wait_for(serve_both(main, phones), 5))
+    assert main.started and main.stopped
