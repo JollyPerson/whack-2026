@@ -860,3 +860,66 @@ async def test_the_prompt_has_the_summary_and_the_findings_with_their_quotes():
     assert j.via == "formula" and "opp consistency" in j.note                    # every rule still applies
     assert "consistency 6.7" in j.reasoning and j.why["prop"]["consistency"] == "1 U-turn in 4 claims"
     assert j.why["opp"]["consistency"] == "0 U-turns in 4 claims; 1 concession and 1 correction, not penalised"
+
+
+def test_the_report_has_the_new_sections_and_the_json_its_fields(tmp_path):
+    rec = sc.collect([*synthetic(), *findings(), summary()])
+    card = sc.scorecard(rec)
+    j = writer.from_llm(answer())
+    path = report.write(tmp_path / "run-summary.md", rec, card, j, dances_for("prop"), music_for("prop"), 30.0, T0,
+                        "run")
+    md = path.read_text()
+    assert ("- Debate summary: the brain's (written by a model from the claims and the consistency findings; source "
+            "`llm`, argument map version 2)") in md
+    ground = md.split("## Common ground")[1].split("## Disputed issues")[0]
+    assert "- Unemployment is falling. (`c1`, `c7`)" in ground and "source `llm`" in ground
+    disputed = md.split("## Disputed issues")[1].split("## Scorecard")[0]
+    assert "| Issue | Proposition | Opposition | Evidence leans |" in disputed
+    assert "| Whether wages kept pace | Wages rose six percent | The figure is out of date | Proposition |" in disputed
+    turns = md.split("## U-turns and concessions")[1].split("## Other observations")[0]
+    assert ("Counted: Proposition 1 U-turn, 0 concessions, 0 corrections; Opposition 0 U-turns, 1 concession, "
+            "1 correction.") in turns
+    uturns, rest = turns.split("### U-turns")[1].split("### Concessions")
+    concessions, updates = rest.split("### Updates after a referee flag (corrections, not U-turns)")
+    assert ('- Proposition (Alice Archer), on wages: then "claim c1", now "Wages fell by two percent". self '
+            'contradiction on wages. (`c1`, `c6`)') in uturns
+    assert "I accept" not in uturns and "4.2 percent" not in uturns
+    assert ('- Opposition (Bob Baker) accepted the Proposition\'s point: then "claim c1", now "I accept unemployment '
+            'is falling".') in concessions
+    assert '- Opposition (Bob Baker): then "claim c3", now "It was 4.2 percent".' in updates
+    table = md.split("## Scorecard")[1].split("## Scores by criterion")[0]
+    for row in ("| U-turns (self-contradictions) | 1 | 0 |", "| Concessions made (it accepted the other side's point) "
+                "| 0 | 1 |", "| Corrections after a referee flag (updates, not penalised) | 0 | 1 |",
+                "| Common ground (agreements, shared by both sides) | 1 | 1 |", "| Formula consistency | 6.7 | 10.0 |",
+                "0.1 consistency", "concessions and corrections after a referee flag are not penalised"):
+        assert row in table, row
+    assert "| Consistency | 7.0 | 5.5 |" in md
+    data = json.loads(path.with_suffix(".json").read_text())
+    assert data["debate_summary"]["available"] and data["debate_summary"]["source"] == "llm"
+    assert data["debate_summary"]["agreed"][0]["statement"] == "Unemployment is falling."
+    assert data["debate_summary"]["disputed"][0]["evidence_leans"] == "prop"
+    assert [f["kind"] for f in data["consistency"]] == ["self_contradiction", "concession", "correction", "agreement"]
+    assert data["consistency"][1]["then"] == "claim c1" and data["consistency"][1]["earlier_side"] == "prop"
+    sides = data["scorecard"]["sides"]
+    assert (sides["prop"]["self_contradictions"], sides["opp"]["concessions"], sides["opp"]["corrections"],
+            sides["prop"]["agreements"]) == (1, 1, 1, 1)
+    assert sides["prop"]["criteria"]["consistency"] == 6.7 and "consistency" in data["criteria"]
+    assert data["scorecard"]["formula"]["weights"]["consistency"] == 0.1
+
+
+def test_the_report_says_when_the_summary_was_not_available(tmp_path):
+    rec = sc.collect([*synthetic(), K("k4", "agreement", "c3", "c1", "opp", "B", "claim c1", "claim c3", "prop")])
+    rec.summary_note = "it did not arrive within 15 s of the Final screen click"
+    card = sc.scorecard(rec)
+    path = report.write(tmp_path / "run-summary.md", rec, card, writer.from_formula(card, "no LLM is configured"),
+                        {}, {}, 30.0, T0)
+    md = path.read_text()
+    assert ("- Debate summary: not available (it did not arrive within 15 s of the Final screen click); judged "
+            "without it") in md
+    assert "## Common ground\n\nThe brain's debate summary: not available (it did not arrive" in md
+    assert 'Agreements the consistency checker found:\n\n- Proposition: "claim c1"; Opposition (Bob Baker): "claim c3"' in md
+    assert "## Disputed issues\n\nNot available" in md and "### U-turns\n\n- None." in md
+    data = json.loads(path.with_suffix(".json").read_text())
+    assert data["debate_summary"] == {"available": False, "note": rec.summary_note}
+    assert writer.summary_lines(rec) == ["DEBATE SUMMARY: not available (it did not arrive within 15 s of the Final "
+                                         "screen click). Weigh consistency from the findings below and the transcript."]
