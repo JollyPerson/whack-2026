@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -96,32 +97,36 @@ class Result:
     rejected: bool
     latency_ms: float
     via: str
+    error: bool = False            # the model or the check failed: never counted correct, even on an unverifiable row
 
 
-def audit(row: dict, guarded: Guarded, sources: list[Source], latency_ms: float, via: str) -> Result:
+def audit(row: dict, guarded: Guarded, sources: list[Source], latency_ms: float, via: str, error: bool = False) -> Result:
     """Fabrication is checked here again, independently of the guard that's being measured."""
     fabricated = any(not any(_url(s.url) == _url(e.url) and quote_in_source(e.quote, s.text) for s in sources)
                      for e in guarded.evidence)
     return Result(row["gid"], row.get("side", ""), row["label"], guarded.label, guarded.confidence, fabricated,
-                  guarded.quote_rejected, latency_ms, via)
+                  guarded.quote_rejected, latency_ms, via, error)
 
 
 def p95(values: list[float]) -> Optional[float]:
     return sorted(values)[max(0, math.ceil(.95 * len(values)) - 1)] if values else None
 
 
+def _right(r: Result) -> bool:
+    return r.label == r.gold and not r.error
+
+
 def score(results: list[Result]) -> dict:
     timed = [r.latency_ms for r in results if r.via in ("index", "saved")]
     total = len(results)
-    correct = [r for r in results if r.label == r.gold]
     return {
-        "total": total, "correct": len(correct),
+        "total": total, "correct": sum(map(_right, results)), "errors": sum(r.error for r in results),
         "fabricated": sum(r.fabricated for r in results),
         "rejected": sum(r.rejected for r in results),
         "swaps_at_speaking_confidence": [r.gid for r in results if (r.gold, r.label) in SWAP and r.confidence >= SPEAKING_CONFIDENCE],
         "unverifiable_rate": sum(r.label == "unverifiable" for r in results) / total if total else 0.0,
         "confusion": Counter((r.gold, r.label) for r in results),
-        "by_side": {s: (sum(r.side == s and r.label == r.gold for r in results), sum(r.side == s for r in results)) for s in ("prop", "opp")},
+        "by_side": {s: (sum(r.side == s and _right(r) for r in results), sum(r.side == s for r in results)) for s in ("prop", "opp")},
         "p50_ms": statistics.median(timed) if timed else None,
         "p95_ms": p95(timed),
     }
@@ -142,7 +147,8 @@ def gate_failures(m: dict, holdout: bool = False) -> list[str]:
 
 
 def report(m: dict) -> str:
-    lines = [f"correct {m['correct']}/{m['total']}   fabricated {m['fabricated']}   quotes rejected by the guard {m['rejected']}   "
+    lines = [f"correct {m['correct']}/{m['total']}   errors {m['errors']}   fabricated {m['fabricated']}   "
+             f"quotes rejected by the guard {m['rejected']}   "
              f"unverifiable {m['unverifiable_rate']:.0%}",
              "by side: " + "  ".join(f"{s} {c}/{n}" for s, (c, n) in m["by_side"].items())]
     if m["p95_ms"] is not None:
@@ -182,13 +188,16 @@ async def layer_retrieval(rows: list[dict]) -> int:
 
 async def save_evidence(rows: list[dict]) -> int:
     cache: dict = {}
-    embedder, missing = make_embedder(), []
-    with SAVED.open("w") as f:
-        for r in rows:
-            sources = await _retrieve(r, cache, embedder)
-            if r["label"] != "unverifiable" and not is_hit(r, sources):
-                missing.append(r["gid"])
-            f.write(json.dumps({"gid": r["gid"], "sources": [vars(s) for s in sources]}) + "\n")
+    embedder, missing, lines = make_embedder(), [], []
+    for r in rows:
+        sources = await _retrieve(r, cache, embedder)
+        if r["label"] != "unverifiable" and not is_hit(r, sources):
+            missing.append(r["gid"])
+        lines.append(json.dumps({"gid": r["gid"], "sources": [vars(s) for s in sources]}) + "\n")
+    # Replaced only once every row is in, so a failed run keeps the old file and the passages added to it by hand.
+    tmp = SAVED.with_name(SAVED.name + ".tmp")
+    tmp.write_text("".join(lines))
+    os.replace(tmp, SAVED)
     print(f"saved {len(rows)} rows to {SAVED}")
     if missing:
         print("add the correct passage by hand for:", ", ".join(missing))
@@ -201,12 +210,12 @@ async def run_verdict_once(rows: list[dict], llm, saved: dict) -> list[Result]:
         if r["gid"] not in saved:
             raise SystemExit(f"{r['gid']} isn't in {SAVED.name}. Run --save-evidence first.")
         sources = saved[r["gid"]]
-        start = time.perf_counter()
+        start, error = time.perf_counter(), False
         try:
             guarded = await judge(llm, r["text"], r["motion"], sources, INDEX_LLM_TIMEOUT_S)
         except Exception as e:
-            guarded = Guarded(explanation=f"error: {e!r}")
-        out.append(audit(r, guarded, sources, (time.perf_counter() - start) * 1000, "saved"))
+            guarded, error = Guarded(explanation=f"error: {e!r}"), True
+        out.append(audit(r, guarded, sources, (time.perf_counter() - start) * 1000, "saved", error))
     return out
 
 
@@ -220,7 +229,7 @@ async def run_full_once(rows: list[dict], llm, searcher, embedder, cache: dict) 
             guarded, sources, via = outcome.guarded, outcome.sources, outcome.via
         except Exception as e:
             guarded, sources, via = Guarded(explanation=f"error: {e!r}"), [], "error"
-        out.append(audit(r, guarded, sources, (time.perf_counter() - start) * 1000, via))
+        out.append(audit(r, guarded, sources, (time.perf_counter() - start) * 1000, via, via == "error"))
     return out
 
 
