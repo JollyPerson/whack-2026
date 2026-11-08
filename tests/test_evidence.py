@@ -703,3 +703,42 @@ async def test_index_that_cannot_be_saved_is_still_used(tmp_path, monkeypatch):
     mod = EvidenceModule(Bus(), FakeLLM(raw()), FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}]))
     await mod.start_session("Motion F")
     assert len(mod.checker.index) == 1
+
+
+# --- regressions: the verdict model
+def test_evidence_model_applies_without_its_own_key(monkeypatch):
+    from app.brain.llm import AnthropicLLM
+    from app.evidence import llm as llm_module
+    monkeypatch.delenv("EVIDENCE_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("EVIDENCE_MODEL", "claude-sonnet-5-5")
+    brain = AnthropicLLM(client=object(), model="claude-haiku-5-5")
+    monkeypatch.setattr(llm_module, "make_llm", lambda: brain)
+    got = llm_module.make_verdict_llm()
+    assert got.model == "claude-sonnet-5-5" and got.name == "anthropic:claude-sonnet-5-5" and got.client is brain.client
+
+
+def test_without_evidence_model_brains_model_is_kept(monkeypatch):
+    from app.brain.llm import AnthropicLLM
+    from app.evidence import llm as llm_module
+    monkeypatch.delenv("EVIDENCE_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EVIDENCE_MODEL", raising=False)
+    brain = AnthropicLLM(client=object(), model="claude-haiku-5-5")
+    monkeypatch.setattr(llm_module, "make_llm", lambda: brain)
+    assert llm_module.make_verdict_llm() is brain
+
+
+@pytest.mark.parametrize("evidence_model,llm_model,want", [
+    (None, "gpt-6-luna", "claude-haiku-5-5"),            # Brain on ChatGPT: LLM_MODEL isn't a Claude id
+    ("opus", "claude-sonnet-5-5", "claude-sonnet-5-5"),  # a Claude Code alias the API rejects
+    ("claude-opus-5-5", "claude-haiku-5-5", "claude-opus-5-5"),
+])
+def test_evidence_key_gets_a_valid_claude_model(monkeypatch, evidence_model, llm_model, want):
+    from app import config
+    from app.evidence import llm as llm_module
+    monkeypatch.setenv("EVIDENCE_ANTHROPIC_API_KEY", "test-key")
+    if evidence_model is None:
+        monkeypatch.delenv("EVIDENCE_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("EVIDENCE_MODEL", evidence_model)
+    monkeypatch.setattr(config, "LLM_MODEL", llm_model)
+    assert llm_module.make_verdict_llm().model == want
