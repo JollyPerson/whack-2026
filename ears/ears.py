@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import argparse
@@ -66,10 +65,6 @@ class SentenceBuffer:
         text = unicodedata.normalize("NFKC", word).lower()
         return re.sub(r"[^\w']", "", text)
 
-    # @staticmethod
-    # def is_sentence_end(word):
-    #     return bool(re.search(r'[.!?]["\')\]]*$', word.strip()))
-
     @staticmethod
     def is_sentence_end(text):
         """Return True only for a proper sentence-ending punctuation mark."""
@@ -136,15 +131,6 @@ class SentenceBuffer:
             "text": "".join(w["word"] for w in words).strip(),
             "confidence": round(confidence, 3) if confidence is not None else None,
         }
-
-    # @staticmethod
-    # def make_sentence(words):
-    #     return {
-    #         "type": "sentence",
-    #         "start": round(words[0]["start"], 3),
-    #         "end": round(words[-1]["end"], 3),
-    #         "text": "".join(w["word"] for w in words).strip(),
-    #     }
 
     def extract_sentences(self, cutoff):
         emitted = []
@@ -310,49 +296,6 @@ def transcribe_source(model, source_name, state, args, output_file):
                 "start": window_start + word.start,
                 "end": window_start + word.end,
                 "probability": word.probability,
-            })
-
-    state["sentences"].add_words(new_words)
-
-    cutoff = window_end - args.holdback
-
-    for sentence in state["sentences"].extract_sentences(cutoff):
-        emit_sentence(sentence, source_name, output_file)
-
-
-# def transcribe_source(model, source_name, state, args, output_file):
-#     """Transcribe the latest window for one source."""
-
-#     audio, window_start, window_end = state["audio"].snapshot(
-#         args.window
-#     )
-
-#     if audio is None or len(audio) < SAMPLE_RATE:
-#         return
-
-#     segments, info = model.transcribe(
-#         audio,
-#         language="en",
-#         beam_size=3,
-#         word_timestamps=True,
-#         condition_on_previous_text=False,
-#         vad_filter=True,
-#         vad_parameters={
-#             "min_silence_duration_ms": 1200
-#         },
-#     )
-
-    new_words = []
-
-    for segment in segments:
-        if not segment.words:
-            continue
-
-        for word in segment.words:
-            new_words.append({
-                "word": word.word,
-                "start": window_start + word.start,
-                "end": window_start + word.end,
             })
 
     state["sentences"].add_words(new_words)
