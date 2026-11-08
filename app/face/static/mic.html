@@ -7,7 +7,7 @@
 <title>Debate Referee · Phone mic</title>
 <!-- A phone's browser as a debater's microphone. Served at /mic?ch=A|B by app/face/phone_mic.py; the server needs
      PHONE_MICS=A,B. Over USB: adb reverse tcp:8000 tcp:8000, then http://localhost:8000/mic?ch=A on the phone.
-     URL params: ?ch=A|B · ?agc=0 (phone's auto gain off) · ?token=<MIC_TOKEN> · ?ws=ws://host:8000/mic/ws -->
+     URL params: ?ch=A|B · ?agc=0 (phone's auto gain off) · ?token=<MIC_TOKEN>. Always connects to its own host. -->
 <style>
 :root {
   color-scheme: dark;

@@ -1,6 +1,7 @@
 """The phone web-page microphone: /mic, /mic/ws, the PHONE_MICS null sinks, MIC_TOKEN, one phone per channel,
 bounded frames, writer cleanup. pactl and pacat are faked; one test runs a real subprocess as the writer."""
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ class FakePactl:
         self.sinks = {name: i for i, name in enumerate(sinks, 1)}
         self.calls, self.works, self.default, self.next_id = [], works, default, 500
         self.steal_default = False
+        self.args: dict[int, str] = {}                 # module id -> its argument string (pactl list short modules)
 
     def __call__(self, cmd, timeout=5.0):
         self.calls.append(cmd)
@@ -30,6 +32,8 @@ class FakePactl:
         args = cmd[1:]
         if args == ["list", "short", "sinks"]:
             return 0, "\n".join(f"{i}\t{n}\tPipeWire\ts16le 2ch 48000Hz\tSUSPENDED" for n, i in self.sinks.items())
+        if args == ["list", "short", "modules"]:
+            return 0, "\n".join(f"{i}\tmodule-null-sink\t{a}\t" for i, a in self.args.items())
         if args == ["get-default-sink"]:
             return 0, self.default
         if args[:1] == ["set-default-sink"]:
@@ -39,12 +43,14 @@ class FakePactl:
             name = args[2].split("=", 1)[1]
             self.next_id += 1
             self.sinks[name] = self.next_id
+            self.args[self.next_id] = " ".join(args[2:])
             if self.steal_default:
                 self.default = name
             return 0, str(self.next_id)
         if args[:1] == ["unload-module"]:
             mod = int(args[1])
             self.sinks = {n: i for n, i in self.sinks.items() if i != mod}
+            self.args.pop(mod, None)
             return 0, ""
         return 1, f"unexpected {cmd}"
 
@@ -159,8 +165,9 @@ def test_sinks_created_at_start_and_unloaded_at_shutdown(make_client, fakes):
     c = make_client(PHONE_MICS="a, b")
     loads = pactl.loads()
     assert [l[3] for l in loads] == ["sink_name=whack_phone_A", "sink_name=whack_phone_B"]
-    assert all(l[2] == "module-null-sink" and l[4].startswith("sink_properties=device.description=") for l in loads)
-    assert " " not in loads[0][4]                     # pactl splits module args on spaces
+    assert all(l[2] == "module-null-sink" for l in loads)
+    # pactl joins its arguments with spaces: a value holding a space must be quoted (checked live on PipeWire)
+    assert loads[0][4] == f'sink_properties="device.description=Phone_mic_A_Proposition whack.pid={os.getpid()}"'
     assert {"whack_phone_A", "whack_phone_B"} <= set(pactl.sinks)
     st = statuses(c, "A")[-1]
     assert st["state"] == "degraded" and "whack_phone_A.monitor" in st["detail"]
@@ -177,6 +184,38 @@ def test_existing_sink_is_reused_and_left_alone(make_client, fakes):
         assert ws.receive_json()["ok"] is True
     c.__exit__(None, None, None)
     assert pactl.unloads() == [] and "whack_phone_A" in pactl.sinks
+
+
+def _dead_pid():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_a_sink_left_by_a_dead_server_is_adopted_and_unloaded(make_client, fakes):
+    """After a SIGKILL the next start reused the sinks and never unloaded them again."""
+    pactl, _, _ = fakes
+    dead = _dead_pid()
+    pactl.sinks.update(whack_phone_A=91, whack_phone_B=92, whack_phone_C=93)
+    pactl.args[91] = f'sink_name=whack_phone_A sink_properties="device.description=Phone_mic_A whack.pid={dead}"'
+    pactl.args[92] = f'sink_name=whack_phone_B sink_properties="device.description=Phone_mic_B whack.pid={os.getppid()}"'
+    c = make_client(PHONE_MICS="A,B")
+    assert pactl.loads() == []                        # both reused
+    assert c.app.state.phone_mics.modules == {"A": 91}  # only the dead server's is ours to unload
+    c.__exit__(None, None, None)
+    assert pactl.unloads() == ["91"] and "whack_phone_B" in pactl.sinks
+
+
+def test_orphan_module_needs_our_marker_and_a_dead_pid(fakes):
+    pactl, _, _ = fakes
+    dead = _dead_pid()
+    pactl.args[5] = "sink_name=whack_phone_A"                                   # made by hand: no marker
+    pactl.args[6] = f"sink_name=whack_phone_AB whack.pid={dead}"                # another name that merely starts alike
+    pactl.args[7] = f"sink_name=whack_phone_B whack.pid={os.getpid()}"          # this very server
+    assert phone_mic.orphan_module("whack_phone_A") is None
+    assert phone_mic.orphan_module("whack_phone_B") is None
+    pactl.args[8] = f"sink_name=whack_phone_A sink_properties=\"x whack.pid={dead}\""
+    assert phone_mic.orphan_module("whack_phone_A") == 8
 
 
 def test_a_new_sink_never_stays_the_default(make_client, fakes):
@@ -245,6 +284,42 @@ def test_second_phone_is_refused_until_the_first_leaves(make_client, fakes):
     with c.websocket_connect("/mic/ws?ch=A") as again:
         assert again.receive_json()["ok"] is True
     assert len(procs) == 3
+
+
+def test_the_same_page_reconnecting_takes_its_channel_back(make_client, fakes):
+    """A Wi-Fi blip: the server still holds the old (half-open) socket for ~40 s, so the page's own reconnect got
+    4409 'another phone' and stopped for good. Now the same page (same sid) takes over; the old one gets 4410."""
+    _, procs, _ = fakes
+    c = make_client(PHONE_MICS="A")
+    sid = "a1b2c3d4e5f6a7b8c9d0e1f2"
+    with c.websocket_connect(f"/mic/ws?ch=A&sid={sid}") as old:
+        assert old.receive_json()["ok"] is True
+        old.send_bytes(b"\x01\x00" * 2)
+        until(lambda: len(procs[0].data) == 4)
+        assert refused(c, "/mic/ws?ch=A&sid=ffffffffffffffffffffffff")[1] == 4409   # a different page: still busy
+        assert refused(c, "/mic/ws?ch=A")[1] == 4409                                 # no sid: still busy
+        with c.websocket_connect(f"/mic/ws?ch=A&sid={sid}") as new:
+            assert new.receive_json()["ok"] is True
+            msg = old.receive_json()
+            with pytest.raises(WebSocketDisconnect) as e:
+                old.receive_json()
+            assert e.value.code == 4410 and "replaced" in msg["error"]
+            until(lambda: procs[0].waited)                                           # the old writer is released
+            new.send_bytes(b"\x02\x00" * 3)
+            until(lambda: len(procs[1].data) == 6)
+            assert len(procs[0].data) == 4
+            until(lambda: statuses(c, "A")[-1]["state"] == "up")
+            time.sleep(0.1)
+            assert statuses(c, "A")[-1]["state"] == "up"     # the replaced socket ending doesn't mark the mic down
+        until(lambda: "A" not in c.app.state.phone_mics.active)
+    assert len(procs) == 2
+
+
+def test_a_bad_sid_never_takes_over(make_client, fakes):
+    c = make_client(PHONE_MICS="A")
+    with c.websocket_connect("/mic/ws?ch=A&sid=x") as first:                         # too short: treated as none
+        first.receive_json()
+        assert refused(c, "/mic/ws?ch=A&sid=x")[1] == 4409
 
 
 def test_unknown_or_disabled_channel(make_client, fakes):

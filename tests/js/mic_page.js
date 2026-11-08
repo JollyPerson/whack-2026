@@ -1,6 +1,7 @@
 // The /mic page (mic.js) against a fake DOM, mic, AudioContext and WebSocket: the insecure-context and
 // permission errors, the side picker, the WebSocket URL (channel + token), frames sent only once the server said ok,
-// a refusal stops without retrying, a dropped link retries with backoff, Stop releases everything.
+// a refusal stops without retrying, a dropped link retries with backoff, "busy" right after a live link retries (our
+// own stale socket) but not for ever, a stalled link reconnects, ?ws= is ignored, Stop releases everything.
 // Run by tests/test_phone_mic.py: deno run --allow-read tests/js/mic_page.js app/face/static/mic.js
 const src = Deno.readTextFileSync(Deno.args[0]);
 let failures = 0;
@@ -14,7 +15,8 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
     style: {}, listeners: {}, classList: {set: new Set(), toggle(c, on) { on ? this.set.add(c) : this.set.delete(c); },
       add(c) { this.set.add(c); }},
     addEventListener(t, f) { this.listeners[t] = f; }});
-  const w = {sockets: [], timers: [], tracks: [], ctxs: [], nodes: [], wakes: 0, released: 0, gumArgs: null};
+  const w = {sockets: [], timers: [], tracks: [], ctxs: [], nodes: [], wakes: 0, released: 0, gumArgs: null, now: 1e6};
+  const FakeDate = {now: () => w.now};
   for (const id of ['error', 'state', 'state-text']) el(id).hidden = id === 'error';
   const document = {getElementById: el, body: el('body'), title: '', visibilityState: 'visible',
     addEventListener() {}};
@@ -29,7 +31,7 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
   class FakeNode {
     constructor(ctx, name, opts) { this.name = name; this.opts = opts; this.port = {}; w.nodes.push(this); }
     connect(x) { this.to = x; } disconnect() { this.cut = true; }
-    frame(bytes = 2560, peak = 0.3) { this.port.onmessage && this.port.onmessage({data: {pcm: new ArrayBuffer(bytes), peak}}); }
+    frame(bytes = 2560, peak = 0.3) { w.now += 80; this.port.onmessage && this.port.onmessage({data: {pcm: new ArrayBuffer(bytes), peak}}); }
   }
   class FakeCtx {
     constructor() { this.destination = {}; this.audioWorklet = {addModule: async u => { this.module = u; }}; w.ctxs.push(this); }
@@ -49,7 +51,7 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
   const window = {isSecureContext: secure};
   const location = {search, protocol, host, hostname: host.split(':')[0]};
   const env = {document, window, navigator, location, WebSocket: FakeWS, AudioContext: FakeCtx, AudioWorkletNode: FakeNode,
-    URLSearchParams, Date, setTimeout: (f, ms) => { w.timers.push({f, ms}); return w.timers.length; },
+    URLSearchParams, Date: FakeDate, setTimeout: (f, ms) => { w.timers.push({f, ms}); return w.timers.length; },
     clearTimeout: id => { if (id && w.timers[id - 1]) w.timers[id - 1].cancelled = true; }};
   new Function(...Object.keys(env), src)(...Object.values(env));
   w.el = el; w.api = window.__mic;
@@ -92,7 +94,8 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
   check('worklet loaded', w.ctxs[0].module === '/static/mic-worklet.js' && w.nodes[0].name === 'mic-downsampler');
   check('wake lock', w.wakes === 1);
   const s = w.sockets[0];
-  check('ws url', s.url === 'ws://localhost:8000/mic/ws?ch=B&token=t%26x', s.url);
+  check('ws url', s.url === 'ws://localhost:8000/mic/ws?ch=B&sid=' + w.api.SID + '&token=t%26x', s.url);
+  check('sid is random hex', /^[0-9a-f]{24}$/.test(w.api.SID), w.api.SID);
   s.open();
   w.nodes[0].frame();
   check('nothing sent before ok', s.sent.length === 0);
@@ -111,14 +114,59 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
   s2.drop(1006);
   check('backoff doubles', w.timers[1].ms === 1000, w.timers[1]);
   w.timers[1].f();
-  const s3 = w.sockets[2];
-  s3.open();
-  s3.msg({error: 'another phone is already microphone B: stop it first', code: 4409});
-  s3.drop(4409, 'busy');
-  check('refused: stops, no retry', w.timers.length === 2 && w.el('toggle').textContent === 'Start', w.timers.length);
+  const busy = sock => { sock.open(); sock.msg({error: 'another phone is already microphone B: stop it first', code: 4409});
+    sock.drop(4409, 'busy'); };
+  busy(w.sockets[2]);                                   // seconds after the live link dropped: our own old socket
+  check('busy after live: retries', w.timers.length === 3 && w.el('toggle').textContent === 'Stop' &&
+        w.el('state-text').textContent.includes('old connection'), w.el('state-text').textContent);
+  w.now += 61000;                                       // a minute on, it really is another phone
+  w.timers[2].f();
+  busy(w.sockets[3]);
+  check('refused: stops, no retry', w.timers.length === 3 && w.el('toggle').textContent === 'Start', w.timers.length);
   check('refused: says why', w.el('error').textContent.includes('Another phone') &&
         w.el('error').textContent.includes('already microphone B'), w.el('error').textContent);
   check('refused: mic released', w.tracks[0].stopped === true && w.ctxs[0].closed === true && w.released === 1);
+}
+
+// Busy on the very first connection (never live): another phone, stop at once.
+{
+  const w = page();
+  await w.click();
+  const s = w.sockets[0];
+  s.open(); s.msg({error: 'another phone is already microphone A: stop it first', code: 4409}); s.drop(4409);
+  check('busy before live: stops', w.timers.length === 0 && w.el('toggle').textContent === 'Start' &&
+        w.el('error').textContent.includes('Another phone'), w.el('error').textContent);
+}
+
+// A half-dead link: bufferedAmount stuck at the cap for > 3 s -> close and reconnect, not "Live" for ever.
+{
+  const w = page();
+  await w.click();
+  const s = w.sockets[0];
+  s.open(); s.msg({ok: true});
+  s.bufferedAmount = 64000;
+  for (let i = 0; i < 30; i++) w.nodes[0].frame();      // 2.4 s: still waiting
+  check('stall: not yet', w.timers.length === 0 && w.el('state').className === 'state live');
+  for (let i = 0; i < 15; i++) w.nodes[0].frame();      // past 3 s
+  check('stall: closed and retrying', s.closedWith === 4000 && w.timers.length === 1 &&
+        w.el('state').className === 'state retrying' && w.el('state-text').textContent.includes('stalled'),
+        [s.closedWith, w.timers.length, w.el('state-text').textContent]);
+  w.nodes[0].frame();
+  check('stall: one close only', w.timers.length === 1);
+  s.onclose({code: 1006});                              // the old socket's close event, much later
+  check('stale close ignored', w.timers.length === 1);
+  w.timers[0].f();
+  const s2 = w.sockets[1];
+  s2.open(); s2.msg({ok: true});
+  w.nodes[0].frame();
+  check('stall: streams again', s2.sent.length === 1 && w.el('state').className === 'state live');
+}
+
+// ?ws= can't send the audio and the token to another host.
+{
+  const w = page({search: '?ch=A&token=k&ws=wss://evil.example/x'});
+  await w.click();
+  check('?ws= ignored', w.sockets[0].url.startsWith('ws://localhost:8000/mic/ws?'), w.sockets[0].url);
 }
 
 // Stop: closes the socket with 1000 and releases the mic; a later close event doesn't retry.
@@ -126,7 +174,7 @@ function page({search = '?ch=A', secure = true, protocol = 'http:', host = 'loca
   const w = page({protocol: 'https:', host: '10.0.0.5:8443'});
   await w.click();
   const s = w.sockets[0];
-  check('wss on https', s.url === 'wss://10.0.0.5:8443/mic/ws?ch=A', s.url);
+  check('wss on https', s.url === 'wss://10.0.0.5:8443/mic/ws?ch=A&sid=' + w.api.SID, s.url);
   s.open(); s.msg({ok: true});
   await w.click();
   check('stop closes ws', s.closedWith === 1000 && w.tracks[0].stopped === true);
