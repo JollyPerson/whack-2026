@@ -1,1 +1,2 @@
 # D (face): add your dependencies here, one per line.
+websockets>=13                 # ElevenLabs Text to Dialogue (already in via uvicorn[standard])

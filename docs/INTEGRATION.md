@@ -133,6 +133,31 @@ invalid, it replies 422 with the reason and publishes none of them, so a retry n
     history and stay silent.
   - The admin keys send `Control`: M mute, F force next, 1–5 aggressiveness, W web fallback, I interims, Esc mute.
 - Serve your page by putting it at `app/face/static/index.html` (served at `/`), or host it anywhere and point it at `/ws`.
+- Voice: `GET /face/tts?text=` returns the line as a cached 24 kHz mono WAV (ElevenLabs or espeak-ng; see
+  `app/face/README.md`). `TTSState{speaking:true}` means "the referee is audible now".
+
+**Mate Engine bridge (protocol v1).** A desktop avatar (our Mate Engine fork) shows the line in a speech bubble and
+moves its mouth while the `?audio=1` tab plays it. It is a pure consumer: it publishes nothing, and it never plays audio.
+
+```
+GET /face/mate/next?after=<cursor:int>&epoch=<string>&wait=<seconds:int, default 10, max 25>
+-> 200 {"v":1,"epoch":"<8 hex>","cursor":<int>,"cmds":[Cmd,...]}
+Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"","title":"","on":false,"clear":false}
+```
+
+- Every field is always present and never null (Unity's `JsonUtility` handles neither).
+- `say`: `id`/`text` are the Interjection's, exactly as shown in the bubble. `audio` is the WAV's relative URL
+  (`/face/tts?text=<urlencoded>`), or `""` when the server has no voice. An Interjection older than 4 s at delivery
+  is dropped.
+- `talk`: `id` = `TTSState.interjection_id` (or `""`), `on` = `TTSState.speaking`. The mouth follows the one audio player.
+- `stop`: `clear=true` (remove the bubble, close the mouth) on `Control` mute=true, `Control` director=false and
+  `SessionStart`; `clear=false` (close the mouth, keep the bubble) on `Control` tts=false.
+- `dance` (`title`, `""` = the first available) and `dance_stop` come only from the operator routes
+  `POST /face/mate/dance {"title":""}` and `POST /face/mate/dance/stop`. They are not bus events: each is held
+  for up to 10 s and delivered once, to the next poll.
+- Start with `after=-1`. Send back the `cursor` and `epoch` of the last reply. If `after<0`, the epoch differs, or
+  `after` is ahead of the server (it restarted), the reply is immediate: `{"cursor": <now>, "cmds": []}`. Past events
+  are never replayed. Otherwise the reply comes as soon as there is at least one command, or after `wait` seconds.
 
 ---
 
