@@ -1373,6 +1373,13 @@ async def test_a_hyphenated_accented_or_apostrophe_name_never_reaches_a_bubble(n
     assert b.text == "Why should anyone accept that?"                       # the template, not the named question
 
 
+def test_a_two_letter_part_of_a_name_does_not_block_a_common_word():
+    """'Al' of 'Al-Amin' is a word too ('et al.'); as reset() does for whole names, a part needs 3 letters."""
+    assert not lines.named("As Card et al. found, the effect was small.", ["Al-Amin"])
+    assert lines.named("Amin, which study?", ["Al-Amin"])
+    assert lines.named("O'Neill, which year?", ["O'Neill"])
+
+
 async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides():
     """Mic bleed the brain's guard missed (the phone's Wi-Fi lag, a different segment): Prop's words come back as an
     Opp claim. Heckling Opp for them is heckling the wrong debater."""

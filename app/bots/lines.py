@@ -161,9 +161,10 @@ def guard(text: Any, kind: str = "followup", allowed: str = "", strict: bool = F
 
 def named(text: str, names: Iterable[str]) -> bool:
     """True if `text` has one of `names` (the debaters' names), or any part of a hyphenated or apostrophe name,
-    accents and all ("Zoë", "Anne-Marie" or "Marie", "O'Neill" or "Neill")."""
+    accents and all ("Zoë", "Anne-Marie" or "Marie", "O'Neill" or "Neill"). A part needs 3 letters, as a whole name
+    does: the "Al" of "Al-Amin" is also "et al."."""
     words = set(_LETTERS.findall(text.lower()))
-    return any(p in words for n in names for p in _LETTERS.findall(str(n or "").lower()) if len(p) > 1)
+    return any(p in words for n in names for p in _LETTERS.findall(str(n or "").lower()) if len(p) > 2)
 
 
 def _finish(text: str) -> str:
