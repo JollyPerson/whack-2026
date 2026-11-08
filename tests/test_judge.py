@@ -16,8 +16,9 @@ from app.bus import Bus, load_jsonl
 from app.judge import report, scorecard as sc, writer
 from app.judge import run as judge_run
 from app.judge.run import Judge, dances_for, music_for
-from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, DebateResult, Evidence, Interjection, MapNode,
-                         SessionStart, SpeakerInfo, Utterance, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, Claim, Consistency, Control, DebateResult, DebateSummary,
+                         DisputedPoint, Evidence, Interjection, MapNode, SessionStart, SpeakerInfo, SummaryPoint,
+                         Utterance, Verdict)
 
 ROOT = Path(__file__).resolve().parent.parent
 T0 = 1_762_600_000.0
@@ -46,6 +47,36 @@ def C(cid, spk, side, typ="statistic", checkable=True, text=None):
 
 def V(cid, label, conf=0.9, evidence=ONS):
     return Verdict(claim_id=cid, label=label, confidence=conf, evidence=evidence, explanation=f"{cid} checked")
+
+
+def K(kid, kind, cid, eid, side, spk, then, now, earlier_side=None):
+    return Consistency(id=kid, kind=kind, claim_id=cid, earlier_claim_id=eid, side=side, speaker=spk,
+                       earlier_side=earlier_side or side, then=then, now=now, confidence=0.85, topic="wages",
+                       explanation=f"{kind.replace('_', ' ')} on wages")
+
+
+def findings() -> list:
+    """The brain's consistency findings on synthetic(): a Prop U-turn, an Opp concession, an Opp correction after the
+    referee flagged c3, and common ground."""
+    return [
+        C("c6", "A", "prop", text="Wages fell by two percent last year"),
+        C("c7", "B", "opp", text="I accept unemployment is falling"),
+        C("c8", "B", "opp", text="It was 4.2 percent, not 6, I stand corrected"),
+        K("k1", "self_contradiction", "c6", "c1", "prop", "A", "claim c1", "Wages fell by two percent"),
+        K("k2", "concession", "c7", "c1", "opp", "B", "claim c1", "I accept unemployment is falling", "prop"),
+        K("k3", "correction", "c8", "c3", "opp", "B", "claim c3", "It was 4.2 percent"),
+        K("k4", "agreement", "c7", "c5", "opp", "B", "claim c5", "unemployment is falling", "prop"),
+        K("k1-again", "self_contradiction", "c6", "c1", "prop", "A", "claim c1", "Wages fell"),   # the same pair
+    ]
+
+
+def summary(version=2, source="llm") -> DebateSummary:
+    return DebateSummary(motion="This house would raise the minimum wage", version=version, source=source,
+                         agreed=[SummaryPoint(statement="Unemployment is falling.", claim_ids=["c1", "c7"])],
+                         disputed=[DisputedPoint(issue="Whether wages kept pace", prop="Wages rose six percent",
+                                                 opp="The figure is out of date", evidence_leans="prop",
+                                                 claim_ids=["c1", "c3"])],
+                         self_contradictions={"prop": 1, "opp": 0}, concessions={"prop": 0, "opp": 1})
 
 
 def synthetic() -> list:
@@ -144,9 +175,11 @@ def test_scorecard_on_a_synthetic_session():
     assert o["interjections"] == {"total": 2, "correction": 1, "prompt": 1} and p["interjections"] == {"total": 0}
     assert o["bot_lines"] == {"total": 3, "challenge": 1, "nudge": 1, "rebut": 1}
     assert p["bot_lines"] == {"total": 1, "concede": 1}
-    assert p["criteria"] == {"factuality": 5.6, "evidence": 3.3, "responsiveness": 7.5, "balance": 8.9}
-    assert o["criteria"] == {"factuality": 2.9, "evidence": 0.0, "responsiveness": 2.3, "balance": 7.1}
-    assert p["overall"] == sc.overall(p["criteria"]) == 6.0 and o["overall"] == sc.overall(o["criteria"]) == 2.7
+    assert p["criteria"] == {"factuality": 5.6, "evidence": 3.3, "responsiveness": 7.5, "balance": 8.9,
+                             "consistency": 10.0}                                  # no Consistency findings
+    assert o["criteria"] == {"factuality": 2.9, "evidence": 0.0, "responsiveness": 2.3, "balance": 7.1,
+                             "consistency": 10.0}
+    assert p["overall"] == sc.overall(p["criteria"]) == 6.3 and o["overall"] == sc.overall(o["criteria"]) == 3.4
     assert card["formula"]["winner"] == "prop" and card["formula"]["margin"] == "decisive"
     assert (p["pressure"], p["confirmations"], o["pressure"], o["confirmations"]) == (0, 1, 5, 0)   # b2 concedes
     s = card["system"]
@@ -199,16 +232,18 @@ def test_scorecard_on_the_golden_run():
     assert (p["unanswered"], o["unanswered"], o["nonresponsive"]) == (2, 2, 1)
     assert o["interjections"] == {"total": 1, "prompt": 1}                         # "Opposition, you haven't..."
     assert p["criteria"]["evidence"] > o["criteria"]["evidence"]                 # 2.5 of 6 sourced beats 1 of 2
-    assert (p["overall"], o["overall"]) == (5.1, 5.6)
+    assert (p["overall"], o["overall"]) == (5.6, 6.0)
     f = card["formula"]
-    assert (f["winner"], f["margin"], f["difference"]) == ("opp", "clear", 0.5)
+    assert (f["winner"], f["margin"], f["difference"]) == ("draw", "", 0.4)        # Opp's factuality lead, narrow
     assert 0 < p["speaking_s"] < 120 and p["share"] + o["share"] == pytest.approx(1.0, abs=0.01)
 
 
 def test_formula_weights_draw_threshold_and_margin_bands():
     assert sum(sc.WEIGHTS.values()) == pytest.approx(1.0)
     assert sc.overall(dict.fromkeys(sc.CRITERIA, 10.0)) == 10.0
-    assert sc.overall({"factuality": 8, "evidence": 6, "responsiveness": 4, "balance": 10}) == 6.8  # 2.8+1.5+1+1.5
+    assert sc.overall({"factuality": 8, "evidence": 6, "responsiveness": 4, "balance": 10, "consistency": 5}) == 6.7
+    assert sc.WEIGHTS == {"factuality": 0.30, "evidence": 0.25, "responsiveness": 0.20, "balance": 0.15,
+                          "consistency": 0.10}                                      # 2.4+1.5+0.8+1.5+0.5 above
 
     def f(prop, opp):
         return sc.formula({"prop": {"overall": prop}, "opp": {"overall": opp}})
@@ -230,7 +265,7 @@ def test_an_empty_record_is_neutral_and_a_draw():
 def test_saying_nothing_checkable_does_not_pay():
     """A side that sources nothing scores no evidence and no perfect balance: below a side whose checks held up."""
     silent = sc.criteria(sc.scorecard(sc.collect([SessionStart(motion="m", speakers=SPEAKERS)]))["sides"]["prop"])
-    assert silent == {"factuality": 5.0, "evidence": 0.0, "responsiveness": 5.0, "balance": 7.5}
+    assert silent == {"factuality": 5.0, "evidence": 0.0, "responsiveness": 5.0, "balance": 7.5, "consistency": 10.0}
     rec = sc.collect([SessionStart(motion="m", speakers=SPEAKERS), U("u1", "A", "figures", 1, 5),
                       *(C(f"c{i}", "A", "prop") for i in range(6)),
                       *(V(f"c{i}", "supported" if i < 2 else "contradicted") for i in range(6))])
@@ -347,7 +382,7 @@ async def test_an_invalid_or_inconsistent_answer_leaves_it_to_the_formula(out, w
     j = await writer.decide(FakeLLM(out), rec, card)
     assert (j.via, j.winner, j.margin) == ("formula", card["formula"]["winner"], card["formula"]["margin"])
     assert why in j.note and j.scores["prop"]["overall"] == card["sides"]["prop"]["overall"]
-    assert j.criteria == sc.CRITERIA and "Proposition 6.0" in j.reasoning and "Opposition 2.7" in j.reasoning
+    assert j.criteria == sc.CRITERIA and "Proposition 6.3" in j.reasoning and "Opposition 3.4" in j.reasoning
 
 
 @pytest.mark.parametrize("llm, why", [
@@ -363,7 +398,7 @@ async def test_no_llm_a_timeout_or_an_error_leaves_it_to_the_formula(monkeypatch
     j = await writer.decide(llm, rec, sc.scorecard(rec))
     assert time.monotonic() - t < 0.5
     assert (j.via, j.winner, j.margin) == ("formula", "prop", "decisive") and why in j.note
-    assert j.headline == "Proposition wins decisively on the scorecard, 6.0 to 2.7."
+    assert j.headline == "Proposition wins decisively on the scorecard, 6.3 to 3.4."
 
 
 async def test_the_transcript_is_delimited_and_never_instructions():
@@ -765,3 +800,35 @@ def test_main_starts_the_judge_only_with_judge_real(tmp_path, monkeypatch):
             else:
                 hist = c.get("/debug/history").json()
                 assert not any(e["event"] == "ModuleStatus" and e["module"] == "judge" for e in hist)
+
+
+# ----------------------------------------------------------------------------- the debate summary and consistency
+def test_consistency_counts_per_side_and_corrections_are_not_penalised():
+    rec = sc.collect([*synthetic(), *findings()])
+    assert len(rec.consistency) == 4                                             # one per (claim, earlier claim)
+    card = sc.scorecard(rec)
+    p, o = card["sides"]["prop"], card["sides"]["opp"]
+    assert (p["self_contradictions"], p["concessions"], p["corrections"], p["agreements"]) == (1, 0, 0, 1)
+    assert (o["self_contradictions"], o["concessions"], o["corrections"], o["agreements"]) == (0, 1, 1, 1)
+    assert p["claims"] == 4 and p["criteria"]["consistency"] == 6.7                # 1 - 2 * 1 / (4 + 2)
+    assert o["criteria"]["consistency"] == 10.0                                  # a concession and a correction: free
+    assert sc.collect([*synthetic(), summary(version=3), summary(version=2)]).summary.version == 3   # the latest
+    found = sc.consistency_findings(rec)
+    assert [(f["kind"], f["side"], f["speaker"]) for f in found] == [
+        ("self_contradiction", "prop", "Alice Archer"), ("concession", "opp", "Bob Baker"),
+        ("correction", "opp", "Bob Baker"), ("agreement", "opp", "Bob Baker")]
+    assert found[0]["then"] == "claim c1" and found[0]["now"] == "Wages fell by two percent"
+
+
+def test_the_new_weights_sum_to_one_and_a_u_turn_lowers_consistency():
+    assert sum(sc.WEIGHTS.values()) == pytest.approx(1.0) and "consistency" in sc.CRITERIA
+    before = sc.scorecard(sc.collect(synthetic()))["sides"]["prop"]
+    after = sc.scorecard(sc.collect([*synthetic(), *findings()]))["sides"]["prop"]
+    assert before["criteria"]["consistency"] == 10.0 > after["criteria"]["consistency"]
+    more = sc.scorecard(sc.collect([*synthetic(), *findings(), C("c9", "A", "prop", text="Wages were flat"),
+                                    K("k9", "self_contradiction", "c9", "c6", "prop", "A", "Wages fell",
+                                      "Wages were flat")]))["sides"]["prop"]
+    assert more["criteria"]["consistency"] < after["criteria"]["consistency"]        # 2 U-turns in 5 claims: 4.3
+    st = dict(before, criteria=None)
+    assert sc.criteria({**st, "self_contradictions": 1})["consistency"] < sc.criteria(st)["consistency"]
+    assert sc.criteria({**st, "concessions": 3, "corrections": 2, "agreements": 4}) == sc.criteria(st)

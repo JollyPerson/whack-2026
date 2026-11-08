@@ -409,6 +409,9 @@ def formula_why(st: dict) -> dict[str, str]:
                           f"{st['ignored']} unanswered{nr}",
         "balance": f"{_n(M, 'claim')} flagged as missing context"
                    + (f", {st['ai_flagged']} flagged by AI knowledge" if st["ai_flagged"] else ""),
+        "consistency": f"{_n(st['self_contradictions'], 'U-turn')} in {_n(st['claims'], 'claim')}"
+                       + (f"; {_n(st['concessions'], 'concession')} and {_n(st['corrections'], 'correction')}, "
+                          f"not penalised" if st["concessions"] or st["corrections"] else ""),
     }
 
 
