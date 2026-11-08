@@ -78,6 +78,14 @@ _QUOTES = "\"'“”‘’`"
 _OK_HIGH = set("’‘“”—–…€")
 
 
+_KEY = re.compile(r"[^a-z0-9%£$€.]+")
+
+
+def text_key(text: str) -> str:
+    """Duplicate test: "Source for that 40%?" and "source for that 40%." are the same line."""
+    return _KEY.sub(" ", str(text or "").lower()).strip(" .")
+
+
 def answering(side: Any) -> Optional[str]:
     """The persona that answers a claim from `side` ("prop" | "opp"); None for anything else."""
     return ANSWERS.get(str(side or "").strip().lower())
@@ -208,13 +216,13 @@ def rebut(claim: Any, verdict: Any, used: Iterable[str] = ()) -> Optional[str]:
     allowed = " ".join([str(_get(claim, "text", "") or ""), str(_get(verdict, "short_fact", "") or ""), actual,
                         claimed, f["src"]] + [f"{_get(e, 'title', '')} {_get(e, 'quote', '')}"
                                               for e in _get(verdict, "evidence") or []])
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in REBUT.get(_get(verdict, "label"), []):
         try:
             text = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if text.lower() not in used and (ok := guard(text, "rebut", allowed)):
+        if text_key(text) not in used and (ok := guard(text, "rebut", allowed)):
             return ok
     return None
 
@@ -226,13 +234,13 @@ def _body(text: Any) -> str:
 
 
 def _tagged(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str] = ()):
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in tpls:
         try:
             line = guard(_finish(tpl.format(**{k: v for k, v in f.items() if v})), kind, allowed, True, names)
         except KeyError:
             continue
-        if line and line.lower() not in used:
+        if line and text_key(line) not in used:
             return line
     return None
 
@@ -305,14 +313,14 @@ def followup(claim: Any, used: Iterable[str] = (), granted: bool = False) -> Opt
     """A template follow-up question by claim type (the fallback when the LLM fails or is absent)."""
     text = str(_get(claim, "text", "") or "")
     f = {"figure": figure(text)}
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     tpls = GRANTED if granted else FOLLOWUP.get(_get(claim, "type"), FOLLOWUP["other"])
     for tpl in tpls:
         try:
             line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, "followup", text)):
+        if text_key(line) not in used and (ok := guard(line, "followup", text)):
             return ok
     return None
 
@@ -321,13 +329,13 @@ def nudge(topic: Any = "", text: str = "", used: Iterable[str] = ()) -> Optional
     """'Still waiting on the cost point.' `topic` is our own claim's topic; `text` its claim text (its figures)."""
     t = _ARTICLE.sub("", voice.clean(topic))       # "the cost" -> "the cost point", not "the the cost point"
     t = " ".join(t.split()[:4]) if t else ""
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in NUDGE:
         try:
             line = _finish(tpl.format(**({"topic": t} if t else {})))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, "nudge", f"{t} {text}")):
+        if text_key(line) not in used and (ok := guard(line, "nudge", f"{t} {text}")):
             return ok
     return None
 
@@ -358,13 +366,13 @@ def excerpt(text: Any, n: int) -> str:
 
 def _pick(kind: str, tpls: list[str], f: dict, allowed: str, names: Iterable[str], used: Iterable[str]):
     """The first template that fills (every field it names is non-empty), is new and passes guard()."""
-    used = {u.lower() for u in used}
+    used = {text_key(u) for u in used}
     for tpl in tpls:
         try:
             line = _finish(tpl.format(**{k: v for k, v in f.items() if v}))
         except KeyError:
             continue
-        if line.lower() not in used and (ok := guard(line, kind, allowed, names=names)):
+        if text_key(line) not in used and (ok := guard(line, kind, allowed, names=names)):
             return ok
     return None
 

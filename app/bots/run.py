@@ -258,15 +258,16 @@ class Bots:
         text = lines.guard(raw, "followup", c.text, strict=True, names=self.names) if raw else None
         if raw and not text:
             log.info("bots: follow-up dropped by the guards: %r", raw)
-        if not text or self.pacer.has_said(text):
-            text = lines.followup(c, self.said, granted)
+        used = self.used()
+        if not text or lines.text_key(text) in {lines.text_key(u) for u in used}:
+            text = lines.followup(c, used, granted)
         if text:
             self.queue(session, text=text, kind="followup", **to)
 
     def rebutted(self, c: Claim, verdict: Optional[Verdict], check: Optional[asyncio.Task], session: int,
                  to: dict) -> bool:
         """Queue the rebut a sourced Verdict allows; it beats Claude's check (cancelled, logged). True if it did."""
-        text = lines.rebut(c, verdict, self.said) if verdict is not None else None
+        text = lines.rebut(c, verdict, self.used()) if verdict is not None else None
         if not text:
             return False
         if check is not None:
@@ -291,8 +292,13 @@ class Bots:
         elif res.assessment == "misleading":
             text = lines.misleading(c, res.line, res.context, names=self.names)
         else:
-            text = lines.concede(c, res.line, names=self.names, used=self.said)
+            text = lines.concede(c, res.line, names=self.names, used=self.used())
         return kind, text, "" if text else "dropped by the guards"
+
+    def used(self) -> list[str]:
+        """Lines a template must not repeat: posted this session, or queued (a twin queued behind a bubble would be
+        dropped when the first one posts, leaving its claim unanswered)."""
+        return self.said + [ln.text for p in lines.PERSONAS for ln in self.pacer.queued(p)]
 
     def queue(self, session: int, **kw) -> bool:
         """Hand a line to the pacer (and post it now if its bot is free). False if dropped."""
@@ -336,7 +342,7 @@ class Bots:
         for persona, (_, n, target) in due.items():
             self.nudged.add(n.claim_id)
             topic = getattr(n, "topic", "") or getattr(self.claims.get(n.claim_id), "topic", "")
-            text = lines.nudge(topic, n.text, self.said)
+            text = lines.nudge(topic, n.text, self.used())
             if text:
                 self.queue(self.session, persona=persona, text=text, kind="nudge", target=target, claim_id=n.claim_id)
 
@@ -363,10 +369,10 @@ class Bots:
         if persona is None or (before in lines.SECOND and (before == side) != (kind == "uturn")):
             return                                    # a U-turn is your own; a concession is to the other side
         if kind == "uturn":
-            text = lines.uturn(k.then, k.now, self.names, self.said)
+            text = lines.uturn(k.then, k.now, self.names, self.used())
         else:
             text = lines.conceded(k.topic or getattr(earlier, "topic", ""),
-                                  f"{k.then} {k.now} {getattr(earlier, 'text', '')}", self.names, self.said)
+                                  f"{k.then} {k.now} {getattr(earlier, 'text', '')}", self.names, self.used())
         target = k.speaker or getattr(claim, "speaker", None)
         fired = bool(text) and self.queue(self.session, persona=persona, text=text, kind=kind, target=target,
                                           claim_id=k.claim_id)

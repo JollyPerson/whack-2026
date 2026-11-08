@@ -14,18 +14,10 @@ banter, then the newest).
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 
-from app.bots.lines import FACT_KINDS, PERSONAS, PRIORITY
+from app.bots.lines import FACT_KINDS, PERSONAS, PRIORITY, text_key
 from app.schemas import BotLine, BotTalk, Event
-
-_KEY = re.compile(r"[^a-z0-9%£$€.]+")
-
-
-def text_key(text: str) -> str:
-    """Duplicate test: "Source for that 40%?" and "source for that 40%." are the same line."""
-    return _KEY.sub(" ", text.lower()).strip(" .")
 
 
 @dataclass

@@ -1391,3 +1391,22 @@ async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides(
 def test_a_nudge_topic_that_starts_with_an_article_is_not_doubled():
     assert lines.nudge("the minimum wage") == "Still waiting on the minimum wage point."
     assert lines.nudge("The cost of living") == "Still waiting on the cost of living point."
+
+
+def test_a_template_that_differs_from_a_said_line_only_in_punctuation_gives_way_to_the_next():
+    assert lines.followup(C("c1"), ["source for that 6%."]) == "Where does that 6% come from?"
+    assert lines.nudge("graduate debt", used=["Still waiting on the graduate debt point?"]) == \
+        "Nothing on graduate debt, then?"
+
+
+async def test_two_claims_queued_behind_a_bubble_with_the_llm_down_get_different_templates():
+    bots, out, clock = make()                                                  # no LLM: templates only
+    bots.handle(C("c0", typ="value", checkable=False, text="Markets know best."))
+    await settle(bots)                                                         # the For bot's bubble is up
+    bots.handle(C("c1", typ="fact", checkable=False, text="Nobody ever lost a job to a pay rise."))
+    bots.handle(C("c2", typ="fact", checkable=False, text="Small firms all back the rise."))
+    await settle(bots)
+    for _ in range(2):
+        clock.t += 10
+        bots.tick()
+    assert sorted((b.claim_id, b.text) for b in said(out)[1:]) == [("c1", "Says who?"), ("c2", "Source, please?")]
