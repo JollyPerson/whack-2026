@@ -4,8 +4,30 @@
     {
       "name": "stage-replay",
       "runtimeExecutable": "../../../.venv/bin/python",
-      "runtimeArgs": ["-m", "app.main", "replay", "--file", "fixtures/golden_run.jsonl", "--port", "8765"],
+      "runtimeArgs": [
+        "-m",
+        "app.main",
+        "replay",
+        "--file",
+        "fixtures/golden_run.jsonl",
+        "--port",
+        "8765"
+      ],
       "port": 8765
+    },
+    {
+      "name": "stage-mock",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "EARS=off",
+        "../../../.venv/bin/python",
+        "-m",
+        "app.main",
+        "mock",
+        "--port",
+        "8766"
+      ],
+      "port": 8766
     }
   ]
 }

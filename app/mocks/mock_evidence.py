@@ -1,7 +1,8 @@
 """Mock evidence: canned, deterministic verdicts after a fake delay. Owner: B (stand-in for C).
 
 Label and delay come from a hash of the claim text, so the same fixture always gives the same
-verdicts (stable demos and tests). On SessionStart it fakes pre-research progress.
+verdicts (stable demos and tests). On SessionStart and ResearchRequest it fakes pre-research progress and a
+FactSheet built from the Motion's words, so the stage's setup screen works with no keys.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import hashlib
 import os
 
 from app import latency
-from app.schemas import Evidence, ResearchProgress, SourceCard, Verdict
+from app.schemas import Evidence, Fact, FactSheet, ResearchProgress, SourceCard, Verdict
 
 LABELS = ["supported", "contradicted", "missing_context", "unverifiable"]
 
@@ -33,24 +34,42 @@ async def check(bus, c):
     bus.publish(latency.finish(v, c), src="mock_evidence")
 
 
+def mock_facts(motion: str) -> list[Fact]:
+    topic = motion.removeprefix("This house would ").rstrip(".") or "the motion"
+    url = "https://www.ons.gov.uk/mock/factsheet"
+    rows = [("prop", f"[mock] A 2023 review found {topic} cut costs by 12% in pilot areas.", 12, "%"),
+            ("opp", f"[mock] Surveys show 58% of residents opposed plans to {topic}.", 58, "%"),
+            ("both", f"[mock] Around 1.4 million people would be directly affected if we {topic}.", 1.4e6, "people"),
+            ("prop", f"[mock] Three of five comparable countries that tried to {topic} kept the policy.", 3, "countries"),
+            ("opp", f"[mock] Official estimates put the up-front cost to {topic} at £2.1bn.", 2.1e9, "GBP")]
+    return [Fact(statement=s, side=side, quote=s[7:60], url=url, title="Mock ONS bulletin", number=n, unit=u)
+            for side, s, n, u in rows]
+
+
+async def fake_research(bus, motion: str, brief: str = "", step: float = 0.2):
+    for i in range(0, 21, 4):
+        bus.publish(ResearchProgress(stage="searching", done=i, total=20, motion=motion, detail="mock search"),
+                    src="mock_evidence")
+        await asyncio.sleep(step)
+    bus.publish(ResearchProgress(stage="ready", done=20, total=20, motion=motion, detail="20 passages, 5 key facts"),
+                src="mock_evidence")
+    bus.publish(FactSheet(motion=motion, brief=brief, facts=mock_facts(motion)), src="mock_evidence")
+
+
 async def run(bus):
-    pending: set[asyncio.Task] = set()     # this session's checks + progress: a SessionStart cancels them
+    pending: set[asyncio.Task] = set()     # this session's checks + research: a SessionStart cancels them
 
     def spawn(coro) -> None:
         t = asyncio.create_task(coro)
         pending.add(t)
         t.add_done_callback(pending.discard)
 
-    async for ev in bus.subscribe("mock_evidence", {"Claim", "SessionStart"}):
+    async for ev in bus.subscribe("mock_evidence", {"Claim", "SessionStart", "ResearchRequest"}):
         if ev.event == "SessionStart":
             for t in list(pending):        # a verdict for the previous session's claim must not land in this one
                 t.cancel()
-
-            async def progress():
-                for i in range(0, 21, 4):
-                    bus.publish(ResearchProgress(stage="ready" if i >= 20 else "searching", done=i, total=20),
-                                src="mock_evidence")
-                    await asyncio.sleep(0.2)
-            spawn(progress())
+            spawn(fake_research(bus, ev.motion, ev.brief))
+        elif ev.event == "ResearchRequest":
+            spawn(fake_research(bus, ev.motion, ev.brief, step=0.6))
         elif ev.checkable:
             spawn(check(bus, ev))

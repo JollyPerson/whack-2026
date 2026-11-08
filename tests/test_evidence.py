@@ -638,7 +638,8 @@ async def test_slow_index_load_does_not_land_on_the_next_motion(tmp_path, monkey
     assert [p.stage for p in drain(sub)] == ["error"]           # Motion A's "ready" never reaches the dashboard
 
 
-async def test_new_motion_cancels_the_previous_research():
+async def test_new_motion_leaves_a_shared_build_running():
+    """A build can be shared with a ResearchRequest for the same Motion, so a new SessionStart must not cancel it."""
     started, cancelled = asyncio.Event(), []
 
     class Hangs(FakeSearch):
@@ -657,15 +658,13 @@ async def test_new_motion_cancels_the_previous_research():
     bus.publish(SessionStart(motion="Motion A"))
     await asyncio.wait_for(started.wait(), 2)
     bus.publish(SessionStart(motion=""))
-    for _ in range(50):
-        if cancelled:
-            break
-        await asyncio.sleep(.01)
-    pending = [task, *mod.tasks]
+    await asyncio.sleep(.3)
+    still_running = not cancelled and len(mod.builds) == 1
+    pending = [task, *mod.tasks, *mod.builds.values()]
     for t in pending:
         t.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
-    assert cancelled and all("Motion A" in q for q in cancelled)
+    assert still_running
 
 
 async def test_corrupt_saved_index_reports_an_error(tmp_path, monkeypatch):
@@ -777,3 +776,113 @@ def test_evidence_key_gets_a_valid_claude_model(monkeypatch, evidence_model, llm
         monkeypatch.setenv("EVIDENCE_MODEL", evidence_model)
     monkeypatch.setattr(config, "LLM_MODEL", llm_model)
     assert llm_module.make_verdict_llm().model == want
+
+# --- on-the-fly pre-research: brief, ResearchRequest, fact sheet
+PAGE = {"url": "https://gov.uk/bus", "title": "Bus statistics", "text": TEXT}
+FACT = {"statement": "Bus use outside London fell 27% from 2010 to 2020.", "side": "opp", "source": 0,
+        "quote": QUOTE, "number": 27, "unit": "%"}
+
+
+def test_brief_changes_the_cache_key_but_no_brief_keeps_the_old_one():
+    m = "This house would ban cars"
+    assert preresearch.index_path(m) == preresearch.index_path(m, brief="  ")
+    assert preresearch.index_path(m, brief="UK focus") != preresearch.index_path(m)
+    assert preresearch.index_path(m, brief="UK  focus") == preresearch.index_path(m, brief="UK focus")
+
+
+async def test_brief_reaches_the_query_planner():
+    class Spy(FakeLLM):
+        async def complete_json(self, system, user, *a, **k):
+            self.user = user
+            return {"queries": ["q1"]}
+    llm = Spy()
+    assert await preresearch.plan_queries("M", llm, brief="Mention Ghent") == ["q1"]
+    assert "Mention Ghent" in llm.user and "Brief" in llm.user
+
+
+async def test_fact_sheet_keeps_only_verbatim_quotes():
+    index = EvidenceIndex([PAGE])
+    made_up = {**FACT, "quote": "fell by 40% between 2010 and 2020"}
+    bad_source = {**FACT, "source": 7}
+    facts = await preresearch.extract_facts("M", index, FakeLLM({"facts": [FACT, made_up, bad_source, FACT]}),
+                                            queries=["bus use"])
+    assert len(facts) == 1
+    f = facts[0]
+    assert f["side"] == "opp" and f["url"] == PAGE["url"] and f["context"] == TEXT and f["number"] == 27
+
+
+async def test_fact_sheet_survives_a_failing_model():
+    assert await preresearch.extract_facts("M", EvidenceIndex([PAGE]), FakeLLM(RuntimeError("x")), queries=["q"]) == []
+
+
+async def test_matching_fact_is_put_first_for_the_judge():
+    other = [{"url": "https://x.org/a", "title": "A", "text": "Bus use outside London fell sharply."}]
+    c = Checker(None, index=EvidenceIndex(other), facts=[{**FACT, "url": PAGE["url"], "title": "Bus", "context": TEXT}])
+    found = await c.retrieve("bus use outside London fell 27%")
+    assert found[0].url == PAGE["url"] and found[0].text == TEXT and len(found) == 2
+
+
+async def test_research_request_builds_saves_and_publishes_a_fact_sheet(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet", "ResearchProgress", "SessionStart"})
+    mod = EvidenceModule(bus, FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), FakeSearch([PAGE]))
+    await mod.prepare("New motion", "UK only")
+    sheet = await wait_for(sub, "FactSheet")
+    assert sheet.motion == "New motion" and sheet.brief == "UK only" and sheet.facts[0].quote == QUOTE
+    assert not hasattr(sheet.facts[0], "context") or "context" not in sheet.facts[0].model_dump()
+    assert mod.session == 0                          # preparing never resets the running debate
+    path = preresearch.index_path("New motion", brief="UK only")
+    assert path.with_suffix(".json").exists() and preresearch.load_facts(path)[0]["context"] == TEXT
+
+
+async def test_progress_says_ready_only_after_the_fact_sheet(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet", "ResearchProgress"})
+    await EvidenceModule(bus, FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), FakeSearch([PAGE])).prepare("M2")
+    seen = []
+    while not sub.q.empty():
+        ev = sub.q.get_nowait()
+        seen.append(ev.stage if ev.event == "ResearchProgress" else ev.event)
+    assert seen.index("facts") < seen.index("ready") and seen.count("ready") == 1
+
+
+async def test_session_start_joins_a_build_already_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    search = FakeSearch([PAGE])
+    mod = EvidenceModule(Bus(), FakeLLM({"queries": ["bus"]}, {"facts": [FACT]}), search)
+    prep = asyncio.create_task(mod.prepare("Joined", "brief"))
+    await asyncio.sleep(0)
+    await mod.start_session("Joined", "brief")
+    await prep
+    assert search.calls == 1 and len(mod.checker.index) == 1 and mod.checker.facts[0]["quote"] == QUOTE
+
+
+async def test_saved_fact_sheet_loads_with_the_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    path = preresearch.index_path("Saved")
+    EvidenceIndex([PAGE]).save(path)
+    preresearch.save_facts(path, [{**FACT, "url": PAGE["url"], "title": "Bus", "context": TEXT}])
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet"})
+    mod = EvidenceModule(bus, FakeLLM(raw()), FakeSearch())
+    await mod.start_session("Saved", "a brief nobody researched")   # falls back to the demo Motion's index
+    assert len(mod.checker.facts) == 1 and (await sub.__anext__()).facts[0].statement == FACT["statement"]
+
+
+async def test_research_request_without_search_reports_it():
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    await EvidenceModule(bus, FakeLLM(raw())).prepare("Unprepared motion")
+    p = await sub.__anext__()
+    assert p.stage == "error" and p.motion == "Unprepared motion"
+
+
+async def test_mock_evidence_answers_a_research_request():
+    from app.mocks import mock_evidence
+    bus = Bus()
+    sub = bus.subscribe("t", {"FactSheet"})
+    await mock_evidence.fake_research(bus, "This house would test", "b", step=0)
+    sheet = await sub.__anext__()
+    assert sheet.motion == "This house would test" and {f.side for f in sheet.facts} == {"prop", "opp", "both"}

@@ -2,6 +2,9 @@
 // Stage view: proposition on the left, opposition on the right. Each Verdict pops a character (stage-cast.js)
 // onto the side that made the claim, holding a sign, with a speech bubble that gives the context and the source.
 // Protocol (Snapshot + seq + reconnect) follows the reference client app/tools/ws_debug.html.
+// The setup screen ("New debate") takes a motion + brief, sends a ResearchRequest so Evidence researches it before the
+// debate, shows progress and the key facts found, then starts the session with the brief. During the debate the brief
+// sits under the motion.
 const Q = new URLSearchParams(location.search);
 const WS_URL = Q.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const SHOW_ALL = Q.get('all') === '1';          // also pop "unverifiable" (no evidence either way)
@@ -21,10 +24,14 @@ const fmt = x => x == null ? '?' : Math.abs(x) >= 1000 ? Math.round(x).toLocaleS
 
 // ------------------------------------------------------------------ state + reducer
 let S = null, ws = null, lastSeq = 0, backoff = 500;
+// Research outlives sessions: a ResearchRequest runs before its SessionStart. Keyed by motion text.
+let PREP = {progress: new Map(), facts: new Map()};
+let setupOpen = false, requested = null;   // requested: {motion, brief} sent from this tab
+const norm = m => String(m || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const ui = Object.fromEntries(SIDES.map(s => [s, {queue: [], active: null, history: []}]));
 
 function reset() {
-  S = {session: null, sides: {}, names: {}, utts: new Map(), claims: new Map(), verdicts: new Map()};
+  S = {session: null, sides: {}, names: {}, utts: new Map(), claims: new Map(), verdicts: new Map(), facts: []};
   for (const side of SIDES) {
     const u = ui[side];
     if (u.active) u.active.el.remove();
@@ -46,6 +53,13 @@ function apply(e, live) {
         if (sp.side) S.sides[id] = sp.side;
         S.names[id] = sp.name || id;
       }
+      S.facts = PREP.facts.get(norm(e.motion)) || [];
+      if (live) closeSetup();
+      break;
+    case 'ResearchProgress': PREP.progress.set(norm(e.motion || (S.session && S.session.motion)), e); break;
+    case 'FactSheet':
+      PREP.facts.set(norm(e.motion), e.facts || []);
+      if (S.session && norm(S.session.motion) === norm(e.motion)) S.facts = e.facts || [];
       break;
     case 'Utterance': sideOf(e.speaker); S.utts.set(e.id, e); break;
     case 'Claim': sideOf(e.speaker); S.claims.set(e.id, e); if (S.verdicts.has(e.id)) onVerdict(e.id, live); break;
@@ -137,8 +151,20 @@ function actorHtml(id, side) {
 function setHtml(el, html) { if (el.$html !== html) { el.innerHTML = html; el.$html = html; } }
 function faceHtml(label) { return `<span class="face ${esc(label)}">${castOf(label).svg}</span>`; }
 
+function researchChip() {
+  const p = S.session && PREP.progress.get(norm(S.session.motion));
+  if (!p) return '';
+  if (p.stage === 'ready') return `<span class="chip ok" title="${esc(p.detail)}">researched · ${(S.facts || []).length} key facts</span>`;
+  if (p.stage === 'error') return `<span class="chip bad" title="${esc(p.detail)}">research failed: web only</span>`;
+  return `<span class="chip pend">researching ${esc(p.stage)} ${p.total ? Math.round(100 * p.done / p.total) : 0}%</span>`;
+}
 function draw() {
   $('motion').textContent = S.session ? S.session.motion || 'Open debate' : 'Waiting for a motion';
+  const brief = S.session && (S.session.brief || '').trim();
+  $('brief').hidden = !brief;
+  if (brief && $('brief').textContent !== brief) $('brief').textContent = brief;
+  setHtml($('research-chip'), researchChip());
+  if (setupOpen) drawSetup();
   for (const side of SIDES) {
     const box = $(side), u = ui[side];
     const speakers = Object.keys(S.sides).filter(s => S.sides[s] === side).map(nameOf);
@@ -162,10 +188,14 @@ function draw() {
 
     const stage = box.querySelector('.stage');
     let idle = stage.querySelector('.idle');
-    if (!idle) { idle = document.createElement('p'); idle.className = 'idle'; stage.appendChild(idle); }
+    if (!idle) {
+      idle = document.createElement('div'); idle.className = 'idle';
+      idle.innerHTML = '<p class="waiting"></p>';
+      stage.appendChild(idle);
+    }
     idle.hidden = !!u.active;
-    setHtml(idle, checking ? `<span class="dots"></span> checking ${checking} claim${checking > 1 ? 's' : ''}…`
-                           : 'Waiting for a claim to check');
+    setHtml(idle.firstChild, checking ? `<span class="dots"></span> checking ${checking} claim${checking > 1 ? 's' : ''}…`
+                                     : 'Waiting for a claim to check');
 
     setHtml(box.querySelector('.history'), u.history.slice(-HISTORY_MAX).reverse().map(id => {
       const v = S.verdicts.get(id), c = S.claims.get(id);
@@ -175,7 +205,76 @@ function draw() {
     }).join(''));
   }
 }
-document.addEventListener('click', ev => {   // a past check: bring its character back
+setInterval(() => { if (S) draw(); }, 2000);   // ages "checking…" between events
+
+// ------------------------------------------------------------------ setup screen
+let MOTIONS = [];
+fetch('/static/motions.json').then(r => r.ok ? r.json() : []).then(m => { MOTIONS = Array.isArray(m) ? m : []; draw(); })
+  .catch(() => {});
+function openSetup() {
+  setupOpen = true; requested = null;
+  const s = S.session;
+  $('s-motion').value = s ? s.motion || '' : '';
+  $('s-brief').value = s ? s.brief || '' : '';
+  const names = side => Object.keys(S.sides).filter(k => S.sides[k] === side).map(nameOf)[0];
+  $('s-prop').value = names('prop') || 'Proposition';
+  $('s-opp').value = names('opp') || 'Opposition';
+  $('setup').hidden = false;
+  drawSetup();
+  $('s-motion').focus();
+}
+function closeSetup() { setupOpen = false; $('setup').hidden = true; }
+function drawSetup() {
+  const motion = $('s-motion').value.trim(), p = PREP.progress.get(norm(motion));
+  setHtml($('s-picks'), MOTIONS.map(m => `<button type="button" class="pick${norm(m) === norm(motion) ? ' on' : ''}"`
+    + ` data-motion="${esc(m)}" title="Pre-researched demo motion">★ ${esc(m.replace(/^This house would /i, '…'))}</button>`).join(''));
+  const show = !!(p || (requested && norm(requested.motion) === norm(motion)));
+  $('s-research').hidden = !show;
+  if (show) {
+    const label = !p ? 'Asking the researcher…'
+      : p.stage === 'ready' ? `✓ Ready: ${p.detail}`
+      : p.stage === 'error' ? `✗ ${p.detail}`
+      : p.stage === 'searching' ? `Searching the web: ${p.done}/${p.total} queries`
+      : p.stage === 'embedding' ? `Indexing ${p.total} passages`
+      : p.stage === 'facts' ? `Pulling out key facts: ${p.done}/${p.total}` : `${p.stage} ${p.done}/${p.total}`;
+    $('s-status').textContent = label;
+    $('s-status').className = p ? p.stage : '';
+    const pct = !p ? 3 : p.stage === 'ready' ? 100 : p.stage === 'error' ? 100
+      : p.stage === 'searching' ? 5 + 60 * p.done / (p.total || 1) : p.stage === 'embedding' ? 70
+      : p.stage === 'facts' ? 75 + 25 * p.done / (p.total || 1) : 10;
+    $('s-bar').style.width = `${pct}%`;
+    $('s-bar').className = p ? p.stage : '';
+  }
+  const busy = p && !['ready', 'error'].includes(p.stage);
+  $('s-start').textContent = busy ? 'Start anyway (research continues)' : 'Start debate';
+  $('s-go-research').disabled = !motion || busy;
+  $('s-go-research').textContent = p && p.stage === 'ready' ? 'Research again' : 'Research this debate';
+}
+$('open-setup').onclick = openSetup;
+$('s-close').onclick = closeSetup;
+$('s-motion').oninput = $('s-brief').oninput = drawSetup;
+$('s-go-research').onclick = () => {
+  const motion = $('s-motion').value.trim(), brief = $('s-brief').value.trim();
+  if (!motion) return $('s-motion').reportValidity();
+  requested = {motion, brief};
+  PREP.progress.delete(norm(motion));
+  send({op: 'publish', src: 'stage', event: {event: 'ResearchRequest', motion, brief}});
+  drawSetup();
+};
+$('setup-form').onsubmit = ev => {
+  ev.preventDefault();
+  const motion = $('s-motion').value.trim(), brief = $('s-brief').value.trim();
+  if (!motion) return;
+  send({op: 'session_start', motion, brief, mode: 'live', speakers: {
+    A: {name: $('s-prop').value.trim() || 'Proposition', side: 'prop'},
+    B: {name: $('s-opp').value.trim() || 'Opposition', side: 'opp'}}});
+};
+$('brief').onclick = () => $('brief').classList.toggle('open');
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && setupOpen) closeSetup(); });
+
+document.addEventListener('click', ev => {   // a past check, or a demo motion on the setup screen
+  const pick = ev.target.closest && ev.target.closest('button.pick');
+  if (pick) { $('s-motion').value = pick.dataset.motion; drawSetup(); return; }
   const b = ev.target.closest && ev.target.closest('button.past');
   if (b) showNext(b.dataset.side, b.dataset.claim);
 });
@@ -186,6 +285,10 @@ $('cast').innerHTML = ['supported', 'contradicted', 'missing_context'].map(k => 
 }).join('');
 
 // ------------------------------------------------------------------ transport (same as the reference client)
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(msg)); return true; }
+  return false;
+}
 function setConn(s) { $('conn').className = `dot ${s}`; $('conn').title = `websocket ${s}: ${WS_URL}`; }
 function connect() {
   setConn('connecting');
@@ -195,13 +298,14 @@ function connect() {
     let e;
     try { e = JSON.parse(m.data); } catch { return; }
     if (e.event === 'Snapshot') {              // first message after every (re)connect: rebuild quietly
-      S = null; reset();
+      S = null; reset(); PREP = {progress: new Map(), facts: new Map()};
       for (const h of e.events || []) apply(h, false);
       lastSeq = e.last_seq || 0;
       for (const side of SIDES) {              // put the latest check back on stage, without the pop
         const last = ui[side].history[ui[side].history.length - 1];
         if (last) showNext(side, last, false);
       }
+      if (!S.session && !setupOpen) openSetup();   // nothing running yet: start on the setup screen
     } else if (e.seq == null) {
       return;
     } else if (e.seq > lastSeq) {
