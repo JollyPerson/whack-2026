@@ -265,6 +265,17 @@ confirm "Set up $VULTR_HOST?" || { warn "Stopped, nothing changed."; exit 1; }
 ssh-keygen -q -t ed25519 -N "" -C "github-actions-deploy" -f "$CI_KEY"
 scp -q deploy/bootstrap.sh "root@$VULTR_HOST:/root/debate-ref-bootstrap.sh"
 as_root bash /root/debate-ref-bootstrap.sh "'$(cat "$CI_KEY.pub")'"
+# The server now trusts only the new key, so GitHub gets it before anything else can stop the wizard.
+set_secret VULTR_SSH_KEY "$(cat "$CI_KEY")"
+if [[ " ${WRITTEN_SECRET[*]-} " != *" VULTR_SSH_KEY "* ]]; then
+  trap - EXIT
+  warn "GitHub didn't take the VULTR_SSH_KEY secret, and the server now lets CI in only with that key."
+  note "It's kept in $CI_KEY. Set it, then delete it:"
+  note "  gh secret set VULTR_SSH_KEY < '$CI_KEY' && rm -r '$KEY_DIR'"
+  note "Or re-run this wizard once gh can set secrets on this repo (that makes a new key)."
+  exit 1
+fi
+set_secret VULTR_KNOWN_HOSTS "$VULTR_KNOWN_HOSTS"
 scp -q -i "$CI_KEY" -o IdentitiesOnly=yes deploy/compose.yml deploy/Caddyfile deploy/deploy.sh deploy/set-env.sh \
   "deploy@$VULTR_HOST:$APP_DIR/"
 
@@ -326,8 +337,6 @@ note "Other keys (Deepgram, ...) can be added later. See docs/DEPLOY.md."
 
 # ─────────────────────────────────────────────────────────────────────────
 stage "Connect GitHub Actions"
-set_secret VULTR_SSH_KEY "$(cat "$CI_KEY")"
-set_secret VULTR_KNOWN_HOSTS "$VULTR_KNOWN_HOSTS"
 set_var VULTR_HOST "$VULTR_HOST"
 set_var VULTR_DOMAIN "$VULTR_DOMAIN"
 set_var DEPLOY_ENABLED "true"
