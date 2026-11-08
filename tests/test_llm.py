@@ -41,6 +41,34 @@ def test_make_llm_none_for_heuristic_even_with_key(no_creds):
         assert L.make_llm() is None
 
 
+def _oauth_profile(dir, with_credentials: bool):
+    """The layout an unfinished `ant auth login` leaves (e.g. started by another tool): a user_oauth profile config,
+    and a credentials file only once the login completes."""
+    (dir / "configs").mkdir()
+    (dir / "credentials").mkdir()
+    (dir / "active_config").write_text("default")
+    (dir / "configs" / "default.json").write_text(json.dumps(
+        {"version": "1", "authentication": {"type": "user_oauth", "client_id": "test"}}))
+    if with_credentials:
+        (dir / "credentials" / "default.json").write_text(json.dumps({"type": "oauth", "access_token": "t"}))
+
+
+def test_unfinished_oauth_profile_is_not_credentials(no_creds, tmp_path, caplog):
+    """No ANTHROPIC_API_KEY and a profile without its credentials file: every call would fail with CredentialsError,
+    so it must count as no credentials, with a warning that says how to fix it."""
+    _oauth_profile(tmp_path, with_credentials=False)
+    no_creds.setattr(config, "LLM_PROVIDER", "anthropic")
+    with caplog.at_level("WARNING", logger="brain.llm"):
+        assert L.make_llm() is None
+    assert "ANTHROPIC_API_KEY in .env" in caplog.text
+
+
+def test_finished_oauth_profile_still_counts(no_creds, tmp_path):
+    _oauth_profile(tmp_path, with_credentials=True)
+    no_creds.setattr(config, "LLM_PROVIDER", "anthropic")
+    assert isinstance(L.make_llm(), L.AnthropicLLM)
+
+
 def test_make_llm_anthropic_with_key_builds_client_without_network(no_creds):
     no_creds.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     no_creds.setattr(config, "LLM_PROVIDER", "anthropic")

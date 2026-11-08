@@ -510,6 +510,22 @@ def _none_found() -> None:
     return None
 
 
+def _profile_usable(creds: Any) -> bool:
+    """An `ant auth login` profile whose login never finished (a config under ~/.config/anthropic, often left by
+    another tool, but no credentials file) makes every request fail with CredentialsError, so it isn't credentials.
+    Workload-identity profiles need no file. Anything this can't inspect is trusted, as before."""
+    read = getattr(creds, "_read_credentials_if_exists", None)
+    if not callable(read):
+        return True
+    try:
+        if read() is not None:
+            return True
+        auth = (creds._load_config() or {}).get("authentication") or {}
+    except Exception:
+        return True
+    return auth.get("type") != "user_oauth"
+
+
 def _make_anthropic(quiet: bool = False) -> Optional[AnthropicLLM]:
     try:
         import anthropic
@@ -521,13 +537,15 @@ def _make_anthropic(quiet: bool = False) -> Optional[AnthropicLLM]:
         # The SDK resolves ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, `ant auth login` profiles and WIF here; with
         # none of them it may raise (CredentialsError) instead of returning a key-less client.
         client = anthropic.AsyncAnthropic(max_retries=0)
-        has_creds = bool(client.api_key or getattr(client, "auth_token", None) or getattr(client, "credentials", None))
+        creds = getattr(client, "credentials", None)
+        has_creds = bool(client.api_key or getattr(client, "auth_token", None) or (creds and _profile_usable(creds)))
     except Exception as e:
         client, has_creds = None, False
         log.debug("anthropic client not constructible: %r", e)
     if not has_creds:
         if not quiet:
-            log.warning("no Anthropic credentials (ANTHROPIC_API_KEY or `ant auth login`); heuristic extraction only")
+            log.warning("no Anthropic credentials: set ANTHROPIC_API_KEY in .env (cp .env.example .env) or finish "
+                        "`ant auth login`; heuristic extraction only")
         return None
     # LLM_MODEL is the one knob (validated by _claude_model). ANTHROPIC_MODEL is deliberately ignored: it is Claude
     # Code's own setting, so it may be exported in a teammate's shell with an alias ("opus") or a "[1m]" suffix.
