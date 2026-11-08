@@ -125,8 +125,8 @@ ONE_SHOT_FLAGS = {"force_next", "veto", "time"}   # commands, never kept in FLAG
 
 async def flags_watcher(bus: Bus):
     async for ev in bus.subscribe("flags", {"Control"}):
-        if ev.flag not in ONE_SHOT_FLAGS:
-            FLAGS[ev.flag] = ev.value
+        if ev.flag not in ONE_SHOT_FLAGS:            # the JSON form: a NaN would 500 /health and break every Snapshot
+            FLAGS[ev.flag] = ev.model_dump(mode="json")["value"]
 
 
 async def loop_lag(bus: Bus, tick: float = 0.1, warn: float = 0.05, recover: int = 20):

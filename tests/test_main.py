@@ -21,7 +21,7 @@ from app import main as mainmod
 from app.bus import Bus, load_jsonl
 from app.config import FLAGS
 from app.main import build_app, loop_lag, resolve, supervise
-from app.schemas import Claim, Control, Utterance, Verdict, parse_event
+from app.schemas import Claim, Control, Pause, Utterance, Verdict, parse_event
 from app.tools import tail
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -625,3 +625,23 @@ def test_stamp_and_finish_helpers():
     v2 = latency.finish(Verdict(claim_id="c2"), {"t_end": 1_762_500_000_000, "marks": {}}, now=1_762_500_001.0)
     assert v2.latency_ms == 1000                                                       # ms t_end from a JS producer
     assert latency.finish(Verdict(claim_id="c3"), None, now=5.0).latency_ms == 0       # unknown speech end: no number
+
+
+# ----------------------------------------------------------------------------- hardening regressions: core
+def test_nan_control_value_never_poisons_health_or_the_snapshot(make_client):
+    """Python's json accepts NaN/Infinity: the raw float in FLAGS made /health a 500 and every ws Snapshot invalid
+    JSON for browsers (JSON.parse rejects NaN) until restart."""
+    c = make_client()
+    raw = {"content-type": "application/json"}
+    assert c.post("/control", content=b'{"flag": "probe", "value": NaN}', headers=raw).status_code == 200
+    assert c.post("/control", content=b'{"flag": "deep", "value": {"x": [Infinity, 1]}}', headers=raw).status_code == 200
+    wait_for(lambda: "deep" in FLAGS)
+    h = c.get("/health")
+    assert h.status_code == 200 and h.json()["flags"]["probe"] is None and h.json()["flags"]["deep"] == {"x": [None, 1]}
+
+    def strict(token):
+        raise ValueError(f"not JSON: {token}")
+
+    with c.websocket_connect("/ws") as ws:
+        snap = json.loads(_POOL.submit(ws.receive_text).result(5), parse_constant=strict)
+    assert snap["flags"]["probe"] is None
