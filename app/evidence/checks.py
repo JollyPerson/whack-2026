@@ -5,9 +5,11 @@ confidence only reaches the Director's speaking threshold (0.75) when the eviden
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Optional
 
 from app.schemas import Evidence, Numeric
@@ -21,8 +23,11 @@ SHORT_FACT_WORDS = 10
 
 _DASHES = dict.fromkeys(map(ord, "‐‑‒–—−"), "-")
 _QUOTES = {**dict.fromkeys(map(ord, "‘’‚‛"), "'"), **dict.fromkeys(map(ord, "“”„‟"), '"')}
-_NUMBER = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*(thousand|million|billion|trillion|bn|m|k)?(?![a-z])", re.I)
+# (?!\d) stops a backtrack into the digits ("20mph" is 20, not 2); the scale's own lookahead keeps "3 metres" at 3
+_NUMBER = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?!\d)(?:\s*(thousand|million|billion|trillion|bn|m|k)(?![a-z]))?",
+                     re.I)
 _SCALE = {"thousand": 1e3, "k": 1e3, "million": 1e6, "m": 1e6, "billion": 1e9, "bn": 1e9, "trillion": 1e12}
+_UNIT_SCALE = re.compile(r"(?<![a-z])(?:(?:thousand|million|billion|trillion)s?(?:\s+of\b)?|bn|mn|tn|m|k)(?![a-z])", re.I)
 _COUNT = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
           "nine": 9, "ten": 10, "twenty": 20, "fifty": 50, "hundred": 100}
 _PART = {"half": 2, "halves": 2, "third": 3, "thirds": 3, "quarter": 4, "quarters": 4, "fifth": 5, "fifths": 5,
@@ -45,12 +50,14 @@ def quote_in_source(quote: str, source: str) -> bool:
     return len(q) >= MIN_QUOTE_CHARS and q in normalise(source)
 
 
+def _figures(text: str) -> list[tuple[float, float]]:
+    """Figures written in digits, as (number, scale): "£2 billion" is (2, 1e9)."""
+    return [(float(whole.replace(",", "") + frac), _SCALE.get(scale.lower(), 1.0))
+            for whole, frac, scale in _NUMBER.findall(normalise(text))]
+
+
 def numbers_in(text: str) -> list[float]:
-    out = []
-    for whole, frac, scale in _NUMBER.findall(normalise(text)):
-        value = float(whole.replace(",", "") + frac)
-        out.append(value * _SCALE.get(scale.lower(), 1.0))
-    return out
+    return [n * scale for n, scale in _figures(text)]
 
 
 def word_numbers(text: str) -> list[float]:
@@ -88,6 +95,16 @@ def number_appears(value: float, text: str) -> bool:
 
 def numbers_agree(claimed: float, actual: float, tol: float = NUMERIC_TOLERANCE) -> bool:
     return _close(claimed, actual, tol)
+
+
+def _bases(value: float, text: str) -> set[float]:
+    """The scales a figure could have been given at: 1 when it appears whole, 1e9 for the 2 of "£2 billion"."""
+    whole = {1.0} if number_appears(value, text) else set()
+    return whole | {scale for n, scale in _figures(text) if scale != 1 and _close(value, n)}
+
+
+def _in_digits(value: float, text: str) -> bool:
+    return any(_close(value, n) or _close(value, n * scale) for n, scale in _figures(text))
 
 
 @dataclass
@@ -136,20 +153,23 @@ def apply_guards(raw: dict, claim_text: str, sources: list[Source]) -> Guarded:
 
     numeric = _checked_numeric(raw, claim_text, quote)
     if numeric is not None:
-        in_digits = any(_close(numeric.claimed, n) for n in numbers_in(claim_text))
+        in_digits = _in_digits(numeric.claimed, claim_text)
         agree = numbers_agree(numeric.claimed, numeric.actual, NUMERIC_TOLERANCE if in_digits else WORD_AGREEMENT)
         if label != "missing_context" and agree != (label == "supported"):
-            label = "supported" if agree else "contradicted"
-            notes.append("numeric_override")
             capped = True
+            # Words get a loose band so code doesn't call a fair "about a quarter" wrong. That doesn't make "half"
+            # right for 38%, so the band never overrules the model towards supported.
+            if in_digits or not agree:
+                label = "supported" if agree else "contradicted"
+                notes.append("numeric_override")
     elif raw.get("claimed") is not None or raw.get("actual") is not None:
         notes.append("numeric_dropped")
         capped = True
     elif has_number(claim_text) and label != "missing_context":
         capped = True                       # a figure nobody compared in code isn't worth saying aloud
 
-    if capped and confidence > CONFIDENCE_CAP:
-        confidence = CONFIDENCE_CAP
+    if capped:                              # marked whatever the confidence: aggressiveness 4-5 voice .65 and up
+        confidence = min(confidence, CONFIDENCE_CAP)
         notes.append("capped")
     short_fact = " ".join(str(raw.get("short_fact") or "").split()[:SHORT_FACT_WORDS])
     return Guarded(label=label, confidence=confidence, numeric=numeric, notes=notes, short_fact=short_fact,
@@ -163,10 +183,28 @@ def _checked_numeric(raw: dict, claim_text: str, quote: str) -> Optional[Numeric
         return None
     if isinstance(claimed, bool) or isinstance(actual, bool):
         return None
-    if not number_appears(claimed, claim_text) or not number_appears(actual, quote):
-        return None                         # the model's numbers must be the ones actually said and quoted
+    if not (math.isfinite(claimed) and math.isfinite(actual)):
+        return None                         # json.loads reads Infinity, and an infinite figure is "close" to any other
+    # The model's numbers must be the ones actually said and quoted, on one basis: 2 and 11.2 for "£2 billion" and
+    # "£11.2 billion" are compared, 3.2 against 3.2e9 never is.
+    bases = _bases(claimed, claim_text) & _bases(actual, quote)
+    if not bases or (1.0 not in bases and len(bases) > 1):
+        return None
+    unit = str(raw.get("unit") or "")
+    if 1.0 not in bases:                    # published whole, so the scale is said even when the unit is just "£"
+        (scale,) = bases
+        return Numeric(claimed=_scaled(claimed, scale), actual=_scaled(actual, scale), unit=_without_scale(unit))
     if 0 < claimed <= 1 < actual and number_appears(claimed * 100, claim_text):
         claimed *= 100                      # "three-quarters" against a quoted 40%: compare 75 with 40
     if 0 < actual <= 1 < claimed and number_appears(actual * 100, quote):
         actual *= 100
-    return Numeric(claimed=claimed, actual=actual, unit=str(raw.get("unit") or ""))
+    return Numeric(claimed=claimed, actual=actual, unit=unit)
+
+
+def _scaled(value: float, scale: float) -> float:
+    return float(Decimal(str(value)) * int(scale))      # 4.1 million is 4100000, not 4099999.9999999995
+
+
+def _without_scale(unit: str) -> str:
+    """Drop the scale word ("billion pounds" -> "pounds", "£bn" -> "£"): the published figure carries it now."""
+    return " ".join(_UNIT_SCALE.sub(" ", unit).split())

@@ -18,7 +18,7 @@ Rules:
 - quote: copy one short passage exactly, character for character, from the chosen source. It's checked by code, and any change drops your verdict. Empty when unverifiable.
 - source: the number of the source the quote comes from. Use -1 when unverifiable.
 - directly_states: true only if the quote itself states the fact needed, with no inference.
-- claimed and actual: when the claim gives a figure, the figure exactly as said in the claim and the figure exactly as written in the quote, on the same basis. Otherwise null. "A third" or "half" in words counts as no figure.
+- claimed and actual: when the claim gives a figure, the figure exactly as said in the claim and the figure exactly as written in the quote, on the same basis. Otherwise null. A figure said in words counts too: write "half a million" as 500000, and "a third" against a quoted percentage as 33.3.
 - unit: the unit of those figures, or empty.
 - confidence: from 0 to 1. Use 0.75 or above only if you'd bet on it.
 - short_fact: at most 10 words the moderator can say aloud, stating the source's fact. Empty when unverifiable.
