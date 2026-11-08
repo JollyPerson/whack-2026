@@ -1,13 +1,18 @@
-"""app/judge: the post-debate scorecard (pure: synthetic sessions and the golden run)."""
+"""app/judge: the post-debate scorecard, Claude's verdict and its fallbacks. The LLM is a FakeLLM with canned answers
+(never the network)."""
 from __future__ import annotations
 
+import asyncio
+import copy
+import time
 from pathlib import Path
 
 import pytest
 
 from app import config
+from app.brain.llm import LLMError, LLMTimeout
 from app.bus import load_jsonl
-from app.judge import scorecard as sc
+from app.judge import scorecard as sc, writer
 from app.schemas import (ArgMapSnapshot, BotLine, Claim, Evidence, Interjection, MapNode, SessionStart, SpeakerInfo,
                          Utterance, Verdict)
 
@@ -77,6 +82,35 @@ def synthetic() -> list:
             nonresponsive=[{"turn": 1, "side": "opp", "ignored": ["c1"], "final": True},
                            {"turn": 3, "side": "prop", "ignored": ["c3"], "final": False}]),     # still open
     ]
+
+
+
+def answer(winner="prop", margin="clear", prop=7.0, opp=5.0, **kw) -> dict:
+    def side(ov):
+        return {**{k: {"score": ov, "why": f"{k} because reasons"} for k in writer.CRITERIA}, "overall": ov}
+    d = {"scores": {"prop": side(prop), "opp": side(opp)},
+         "bias": {"prop": "Fair framing.", "opp": "Some loaded language.", "system": "Even-handed."},
+         "factuality": "The Proposition's figures mostly held up.", "observations": ["A strong opening."],
+         "reasoning": "The Proposition had 1 of 2 checked claims supported; the Opposition had 1 contradicted.",
+         "winner": winner, "margin": margin, "headline": "The Proposition wins on the evidence."}
+    d.update(kw)
+    return d
+
+
+class FakeLLM:
+    name = "fake:judge"
+
+    def __init__(self, out=None, delay=0.0, fail=None):
+        self.out, self.delay, self.fail = answer() if out is None else out, delay, fail
+        self.calls: list[tuple] = []
+
+    async def complete_json(self, system, user, schema, timeout, max_tokens=400):
+        self.calls.append((system, user, schema, timeout, max_tokens))
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail:
+            raise self.fail
+        return copy.deepcopy(self.out)
 
 
 # ----------------------------------------------------------------------------- the scorecard
@@ -154,3 +188,95 @@ def test_unknown_speakers_alternate_prop_then_opp():
     rec = sc.collect([SessionStart(motion="m"), U("u1", "X", "hello there"), U("u2", "Y", "hi"),
                       U("u3", "X", "again")])
     assert rec.sides == {"X": "prop", "Y": "opp"}
+
+
+# ----------------------------------------------------------------------------- Claude's verdict
+async def test_the_llm_judges_with_the_scorecard_fact_checks_and_transcript():
+    rec = sc.collect(synthetic())
+    card = sc.scorecard(rec)
+    long = " ".join(["word"] * 30)
+    llm = FakeLLM(answer(headline=long))
+    j = await writer.decide(llm, rec, card)
+    assert (j.via, j.winner, j.margin, j.model) == ("llm", "prop", "clear", "fake:judge")
+    assert j.scores["prop"] == {**dict.fromkeys(writer.CRITERIA, 7.0), "overall": 7.0}
+    assert j.why["opp"]["civility"] == "civility because reasons" and j.bias["system"] == "Even-handed."
+    assert len(j.headline.split()) == writer.HEADLINE_WORDS
+    system, user, schema, timeout, max_tokens = llm.calls[0]
+    assert timeout == config.JUDGE_TIMEOUT_S and "same standard" in system
+    assert "Motion: This house would raise the minimum wage" in user
+    assert "Proposition (prop): Alice Archer" in user and '"formula":' in user
+    assert "FACT CHECKS, sourced" in user and "FACT CHECKS, AI knowledge (unsourced" in user
+    assert "c4 Opposition (Bob Baker)" in user and "counted as unverifiable" in user
+    assert "Alice Archer (Proposition): Wages rose by six percent last year" in user and "rehearsal" not in user
+    assert set(schema["properties"]["scores"]["properties"]["prop"]["required"]) == {*writer.CRITERIA, "overall"}
+
+
+async def test_a_narrow_margin_is_a_draw():
+    rec = sc.collect(synthetic())
+    j = await writer.decide(FakeLLM(answer("prop", "narrow", prop=6.4, opp=6.1)), rec, sc.scorecard(rec))
+    assert (j.via, j.winner, j.margin) == ("llm", "draw", "")
+    assert "draw" in j.headline.lower() and "narrow" in j.note
+    j = await writer.decide(FakeLLM(answer("draw", "narrow", prop=6.0, opp=6.0, headline="A draw.")), rec,
+                            sc.scorecard(rec))
+    assert (j.winner, j.margin, j.headline, j.note) == ("draw", "", "A draw.", "")
+
+
+@pytest.mark.parametrize("out, why", [
+    (answer("opp", "clear", prop=7.0, opp=5.0), "inconsistent"),                # its own overalls favour Prop
+    (answer("prop", "narrow", prop=5.0, opp=6.0), "inconsistent"),              # even when narrow
+    (answer("prop", "clear", prop=6.0, opp=6.0), "inconsistent"),               # a tie is no win
+    (answer("draw", "narrow", prop=8.0, opp=5.0), "draw"),                      # a draw 3 points apart
+    (answer(prop=11.0), "0 to 10"),
+    (answer(reasoning="The Proposition was better overall."), "number"),       # cites no scorecard number
+    (answer(winner="both"), "winner"),
+    (answer(headline=""), "headline"),
+    ({"winner": "prop"}, "scores"),
+    (["not", "an", "object"], "object"),
+])
+async def test_an_invalid_or_inconsistent_answer_leaves_it_to_the_formula(out, why):
+    rec = sc.collect(synthetic())
+    card = sc.scorecard(rec)
+    j = await writer.decide(FakeLLM(out), rec, card)
+    assert (j.via, j.winner, j.margin) == ("formula", card["formula"]["winner"], card["formula"]["margin"])
+    assert why in j.note and j.scores["prop"]["overall"] == card["sides"]["prop"]["overall"]
+    assert j.criteria == sc.CRITERIA and "Proposition" in j.reasoning and "3.3" in j.reasoning
+
+
+@pytest.mark.parametrize("llm, why", [
+    (None, "no LLM"),
+    (FakeLLM(delay=1.0), "within"),                       # slower than JUDGE_TIMEOUT_S
+    (FakeLLM(fail=LLMTimeout("t")), "within"),
+    (FakeLLM(fail=LLMError("HTTP 529")), "failed"),
+])
+async def test_no_llm_a_timeout_or_an_error_leaves_it_to_the_formula(monkeypatch, llm, why):
+    monkeypatch.setattr(config, "JUDGE_TIMEOUT_S", 0.05)
+    rec = sc.collect(synthetic())
+    t = time.monotonic()
+    j = await writer.decide(llm, rec, sc.scorecard(rec))
+    assert time.monotonic() - t < 0.5
+    assert (j.via, j.winner, j.margin) == ("formula", "prop", "decisive") and why in j.note
+    assert j.headline == "Proposition wins decisively on the scorecard, 6.6 to 3.3."
+
+
+def test_the_transcript_is_trimmed_in_the_middle_and_says_so():
+    rec = sc.collect([SessionStart(motion="m", speakers=SPEAKERS),
+                      *(U(f"u{i}", "AB"[i % 2], f"line {i} " + "x" * 80, i * 10 + 1, i * 10 + 5) for i in range(200))])
+    lines, cut = writer.transcript(rec, budget=4000)
+    assert cut > 0 and f"[... {cut} lines omitted for length ...]" in lines
+    assert lines[0].startswith("[00:00] Alice Archer (Proposition): line 0 ")          # from the first speech
+    assert "line 199 " in lines[-1] and sum(len(x) + 1 for x in lines) < 4200
+
+
+def test_make_judge_llm_uses_the_judge_model_on_brains_client(monkeypatch):
+    from app.brain.llm import AnthropicLLM
+
+    class Client:
+        pass
+    monkeypatch.setattr(writer, "make_llm", lambda: AnthropicLLM(Client(), model="claude-haiku-5-5"))
+    monkeypatch.setattr(config, "JUDGE_MODEL", "claude-opus-5-5")
+    llm = writer.make_judge_llm()
+    assert isinstance(llm, AnthropicLLM) and llm.model == "claude-opus-5-5" and llm.effort == writer.EFFORT
+    monkeypatch.setattr(config, "JUDGE_MODEL", "opus")                            # a Claude Code alias
+    assert writer.make_judge_llm().model == writer.DEFAULT_JUDGE_MODEL
+    monkeypatch.setattr(writer, "make_llm", lambda: None)
+    assert writer.make_judge_llm() is None
