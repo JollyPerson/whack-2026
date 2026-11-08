@@ -575,3 +575,131 @@ async def test_index_model_timeout_does_not_spend_the_rest_on_the_web():
     with pytest.raises(LLMTimeout):
         await Checker(FakeLLM(LLMTimeout("slow"), raw()), web, index=index).check("Bus use outside London fell")
     assert web.calls == 0
+
+
+# --- regressions: sessions
+def drain(sub):
+    out = []
+    while not sub.q.empty():
+        out.append(sub.q.get_nowait())
+    return out
+
+
+async def test_slow_index_load_does_not_land_on_the_next_motion(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    EvidenceIndex(chunks()).save(preresearch.index_path("Motion A"))
+    real_load = EvidenceIndex.load
+
+    def slow_load(path):
+        time.sleep(.3)
+        return real_load(path)
+    monkeypatch.setattr(EvidenceIndex, "load", staticmethod(slow_load))
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()))
+    first = asyncio.create_task(mod.start_session("Motion A"))
+    await asyncio.sleep(.05)
+    await mod.start_session("Motion B")
+    await first
+    assert mod.checker.motion == "Motion B" and mod.checker.index is None
+    assert [p.stage for p in drain(sub)] == ["error"]           # Motion A's "ready" never reaches the dashboard
+
+
+async def test_new_motion_cancels_the_previous_research():
+    started, cancelled = asyncio.Event(), []
+
+    class Hangs(FakeSearch):
+        async def search(self, query, **k):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(query)
+                raise
+            return []
+    bus = Bus()
+    mod = EvidenceModule(bus, None, Hangs())
+    task = asyncio.create_task(mod.run())
+    await asyncio.sleep(0)
+    bus.publish(SessionStart(motion="Motion A"))
+    await asyncio.wait_for(started.wait(), 2)
+    bus.publish(SessionStart(motion=""))
+    for _ in range(50):
+        if cancelled:
+            break
+        await asyncio.sleep(.01)
+    task.cancel()
+    for t in list(mod.tasks):
+        t.cancel()
+    assert cancelled and all("Motion A" in q for q in cancelled)
+
+
+async def test_corrupt_saved_index_reports_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    path = preresearch.index_path("Motion D")
+    path.with_suffix(".json").write_text('{"chunks": [')
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()))
+    await mod.start_session("Motion D")
+    assert [p.stage for p in drain(sub)] == ["error"] and mod.checker.index is None
+
+
+async def test_failed_background_task_is_logged(caplog):
+    async def boom():
+        raise RuntimeError("lost")
+    mod = EvidenceModule(Bus())
+    mod._spawn(boom())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    logged = [r for r in caplog.records if r.name == "evidence" and r.exc_info and "lost" in repr(r.exc_info[1])]
+    assert logged and not mod.tasks
+
+
+class Down(FakeSearch):
+    async def search(self, *a, **k):
+        self.calls += 1
+        raise RuntimeError("down")
+
+
+async def test_research_that_finds_nothing_is_not_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    bus = Bus()
+    sub = bus.subscribe("t", {"ResearchProgress"})
+    mod = EvidenceModule(bus, FakeLLM(raw()), Down())
+    await mod.start_session("Motion C")
+    assert not preresearch.index_path("Motion C").with_suffix(".json").exists() and mod.checker.index is None
+    assert [p.stage for p in drain(sub)][-1] == "error"
+
+
+async def test_empty_saved_index_is_researched_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    EvidenceIndex([]).save(preresearch.index_path("Motion E"))
+    web = FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}])
+    mod = EvidenceModule(Bus(), FakeLLM(raw()), web)
+    await mod.start_session("Motion E")
+    assert web.calls and len(mod.checker.index) == 1
+    assert len(EvidenceIndex.load(preresearch.index_path("Motion E"))) == 1
+
+
+def test_preresearch_cli_does_not_save_an_empty_index(tmp_path, monkeypatch, capsys):
+    import sys
+    from app.evidence import llm as llm_module, search as search_module
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+    monkeypatch.setattr(search_module, "make_search", lambda: Down())
+    monkeypatch.setattr(llm_module, "make_verdict_llm", lambda: None)
+    monkeypatch.setattr(preresearch, "make_embedder", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["preresearch", "Motion C"])
+    assert preresearch.main() == 1
+    assert not list(tmp_path.iterdir()) and "not saved" in capsys.readouterr().out
+
+
+async def test_index_that_cannot_be_saved_is_still_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(preresearch, "INDEX_DIR", tmp_path)
+
+    def full_disk(self, path):
+        raise OSError("No space left on device")
+    monkeypatch.setattr(EvidenceIndex, "save", full_disk)
+    mod = EvidenceModule(Bus(), FakeLLM(raw()), FakeSearch([{"url": "https://a.org", "title": "A", "text": TEXT}]))
+    await mod.start_session("Motion F")
+    assert len(mod.checker.index) == 1
