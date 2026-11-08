@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from app import config
 from app.brain.argmap import ArgMap
-from app.brain.llm import LLMError, LLMInvalid, parse_json_text
+from app.brain.llm import LLMError, LLMInvalid, LLMTimeout, parse_json_text
 from app.brain.prompts import CLAIM_TYPES, OUTPUT_SCHEMA, SYSTEM_PROMPT, render_user
 from app.schemas import Claim, Event, Link, Utterance
 
@@ -49,6 +49,7 @@ FRAG_PAUSE_S, FRAG_PAUSE_FINALS_S = 1.0, 2.0
 FRAG_MAX_AGE_S, FRAG_MAX_WORDS = 8.0, 40      # hard caps: nothing is held longer / bigger than this
 INTERIM_LIVE_S = 5.0                          # an interim this recent from the speaker -> the shorter timers
 CLOCK_SKEW_S = 30.0                           # |t_end - ts| beyond this: t_end is on another clock, use ts
+MIN_CALL_S = 0.3                              # no LLM call with less left than this (or half CLAIM_TIMEOUT_S)
 LLM_MAX_TOKENS = 400
 WARMUP_TIMEOUT_S = 15.0            # first call compiles the schema; give it room
 WARMUP_SENTENCE = "Unemployment has risen by two percent since last year, according to the ONS."
@@ -721,7 +722,6 @@ class ClaimExtractor:
         else:
             user = render_user(self._motion_text(), [(c.id, self._claim_side(c), c.text) for c in ctx],
                                self._earlier(u, earlier), side, sent)
-            t0 = time.perf_counter()
             try:
                 out = await asyncio.wait_for(self._call(user), float(getattr(config, "CLAIM_TIMEOUT_S", 2.5)))
                 drafts = drafts_from_llm(out, {c.id for c in ctx})
@@ -731,8 +731,6 @@ class ClaimExtractor:
                 cause = _cause(e)
                 log.log(logging.ERROR if cause == "error" else logging.WARNING,
                         "claim LLM fallback (%s) for %s: %s", cause, u.id, e)
-            finally:
-                self._note_latency((time.perf_counter() - t0) * 1000.0)
         self.stats["calls"] += 1
         source = "llm"
         if drafts is None:
@@ -742,10 +740,20 @@ class ClaimExtractor:
         return self._emit(u, drafts, side, source, gen)
 
     async def _call(self, user: str) -> Any:
+        """One LLM call in what CLAIM_TIMEOUT_S leaves after waiting for a slot. A call with no time to finish is
+        never started (LLMTimeout, no tokens spent), and latency counts from the slot: queueing isn't the model."""
+        budget = float(getattr(config, "CLAIM_TIMEOUT_S", 2.5))
+        deadline = time.monotonic() + budget
         async with self._semaphore():
-            return await self.llm.complete_json(SYSTEM_PROMPT, user, OUTPUT_SCHEMA,
-                                                timeout=float(getattr(config, "CLAIM_TIMEOUT_S", 2.5)),
-                                                max_tokens=LLM_MAX_TOKENS)
+            left = deadline - time.monotonic()
+            if left < min(MIN_CALL_S, budget / 2):
+                raise LLMTimeout(f"waited {budget - left:.2f}s for an LLM slot, {left:.2f}s left")
+            t0 = time.perf_counter()
+            try:
+                return await self.llm.complete_json(SYSTEM_PROMPT, user, OUTPUT_SCHEMA, timeout=left,
+                                                    max_tokens=LLM_MAX_TOKENS)
+            finally:
+                self._note_latency((time.perf_counter() - t0) * 1000.0)
 
     def _emit(self, u: Utterance, drafts: list[Draft], side: str, source: str, gen: int) -> list[Claim]:
         out: list[Claim] = []

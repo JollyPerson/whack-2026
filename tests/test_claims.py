@@ -228,6 +228,25 @@ async def test_concurrency_is_bounded(monkeypatch):
     assert len(llm.calls) == 5 and llm.peak == 2
 
 
+async def test_queue_wait_counts_against_the_budget_not_the_provider(monkeypatch):
+    """Waiting for a slot used to start a full-budget call that wait_for then cut off: tokens paid, a 'timeout'
+    blamed on the provider and the queue wait recorded as model latency."""
+    monkeypatch.setattr(config, "CLAIM_CONCURRENCY", 1)
+    monkeypatch.setattr(config, "CLAIM_TIMEOUT_S", 1.0)
+    llm = StubLLM({"claims": []}, delay=0.2)
+    ex, _, pub = make(llm)
+    await ex.extract(utt("Bus use fell by a third last decade. Air pollution causes 40,000 early deaths a year."))
+    assert len(llm.calls) == 2 and llm.calls[0]["timeout"] > 0.9 and llm.calls[1]["timeout"] < 0.85
+    assert ex.stats["by_cause"]["timeout"] == 0 and pub == []
+    monkeypatch.setattr(config, "CLAIM_TIMEOUT_S", 0.5)
+    llm = StubLLM({"claims": []}, delay=0.4)
+    ex, _, pub = make(llm)
+    await ex.extract(utt("Bus use fell by a third last decade. Air pollution causes 40,000 early deaths a year."))
+    assert len(llm.calls) == 1                                   # 0.1 s left after the queue: no doomed call
+    assert ex.stats["by_cause"]["timeout"] == 1 and [c.source for c in pub] == ["heuristic"]
+    assert ex.stats["p95_ms"] < 480                              # the one real call, not call + queue
+
+
 # ----------------------------------------------------------------------------- generation guard / dedupe
 async def test_reset_during_inflight_extract_publishes_nothing():
     gate = asyncio.Event()
