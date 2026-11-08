@@ -163,6 +163,30 @@ footer { display: flex; flex-wrap: wrap; gap: .2em 1.2em; align-items: center; m
 .status.unanswered, .status.conceded { color: var(--bad); font-weight: 650; }
 .link { color: var(--mute); font-size: .8em; margin-top: .1em; }
 
+/* the judge's verdict (DebateResult), on top of the final screen */
+.verdict { flex: none; background: color-mix(in srgb, var(--side) 12%, var(--panel)); border: 1px solid var(--line); border-left: 6px solid var(--side); border-radius: 0 10px 10px 0; padding: .5em 1em; }
+.verdict.draw, .verdict.judging { --side: var(--pend); }
+.verdict.reveal { animation: reveal .6s ease-out; }
+@keyframes reveal { from { opacity: 0; transform: scale(.97); } }
+.verdict .head { display: flex; flex-wrap: wrap; gap: .1em 1em; align-items: baseline; }
+.verdict .winner { color: var(--side); font-size: 2.1em; line-height: 1.1; font-weight: 750; }
+.verdict .names { color: var(--mute); }
+.verdict .margin { padding: 0 .6em; border-radius: 1em; font-size: .85em; font-weight: 700; color: var(--on-chip); background: var(--side); white-space: nowrap; }
+.verdict .overall { display: flex; gap: 1.2em; margin-left: auto; }
+.verdict .overall > span { display: flex; align-items: baseline; gap: .3em; color: var(--mute); font-size: .85em; }
+.verdict .overall b { color: var(--side); font-size: 1.9em; font-variant-numeric: tabular-nums; }
+.verdict .headline { font-size: 1.3em; line-height: 1.25; font-weight: 650; margin-top: .15em; text-wrap: balance; }
+.verdict .criteria { display: flex; flex-wrap: wrap; gap: .2em 1.1em; margin-top: .3em; font-size: .85em; }
+.verdict .criterion { display: inline-flex; gap: .35em; align-items: baseline; white-space: nowrap; }
+.verdict .criterion .name { color: var(--mute); }
+.verdict .criterion b { font-variant-numeric: tabular-nums; }
+.verdict .criterion b.prop { color: var(--prop); } .verdict .criterion b.opp { color: var(--opp); }
+.verdict .criterion b.opp::before { content: "–"; color: var(--mute); font-weight: 400; margin-right: .3em; }
+.verdict .dances { display: flex; flex-wrap: wrap; gap: .1em 1.5em; margin-top: .3em; font-size: .9em; font-weight: 600; }
+.verdict .dance { color: var(--side); }
+.verdict .meta { margin-top: .25em; font-size: .75em; overflow-wrap: anywhere; }
+.verdict.judging .winner { font-size: 1.6em; }
+
 /* ---------- operator ---------- */
 button, input { font: inherit; color: inherit; }
 button { background: var(--raise); border: 1px solid var(--line); border-radius: 6px; padding: .25em .7em; cursor: pointer; }
@@ -188,7 +212,7 @@ input { width: 100%; background: var(--bg); border: 1px solid var(--line); borde
 .row { display: flex; flex-wrap: wrap; gap: .5em; }
 
 @media (prefers-reduced-motion: reduce) {
-  .enter, .card.landed, #banner, .pulse, .speaking .bars i, .utt.interim .said::after { animation: none; }
+  .enter, .card.landed, #banner, .pulse, .speaking .bars i, .utt.interim .said::after, .verdict.reveal { animation: none; }
   .speaking .bars i { height: 80%; }
 }
 @media (max-width: 900px) {
@@ -202,4 +226,5 @@ input { width: 100%; background: var(--bg); border: 1px solid var(--line); borde
   .scroll { overflow: visible; }
   footer, .admin { padding-inline: 16px; }
   #banner { left: 16px; right: 16px; bottom: 8px; } #banner .line { font-size: 1.4em; }
+  .verdict .winner { font-size: 1.6em; } .verdict .overall { margin-left: 0; }
 }

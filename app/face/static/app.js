@@ -8,6 +8,7 @@ const STALE_CHECK_S = 20;       // a claim still unanswered after this stops pul
 const STALE_SPEECH_MS = 15000;  // a queued line this old is no longer worth saying
 const INTERIM_MAX_S = 6;         // an interim that never got its final (dropped stream, stopped replay) fades out
 const TTS_STUCK_S = 20;         // a TTSState{speaking:true} this old lost its false (audio tab closed or cut off)
+const JUDGING_MAX_S = 120;      // "Judging…" this long after the Final screen click (the judge answers within ~60 s)
 
 if (Q.get('theme') === 'light') document.documentElement.dataset.theme = 'light';   // for a washed-out projector
 const $ = id => document.getElementById(id);
@@ -28,7 +29,7 @@ let banner = null, pickerOpen = false, adminHidden = false, audioReady = false;
 function reset() {   // SessionStart wipes debate state; flags + module status are process-wide
   S = {session: null, sides: {}, names: {}, utts: new Map(), claims: new Map(), verdicts: new Map(), cards: new Map(),
        map: null, research: null, decisions: [], considered: new Set(), dstatus: null, interjections: [], tts: null, lastVerdict: null,
-       bots: {}, flags: S ? S.flags : {}, status: S ? S.status : {}};
+       bots: {}, result: null, finalAt: null, flags: S ? S.flags : {}, status: S ? S.status : {}};
   banner = null;
 }
 function sideOf(spk) {   // 1st speaker heard = prop, 2nd = opp, unless SessionStart said otherwise
@@ -70,7 +71,12 @@ function apply(e, live) {
       S.tts = e;
       if (!e.speaking && banner) banner.until = Math.min(banner.until, Date.now() + 4000);
       break;
-    case 'Control': S.flags[e.flag] = e.value; if (live) onControl(e); break;
+    case 'Control':
+      S.flags[e.flag] = e.value;
+      if (e.flag === 'screen') S.finalAt = e.value === 'final' ? e.ts : null;   // when the judge was asked
+      if (live) onControl(e);
+      break;
+    case 'DebateResult': S.result = {e, live}; break;                            // live: revealed with an animation
     case 'BotLine': if (Object.hasOwn(BOTS, e.persona)) S.bots[e.persona] = {e, live}; break;   // live: animates in
     case 'Interjection':
       S.interjections.push(e);
@@ -449,6 +455,71 @@ function drawBots() {
     box.replaceChildren(n);
   }
 }
+// The judge's verdict (DebateResult) on the final screen: winner, margin, headline, overall and per-criterion scores,
+// each bot's dance. Before it arrives, "Judging…" (only when the judge module runs, and for JUDGING_MAX_S after the
+// Final screen click). Model text, so textContent only. Rebuilt only when the result changes.
+const MARGINS = {narrow: 'Narrow margin', clear: 'Clear margin', decisive: 'Decisive margin'};
+const scoreText = v => typeof v === 'number' && Number.isFinite(v) ? (Number.isInteger(v) ? String(v) : v.toFixed(1))
+                 : typeof v === 'string' && v ? v : '–';
+const criterionName = k => { const t = String(k).replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1); };
+function drawVerdict() {
+  const box = $('verdict'), r = S.result;
+  const judgeOn = (MODULES.judge && MODULES.judge !== 'off') || !!S.status.judge;
+  const judging = !r && judgeOn && S.finalAt != null && Date.now() / 1000 - S.finalAt < JUDGING_MAX_S;
+  box.hidden = S.flags.screen !== 'final' || (!r && !judging);
+  const key = r ? `result ${r.e.seq}` : 'judging';
+  if (box.hidden || box.dataset.key === key) return;
+  box.dataset.key = key;
+  const part = (parent, tag, cls, text) => {
+    const x = parent.appendChild(document.createElement(tag));
+    x.className = cls;
+    if (text != null) x.textContent = text;
+    return x;
+  };
+  box.replaceChildren();
+  if (!r) {
+    box.className = 'verdict judging';
+    part(part(box, 'div', 'head'), 'b', 'winner pulse', 'Judging…');
+    part(box, 'p', 'meta', 'Weighing the scorecard and the transcript');
+    return;
+  }
+  const e = r.e, winner = ['prop', 'opp'].includes(e.winner) ? e.winner : 'draw', scores = e.scores || {};
+  box.className = `verdict ${winner === 'draw' ? 'draw' : winner}${r.live ? ' reveal' : ''}`;
+  const head = part(box, 'div', 'head');
+  part(head, 'b', 'winner', winner === 'draw' ? 'Draw' : `${SIDE_NAMES[winner]} wins`);
+  const names = winner === 'draw' ? '' : Object.keys(S.sides).filter(s => S.sides[s] === winner).map(nameOf).join(', ');
+  if (names) part(head, 'span', 'names', names);
+  const margin = winner === 'draw' ? 'Too close to call' : MARGINS[e.margin] || (e.margin ? `${e.margin} margin` : '');
+  if (margin) part(head, 'span', 'margin', margin);
+  const overall = part(head, 'span', 'overall');
+  for (const side of ['prop', 'opp']) {
+    const o = part(overall, 'span', side);
+    part(o, 'b', '', scoreText((scores[side] || {}).overall));
+    part(o, 'span', '', SIDE_NAMES[side]);
+  }
+  if (e.headline) part(box, 'p', 'headline', e.headline);
+  const crits = [...new Set([...Object.keys(scores.prop || {}), ...Object.keys(scores.opp || {})])].filter(k => k !== 'overall');
+  if (crits.length) {
+    const row = part(box, 'div', 'criteria');
+    for (const k of crits) {
+      const c = part(row, 'span', 'criterion');
+      part(c, 'span', 'name', criterionName(k));
+      part(c, 'b', 'prop', scoreText((scores.prop || {})[k]));
+      part(c, 'b', 'opp', scoreText((scores.opp || {})[k]));
+    }
+  }
+  const dances = Object.entries(BOTS).filter(([p]) => (e.dances || {})[p]);
+  if (dances.length) {
+    const row = part(box, 'div', 'dances');
+    for (const [p, label] of dances) {
+      const d = part(row, 'span', `dance ${p === 'for' ? 'prop' : 'opp'}`, `${label} bot dances: ${e.dances[p]}`);
+      if ((e.music || {})[p]) { const m = part(d, 'span', 'music', ' ♪'); m.title = 'with its music'; }
+    }
+  }
+  const meta = [e.report ? `Full summary: ${e.report}` : '', e.via === 'formula' ? 'Decided by the scorecard formula' : '']
+    .filter(Boolean).join(' · ');
+  if (meta) part(box, 'p', 'meta', meta);
+}
 function drawBanner() {
   const on = banner && (Date.now() < banner.until || voiceOn(banner.e.id));
   $('banner').hidden = !on;
@@ -500,6 +571,7 @@ function draw() {
   $('final').hidden = !isFinal;
   drawHeader();
   if (isFinal) drawFinal(); else drawLive();
+  drawVerdict();
   drawBots();
   drawBanner();
   drawFooter();

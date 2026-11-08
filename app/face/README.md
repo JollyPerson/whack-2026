@@ -21,6 +21,15 @@ Dev loop: `./run.sh dev-d` (no keys needed). Protocol reference: `app/tools/ws_d
 a refreshed tab stays on the same screen. The list always works; argument map statuses, links and the call appear
 once `ArgMapSnapshot` arrives.
 
+**Verdict (`JUDGE=real`):** the Final screen click also asks the judge (`app/judge`) for the debate's verdict. Until its
+`DebateResult` arrives, the final screen shows **Judging…**, but only while the judge module runs and for at most
+2 minutes. Then a card sits on top: the winner, or Draw (a narrow margin is a draw), in its side's colour with that
+side's speakers; the margin; the judge's headline; both overall scores and one row per criterion (Prop – Opp); the
+dance each side bot performs (♪ = with its music); and the path of the Markdown summary (the JSON is beside it).
+"Decided by the scorecard formula" means Claude gave no valid answer in time, so the scorecard formula picked the
+winner. A refreshed tab shows the card at once, without the reveal animation. It is hidden on the live screen, and a
+new debate clears it.
+
 **Replay fallback:** `POST /face/replay` (the button in admin) plays the recorded debate through the running pipeline.
 It uses `FIXTURE`, then `fixtures/test_debate.jsonl`, then `fixtures/fake_debate.jsonl`. Use it from `./run.sh live`
 with the debaters silent, because real mics stay open. In `mock`, `drive` or `dev-*` profiles, mock ears are already
@@ -83,3 +92,14 @@ unsourced `challenge` or `concede` (Claude's own knowledge) is tagged **AI knowl
 its source. The strip stays hidden until a bot has spoken, so nothing changes with the bots off, and it is not shown
 on the final screen. In `?admin=1`, **Side bots on/off** (key B) sends `Control(flag="bots")`: off stops new lines
 and clears the bots' bubbles. The button appears only when the `bots` module runs or a bot line has arrived.
+
+**Verdict dances.** A `DebateResult` makes both side bots dance (the referee's avatar doesn't). The winner's bot dances
+`JUDGE_DANCE_WIN` (default `MMD-Conqueror`) with its music, and the loser's bot dances `JUDGE_DANCE_LOSE`
+(`MMD-Lost One_s Weeping`) with no sound. On a draw both dance `JUDGE_DANCE_DRAW` (`MMD-皆大欢喜-卜逻desu`), silently with
+`JUDGE_MUSIC=winner`. Mate Engine matches each title to a dance file's name in its CustomDances, ignoring case; a
+title it can't find plays its first dance. Each dance stops after `JUDGE_DANCE_S` (30 s), sent as the command's
+`seconds`, or at the next `SessionStart`, which sends `dance_stop` to both bots. While a bot dances, its `BotLine`s
+don't reach its avatar, because a `say` stops the dance in Mate Engine. The operator route takes the same switches,
+which is handy for a rehearsal: `-d '{"title":"MMD-Conqueror","channel":"for","on":true,"seconds":30}'` (`on` =
+with music, `seconds` 0 or absent = to the end). A Mate Engine build that predates `on` and `seconds` ignores both: it
+plays at its configured volume to the end. Mixamo "Victory" and "Defeated" animations are a later upgrade, not built.
