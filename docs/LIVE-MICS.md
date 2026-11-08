@@ -551,6 +551,9 @@ phone browser /mic?ch=A --WebSocket, 16 kHz s16le--> server /mic/ws --> pacat --
   start-up and unloaded at shutdown. Without a phone connected, their monitors are pure silence.
 - **One phone per side.** A second phone on the same side is refused ("another phone is already microphone A"), and
   so is a side that isn't in `PHONE_MICS`. A dropped connection reconnects on its own with backoff (0.5 s up to 10 s).
+  After a Wi-Fi blip the server can take ~40 s to notice the old connection is dead; the same page coming back takes
+  its side over at once (each page load has its own random session id), so this never shows as "another phone". A
+  link that stops getting audio through for 3 s is closed and reconnected rather than left showing "Live".
 - The dashboard gets a status dot per phone: `phone_A` is amber while it waits for a phone, green while one streams,
   and red if the sink couldn't be created.
 - **Browsers only give a page the microphone in a secure context:** `https://…`, or `http://localhost`. So use USB
@@ -580,28 +583,36 @@ The launcher accepts `whack_phone_A.monitor` like any other source, and `micmete
 it too. Start the server **before** the ears: the sink only exists while the server runs, so the launcher refuses
 the name otherwise ("is not a source right now").
 
-### Over Wi-Fi: HTTPS and a token
+### Over Wi-Fi: HTTPS on a second port, and a token
 
 Plain `http://<laptop IP>:8000` is not a secure context, so the page will say "Not a secure context" and the mic stays
-off. Serve HTTPS with a self-signed certificate:
+off. Setting `SSL_CERTFILE` and `SSL_KEYFILE` adds a **second, HTTPS-only port for the phones** (`SSL_PORT`, default
+8443, on `SSL_HOST`, default `0.0.0.0`). Port 8000 stays plain HTTP on `HOST`, because the ears' bridge
+(`SERVER`/`EARS_URL`), `scripts/ears-two-mics.sh` and both Mate Engine avatars (`tools/mate-bots.sh`, polling
+`/face/mate/next/*`) talk plain `http://127.0.0.1:8000` and cannot trust a self-signed certificate. Leave them as
+they are. Both ports serve the same app: one bus, one set of sinks.
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout cache/key.pem -out cache/cert.pem \
   -subj "/CN=whack-laptop" -addext "subjectAltName=IP:<laptop IP>,DNS:localhost"
 export MIC_TOKEN=$(openssl rand -hex 8)        # keep it out of shell history on a shared screen
-HOST=0.0.0.0 PHONE_MICS=A,B SSL_CERTFILE=cache/cert.pem SSL_KEYFILE=cache/key.pem \
+HOST=127.0.0.1 PHONE_MICS=A,B SSL_CERTFILE=cache/cert.pem SSL_KEYFILE=cache/key.pem \
   EARS=external BOTS=real JUDGE=real ./run.sh live
+#   log: phone mics: ... on Wi-Fi: https://<this laptop's IP>:8443/mic?ch=A (HTTPS on 0.0.0.0:8443; port 8000 stays plain HTTP)
 ```
 
-On the phone, open `https://<laptop IP>:8000/mic?ch=A&token=<MIC_TOKEN>`. Accept the certificate warning once
-(Advanced, Proceed). The dashboard is then also `https://…`.
+On the phone, open `https://<laptop IP>:8443/mic?ch=A&token=<MIC_TOKEN>`. Accept the certificate warning once
+(Advanced, Proceed). The dashboard, the ears and the avatars carry on with `http://127.0.0.1:8000` as before.
+A certificate or key that doesn't load, an `SSL_PORT` equal to the main port, or an `SSL_PORT` already in use stops
+start-up with an error, before any sink is created.
 
-- **A LAN bind exposes more than the mic.** `HOST=0.0.0.0` serves the whole server to the network: `/face/tts` (no
-  login), `/publish`, the dashboard, and the mic socket. Anyone on the network could speak as a debater, hence
-  `MIC_TOKEN`: with it set, a connection without the right `?token=` is refused. The server logs a warning when it
-  binds to the LAN with `PHONE_MICS` and no `MIC_TOKEN`. Prefer USB.
-- Venue Wi-Fi often isolates clients, and firewalld blocks port 8000 until you open it for this boot:
-  `sudo firewall-cmd --add-port=8000/tcp`. A phone hotspot is more reliable.
+- **The HTTPS port exposes more than the mic.** It serves the whole app to the network: `/face/tts` (no login),
+  `/publish`, the dashboard, and the mic socket. Anyone on the network could speak as a debater, hence `MIC_TOKEN`:
+  with it set, a mic connection without the right `?token=` is refused (the token protects only the mic). The server
+  logs a warning for a LAN listener with `PHONE_MICS` and no `MIC_TOKEN`. `SSL_HOST=<laptop IP>` limits it to one
+  interface. Prefer USB.
+- Venue Wi-Fi often isolates clients, and firewalld blocks the port until you open it for this boot:
+  `sudo firewall-cmd --add-port=8443/tcp`. A phone hotspot is more reliable.
 
 ### On the phone
 
@@ -622,14 +633,26 @@ On the phone, open `https://<laptop IP>:8000/mic?ch=A&token=<MIC_TOKEN>`. Accept
 | `This microphone is not switched on at the server: …` | Restart the server with `PHONE_MICS=A,B` (or the side you need) |
 | `The server wants a token: …` | Add `&token=<MIC_TOKEN>` to the address |
 | `Another phone is already this microphone. …` | Stop the other phone (or close its tab), then Start |
+| `The laptop still holds the old connection; retrying in …` | Nothing: the link dropped and the page is getting its side back (it gives up after a minute, then it really is another phone) |
+| `Link stalled (nothing getting through); reconnecting in …` | Nothing, if it goes Live again. If it keeps coming back, the Wi-Fi is too weak: use USB |
 | `Connection lost; retrying in …`, then `Cannot reach the server …` | The server is down, or the cable was replugged: run `adb reverse tcp:8000 tcp:8000` again. The page reconnects by itself |
 
 While the phone is disconnected, ears hears **silence** on that sink, never another device: after 15 s, the
 `pure digital silence` line from section 9. It says `sound again from micN` once the phone is back. If the sink itself is gone (the server stopped), ears goes **deaf** as in section 9. Restart the
 server, then the ears.
 
+**Sinks after a crash.** The server unloads the sinks it made at shutdown, by module id. If it was killed
+(`kill -9`, a crash), they stay behind; each carries `whack.pid=<the server's pid>`, and the next server adopts a
+sink whose server is gone and unloads it at its own shutdown. A `whack_phone_*` sink without that marker (made by
+hand) is reused and left alone. To check or clean up by hand, with the server stopped:
+
+```bash
+pactl list short modules | grep whack_phone        # <id>  module-null-sink  sink_name=whack_phone_A ... whack.pid=...
+pactl unload-module <id>                           # by id, one per line above
+```
+
 **What was verified:** on this laptop, with no phone, a WAV was streamed through `/mic/ws` by a small Python client
-over HTTP and over HTTPS. `parec` on `whack_phone_A.monitor` heard it: RMS about 2540, against exactly 0 with no
+over HTTP and over HTTPS (the second port, with port 8000 still answering plain HTTP). `parec` on `whack_phone_A.monitor` heard it: RMS about 2540, against exactly 0 with no
 phone. A second connection was refused, and the sinks were unloaded at shutdown. The page itself is tested against a
 fake browser in `tests/js/`. **A real phone has not been tested: rehearse it.**
 
