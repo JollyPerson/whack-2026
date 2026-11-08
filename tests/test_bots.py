@@ -1371,3 +1371,18 @@ async def test_a_hyphenated_accented_or_apostrophe_name_never_reaches_a_bubble(n
     await settle(bots)
     [b] = said(out)
     assert b.text == "Why should anyone accept that?"                       # the template, not the named question
+
+
+async def test_the_other_mics_copy_of_a_claim_is_not_heckled_as_the_other_sides():
+    """Mic bleed the brain's guard missed (the phone's Wi-Fi lag, a different segment): Prop's words come back as an
+    Opp claim. Heckling Opp for them is heckling the wrong debater."""
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", "Raising wages always destroys small businesses.", typ="causal", checkable=False))
+    clock.t += 2
+    bots.handle(C("c2", "B", "opp", "raising wages always destroys small businesses", typ="causal", checkable=False))
+    bots.handle(C("c3", "B", "opp", "Higher wages pay for themselves in productivity.", typ="causal",
+                  checkable=False))                                     # a real Opp claim at the same moment
+    await settle(bots)
+    clock.t += 10
+    bots.tick()
+    assert sorted((b.persona, b.claim_id) for b in said(out)) == [("against", "c1"), ("for", "c3")]
