@@ -24,7 +24,8 @@ import asyncio
 import logging
 import re
 import time
-from typing import Iterable
+from contextlib import contextmanager
+from typing import Iterable, Iterator
 
 from app import config
 from app.brain.argmap import ArgMap
@@ -310,22 +311,36 @@ async def run(bus) -> None:
         if n:
             log.info("brain restored %d events from history", n)
 
+    @contextmanager
+    def tick_step(what: str) -> Iterator[None]:
+        """Each ticker step on its own: one that keeps failing never stops the heartbeat or the others."""
+        try:
+            yield
+        except Exception:
+            log.exception("brain tick failed: %s", what)
+
     async def ticker() -> None:
         last_ver, last_snap, last_status, last_stats = -1, 0.0, 0.0, time.time()
         while True:
             await asyncio.sleep(TICK_S)
             now = time.time()
-            try:
+            with tick_step("pauses"):
                 for p in pauses.due(now):
                     bus.publish(p, src="brain:pause_synth")   # comes back through the subscription
+            with tick_step("flush"):
                 start_extract(extractor.flush_due(now))
+            with tick_step("director"):
                 emit(director.tick(now))
-                if amap.version != last_ver and now - last_snap >= 1.0 / config.ARGMAP_SNAPSHOT_HZ:
+            with tick_step("snapshot"):
+                hz = config.ARGMAP_SNAPSHOT_HZ                # <= 0: snapshots off
+                if hz > 0 and amap.version != last_ver and now - last_snap >= 1.0 / hz:
                     last_ver, last_snap = amap.version, now
                     publish(amap.snapshot())
+            with tick_step("status"):
                 if now - last_status >= 1.0:
                     last_status = now
                     publish(director.status(now))
+            with tick_step("stats"):
                 if now - last_stats >= STATS_EVERY_S:
                     last_stats = now
                     s = getattr(extractor, "stats", {}) or {}
@@ -335,8 +350,6 @@ async def run(bus) -> None:
                     publish(ModuleStatus(module="brain", state="degraded" if degraded else "up",
                                          detail=f"llm={s.get('llm', '?')} p50={s.get('p50_ms') or '-'}ms "
                                                 f"fallback {fb}/{calls} {s.get('by_cause', {})}"))
-            except Exception:
-                log.exception("brain tick failed")
 
     restore_from_history(history)
     tick_task = asyncio.create_task(ticker())
@@ -359,12 +372,11 @@ async def run(bus) -> None:
                             (ev.final and bleed.is_bleed(ev)):
                         continue
                     pauses.on_utterance(ev, now)
-                    emit(director.handle(ev, now))
-                    if heard == "floor":                       # a 1-2 word barge-in over our TTS: floor only
-                        continue
-                    if ev.final:
-                        amap.on_utterance(ev)
-                    start_extract(extractor.assemble(ev, now))     # an interim only keeps a fragment open
+                    if heard != "floor":                       # a 1-2 word barge-in over our TTS: floor only
+                        if ev.final:
+                            amap.on_utterance(ev)
+                        start_extract(extractor.assemble(ev, now))     # an interim only keeps a fragment open
+                    emit(director.handle(ev, now))             # last: a Director error never costs map/extraction
                 elif name == "Pause":
                     pauses.on_pause(ev)
                     start_extract(extractor.on_pause(ev.speaker))

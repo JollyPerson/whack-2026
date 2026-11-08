@@ -442,3 +442,66 @@ async def test_barge_in_over_our_tts_is_heard_and_closes_the_floor(brain):
     own = [c for c in h.of("Claim") if c.src == "brain"]
     assert any(c.speaker == "B" and "30 percent" in c.text for c in own)          # B's barge-in was extracted
     assert [c.id for c in own if c.speaker == "A"] == own_a                       # the echo never was
+
+
+async def test_a_failing_tick_step_never_stops_the_heartbeat_or_the_map(brain, monkeypatch, caplog):
+    """One try wrapped every ticker step: a step that kept raising (e.g. the Director's) stopped the DirectorStatus
+    heartbeat, the map snapshots and the brain ModuleStatus for good."""
+    h = brain
+    boom, real = {"on": True}, brain_run.Director.tick
+
+    def tick(self, now):
+        if boom["on"]:
+            raise RuntimeError("boom")
+        return real(self, now)
+
+    monkeypatch.setattr(brain_run.Director, "tick", tick)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    n = len(h.of("DirectorStatus"))
+    for _ in range(3):
+        await h.step(1.1)
+    assert len(h.of("DirectorStatus")) >= n + 2 and h.of("ArgMapSnapshot")[-1].turns
+    boom["on"] = False
+    await h.step()
+    assert any("boom" in (r.exc_text or "") or r.exc_info for r in caplog.records)
+    caplog.clear()
+
+
+async def test_snapshot_hz_zero_turns_snapshots_off(brain, monkeypatch):
+    """1.0 / ARGMAP_SNAPSHOT_HZ raised ZeroDivisionError on every tick once the map changed."""
+    monkeypatch.setattr(config, "ARGMAP_SNAPSHOT_HZ", 0.0)
+    h = brain
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    n = len(h.of("DirectorStatus"))
+    for _ in range(3):
+        await h.step(1.1)
+    assert len(h.of("DirectorStatus")) >= n + 2 and not h.of("ArgMapSnapshot")
+
+
+async def test_a_director_error_on_an_utterance_never_drops_it_from_the_map_or_extraction(brain, monkeypatch, caplog):
+    """The Director ran first in the Utterance branch: when it raised, the utterance never reached the argument
+    map or claim extraction."""
+    h = brain
+    real = brain_run.Director.handle
+
+    def handle(self, ev, now):
+        if getattr(ev, "event", "") == "Utterance":
+            raise RuntimeError("boom")
+        return real(self, ev, now)
+
+    monkeypatch.setattr(brain_run.Director, "handle", handle)
+    await h.start()
+    h.session()
+    t = h.now()
+    h.pub(U("A", "Air pollution causes 40,000 early deaths a year in the UK.", t - 4, t - .2, uid="u-A-1"))
+    await h.step(.5)
+    await h.step(.5)
+    assert [c for c in h.of("Claim") if c.src == "brain" and c.speaker == "A"]
+    assert [x["speaker"] for x in h.of("ArgMapSnapshot")[-1].turns] == ["A"]
+    caplog.clear()
