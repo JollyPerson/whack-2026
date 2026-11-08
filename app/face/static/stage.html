@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Debate Referee · Stage</title>
+<!-- Two-sided "stage" view: each fact check pops up a character on the side that made the claim.
+     Served at /stage (also /static/stage.html). Display only: it never speaks, the main dashboard (/?audio=1) does.
+     URL params: ?theme=light · ?ws=ws://host:8000/ws · ?all=1 also shows "unverifiable" checks -->
+<link rel="stylesheet" href="/static/stage.css">
+</head>
+<body>
+<header>
+  <p class="eyebrow">Debate Referee <span id="conn" class="dot" title="websocket"></span> <a href="/">dashboard</a></p>
+  <h1 id="motion">Waiting for a motion</h1>
+</header>
+
+<main>
+  <section id="prop" class="half prop">
+    <div class="head">
+      <p class="side-name">Proposition</p>
+      <h2 class="speakers">—</h2>
+      <div class="tally"></div>
+    </div>
+    <p class="caption"></p>
+    <div class="stage" aria-live="polite"></div>
+    <div class="history"></div>
+  </section>
+  <div class="divider"><span>VS</span></div>
+  <section id="opp" class="half opp">
+    <div class="head">
+      <p class="side-name">Opposition</p>
+      <h2 class="speakers">—</h2>
+      <div class="tally"></div>
+    </div>
+    <p class="caption"></p>
+    <div class="stage" aria-live="polite"></div>
+    <div class="history"></div>
+  </section>
+</main>
+
+<footer id="cast"></footer>
+<script src="/static/stage-cast.js"></script>
+<script src="/static/stage.js"></script>
+</body>
+</html>
