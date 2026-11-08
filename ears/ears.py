@@ -26,6 +26,19 @@ DUPLICATE_GAP = 0.3
 TAIL_IDLE = 2.0
 # Ends in a period but rarely ends a sentence: "U.S.", "e.g.", "Dr.".
 ABBREVIATION = re.compile(r"(?:[a-z]\.){2,}|(?:mr|mrs|ms|dr|prof|st|vs|jr|sr)\.", re.IGNORECASE)
+# Seconds before each parec restart, the last one repeating; a capture that ran PAREC_HEALTHY seconds starts over.
+PAREC_BACKOFF = (0.5, 1.0, 2.0)
+PAREC_HEALTHY = 10.0
+# Levels: exact digital silence this long is a deaf source, not a quiet room (a live mic always has some noise).
+SILENCE_WARN = 15.0
+SILENT_PEAK = 2 / 32768
+QUIET_PEAK = 10 ** (-30 / 20)
+# This many full-scale samples in one read is clipping, reported at most every CLIP_WARN_EVERY seconds.
+CLIP_PEAK = 32767 / 32768
+CLIP_SAMPLES = 3
+CLIP_WARN_EVERY = 10.0
+# Seconds of audio between two peak-level lines per source.
+LEVEL_EVERY = 15.0
 
 
 class AudioBuffer:
@@ -216,54 +229,192 @@ class SentenceBuffer:
         return self.extract_sentences(float("inf"))
 
 
-def start_audio_capture(source_name, device, buffer):
-    """Start one independent parec process and audio reader."""
+def say(message):
+    """One line for the operator, on stderr: what the terminal running ears shows."""
+    print(message, file=sys.stderr, flush=True)
 
-    command = [
-        "parec",
-        "--device", device,
-        "--format=s16le",
-        "--rate=16000",
-        "--channels=1",
-        "--raw",
-    ]
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=sys.stderr,
-        bufsize=0,
-    )
+def dbfs(peak):
+    return f"{20 * np.log10(peak):.0f} dBFS" if peak >= SILENT_PEAK else "no signal at all"
 
-    def reader():
+
+class LevelWatch:
+    """Tells the operator, from one source's audio alone, what parec cannot: that the mic is deaf (pure digital
+    silence: a monitor source such as MicYouVirtualSink.monitor keeps sending zeros after the phone drops off the
+    Wi-Fi), that it clips, and its peak level now and then. Times are in seconds of audio. add() returns the lines."""
+
+    def __init__(self, source_name, device):
+        self.name, self.device = source_name, device
+        self.silent_for = 0.0
+        self.silent_warned = False
+        self.since_clip_warning = None
+        self.since_level = 0.0
+        self.peak = 0.0
+
+    def add(self, audio):
+        said = []
+        if not len(audio):
+            return said
+        seconds = len(audio) / SAMPLE_RATE
+        magnitude = np.abs(audio)
+        peak = float(magnitude.max())
+
+        if peak < SILENT_PEAK:
+            self.silent_for += seconds
+            if self.silent_for >= SILENCE_WARN and not self.silent_warned:
+                self.silent_warned = True
+                said.append(
+                    f"!! ears: {self.name} ({self.device}) has sent pure digital silence for "
+                    f"{self.silent_for:.0f} s: is the phone app disconnected or muted, or the volume at 0? "
+                    f"{self.name} hears nothing until then"
+                )
+        else:
+            if self.silent_warned:
+                said.append(f"ears: sound again from {self.name} ({self.device})")
+            self.silent_for, self.silent_warned = 0.0, False
+
+        if self.since_clip_warning is not None:
+            self.since_clip_warning += seconds
+        if (
+            np.count_nonzero(magnitude >= CLIP_PEAK) >= CLIP_SAMPLES
+            and (self.since_clip_warning is None or self.since_clip_warning >= CLIP_WARN_EVERY)
+        ):
+            self.since_clip_warning = 0.0
+            said.append(
+                f"!! ears: {self.name} ({self.device}) is clipping: turn its gain down "
+                f"(pactl set-source-volume {self.device} 70%, or the phone app's or the mic's own gain)"
+            )
+
+        self.peak = max(self.peak, peak)
+        self.since_level += seconds
+        if self.since_level >= LEVEL_EVERY:
+            hint = ""
+            if SILENT_PEAK <= self.peak < QUIET_PEAK:
+                hint = " (quiet: if someone spoke into it, move it closer or raise its gain)"
+            said.append(
+                f"ears: {self.name} peak level over the last {self.since_level:.0f} s: {dbfs(self.peak)}{hint}"
+            )
+            self.peak, self.since_level = 0.0, 0.0
+
+        return said
+
+
+class Capture:
+    """One source's parec, started again with backoff whenever it ends, so a mic that drops out (phone app
+    restarted, Wi-Fi drop, USB replug) comes back by itself instead of staying deaf. parec is told never to fall
+    back to another source: PipeWire would otherwise move it to the default one (the speakers' monitor, for a
+    monitor source) and this mic would transcribe the wrong audio. So a missing source makes parec exit, and the
+    restarts wait for it to come back. terminate(), wait() and kill() are those of the parec running now."""
+
+    def __init__(self, source_name, device, buffer):
+        self.name, self.device, self.buffer = source_name, device, buffer
+        self.command = [
+            "parec",
+            "--device", device,
+            "--format=s16le",
+            "--rate=16000",
+            "--channels=1",
+            "--raw",
+            "--property=node.dont-fallback=true",
+        ]
+        self.levels = LevelWatch(source_name, device)
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.process = None
+        self.thread = threading.Thread(target=self._run, daemon=True, name=f"capture-{source_name}")
+        self.thread.start()
+
+    def _start(self):
+        with self.lock:
+            if self.stopping.is_set():
+                return None
+            try:
+                # Its own session: Ctrl+C reaches ears alone, which then stops parec itself (not taken for a
+                # dropped mic). If ears dies, parec's next write to the closed pipe ends it.
+                self.process = subprocess.Popen(
+                    self.command,
+                    stdout=subprocess.PIPE,
+                    stderr=sys.stderr,
+                    bufsize=0,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                self.process = None
+                say(f"!! ears: cannot start parec for {self.name}: {error}")
+            return self.process
+
+    def _read(self, process, restarted):
+        odd = b""
         while True:
             raw = process.stdout.read(CHUNK_BYTES)
 
             if not raw:
-                break
+                return
 
-            # Ensure the PCM data contains complete 16-bit samples.
-            raw = raw[:len(raw) - (len(raw) % 2)]
+            # Keep any odd byte for the next read: dropping it would misalign every later sample.
+            raw = odd + raw
+            whole = len(raw) - len(raw) % 2
+            raw, odd = raw[:whole], raw[whole:]
             if not raw:
                 continue
 
+            if restarted:
+                say(f"ears: capturing {self.device} again: hearing {self.name} again")
+                restarted = False
+
             audio = np.frombuffer(raw, dtype=np.int16)
             audio = audio.astype(np.float32) / 32768.0
-            buffer.add(audio)
+            self.buffer.add(audio)
+            for line in self.levels.add(audio):
+                say(line)
 
-        print(
-            f"Audio capture ended for {source_name}",
-            file=sys.stderr,
-        )
+    def _run(self):
+        failures = 0
+        while not self.stopping.is_set():
+            process = self._start()
+            started = time.monotonic()
+            code = None
+            if process is not None:
+                self._read(process, restarted=failures > 0)
+                code = process.wait()
 
-    thread = threading.Thread(
-        target=reader,
-        daemon=True,
-        name=f"capture-{source_name}",
-    )
-    thread.start()
+            if self.stopping.is_set():
+                break
 
-    return process
+            if time.monotonic() - started >= PAREC_HEALTHY:
+                failures = 0
+            delay = PAREC_BACKOFF[min(failures, len(PAREC_BACKOFF) - 1)]
+            failures += 1
+            say(
+                f"!! ears: audio capture for {self.name} ({self.device}) ended (parec exit {code}): "
+                f"{self.name} is deaf; retrying in {delay:g} s"
+            )
+            self.stopping.wait(delay)
+
+        say(f"Audio capture ended for {self.name}")
+
+    def terminate(self):
+        with self.lock:
+            self.stopping.set()
+            process = self.process
+        if process is not None and process.poll() is None:
+            process.terminate()
+
+    def wait(self, timeout=None):
+        self.thread.join(timeout)
+        process = self.process
+        return process.wait(timeout) if process is not None else None
+
+    def kill(self):
+        process = self.process
+        if process is not None:
+            process.kill()
+
+
+def start_audio_capture(source_name, device, buffer):
+    """Start one independent parec process and audio reader, restarted whenever it ends."""
+
+    return Capture(source_name, device, buffer)
 
 
 def emit_sentence(sentence, source_name, output_file):

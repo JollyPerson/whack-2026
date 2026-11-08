@@ -293,3 +293,198 @@ def test_runstt_runs_from_any_directory(tmp_path):
     assert line["cwd"] == str(here)
     assert line["args"].startswith("run python ears.py --source mic1=")
     assert (here / "events.jsonl").read_text() == r.stdout
+
+
+# ----------------------------------------------------------------------------- capture: parec dies, comes back
+class ScriptedParec:
+    """A parec that hands out `chunks` from stdout, then ends with `rc` (or blocks until terminated)."""
+
+    def __init__(self, chunks=(), rc=1, block=False):
+        import threading
+        self.chunks, self.rc, self.block = list(chunks), rc, block
+        self.ended = threading.Event()
+        self.stdout = self
+        self.returncode = None
+
+    def read(self, n):
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.block:
+            self.ended.wait(5)
+        return b""
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.block:
+            self.ended.wait(timeout)
+        self.returncode = self.rc
+        return self.rc
+
+    def terminate(self):
+        self.ended.set()
+
+    kill = terminate
+
+
+class FakePopen:
+    """subprocess.Popen standing in for parec: each start takes the next ScriptedParec (or exception) in turn."""
+
+    def __init__(self, *runs):
+        self.runs, self.commands, self.started = list(runs), [], []
+
+    def __call__(self, command, **kw):
+        self.commands.append(command)
+        run = self.runs.pop(0) if self.runs else ScriptedParec(block=True)
+        if isinstance(run, BaseException):
+            raise run
+        self.started.append(run)
+        return run
+
+
+def pcm(*samples):
+    return np.array(samples, dtype=np.int16).tobytes()
+
+
+def wait_until(cond, timeout=3.0):
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not cond():
+        time.sleep(0.01)
+    return cond()
+
+
+@pytest.fixture
+def quick_restarts(monkeypatch):
+    monkeypatch.setattr(ears, "PAREC_BACKOFF", (0.01,))
+
+
+def test_parec_never_falls_back_to_another_source(monkeypatch, quick_restarts):
+    # PipeWire moves a stream whose source vanished (phone app restarted, USB mic unplugged) to the default: the
+    # speakers' monitor for a monitor source like MicYouVirtualSink.monitor, else the laptop mic. Probed on this
+    # laptop: without node.dont-fallback, parec keeps running there, so mic1 would transcribe the laptop's speakers.
+    popen = FakePopen(ScriptedParec(block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    capture = ears.start_audio_capture("mic1", "MicYouVirtualSink.monitor", ears.AudioBuffer())
+    try:
+        assert wait_until(lambda: popen.commands)
+        assert "--property=node.dont-fallback=true" in popen.commands[0]
+        assert popen.commands[0][popen.commands[0].index("--device") + 1] == "MicYouVirtualSink.monitor"
+    finally:
+        capture.terminate()
+        capture.wait(2)
+
+
+def test_a_capture_that_ends_is_restarted_and_says_so_loudly(monkeypatch, quick_restarts, capsys):
+    popen = FakePopen(ScriptedParec([pcm(1, 2)], rc=1), ScriptedParec(rc=1), ScriptedParec([pcm(3, 4)], block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic2", "usb-mic", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 4)
+        assert len(popen.commands) == 3
+        audio, _, _ = buffer.snapshot(1)
+        assert list(np.round(audio * 32768)) == [1, 2, 3, 4]
+    finally:
+        capture.terminate()
+        capture.wait(2)
+    err = capsys.readouterr().err
+    assert "mic2" in err and "usb-mic" in err and "deaf" in err and "retrying" in err
+    assert "hearing mic2 again" in err
+
+
+def test_ctrl_c_stops_the_restarts(monkeypatch, quick_restarts):
+    # The device is missing: every parec exits at once. Once stopped, no parec may start again (or outlive ears).
+    monkeypatch.setattr(ears, "PAREC_BACKOFF", (0.05,))
+    popen = FakePopen(*[ScriptedParec(rc=1) for _ in range(1000)])
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    capture = ears.start_audio_capture("mic1", "gone", ears.AudioBuffer())
+    assert wait_until(lambda: len(popen.commands) >= 2)
+    capture.terminate()
+    capture.wait(2)
+    started = len(popen.commands)
+    import time
+    time.sleep(0.2)
+    assert len(popen.commands) == started
+    assert not capture.thread.is_alive()
+
+
+def test_terminate_stops_the_running_parec(monkeypatch, quick_restarts):
+    run = ScriptedParec(block=True)
+    monkeypatch.setattr(ears.subprocess, "Popen", FakePopen(run))
+    capture = ears.start_audio_capture("mic1", "dev", ears.AudioBuffer())
+    assert wait_until(lambda: capture.process is run)
+    capture.terminate()
+    assert capture.wait(2) == 1
+    assert run.ended.is_set() and not capture.thread.is_alive()
+
+
+def test_parec_missing_is_reported_and_retried_not_a_silent_dead_thread(monkeypatch, quick_restarts, capsys):
+    popen = FakePopen(FileNotFoundError(2, "No such file or directory", "parec"), ScriptedParec([pcm(5)], block=True))
+    monkeypatch.setattr(ears.subprocess, "Popen", popen)
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic1", "dev", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 1)
+    finally:
+        capture.terminate()
+        capture.wait(2)
+    assert "parec" in capsys.readouterr().err
+
+
+def test_an_odd_sized_read_keeps_the_samples_aligned(monkeypatch, quick_restarts):
+    # Dropping the odd byte shifted every later sample by one byte: loud noise for the rest of the run.
+    data = pcm(1000, -2000, 3000, -4000)
+    monkeypatch.setattr(ears.subprocess, "Popen", FakePopen(ScriptedParec([data[:3], data[3:]], block=True)))
+    buffer = ears.AudioBuffer()
+    capture = ears.start_audio_capture("mic1", "dev", buffer)
+    try:
+        assert wait_until(lambda: buffer.total_samples == 4)
+        audio, _, _ = buffer.snapshot(1)
+        assert list(np.round(audio * 32768)) == [1000, -2000, 3000, -4000]
+    finally:
+        capture.terminate()
+        capture.wait(2)
+
+
+# ----------------------------------------------------------------------------- levels: silence, clipping
+def chunk(value, seconds):
+    return np.full(int(seconds * ears.SAMPLE_RATE), value / 32768, dtype=np.float32)
+
+
+def test_a_source_sending_pure_silence_is_reported_once_and_its_return_too():
+    # A null sink's monitor (MicYouVirtualSink.monitor) keeps sending zeros after the phone drops off Wi-Fi:
+    # parec never exits, so only the level shows the mic is deaf.
+    watch = ears.LevelWatch("mic1", "MicYouVirtualSink.monitor")
+    said = []
+    for _ in range(int(ears.SILENCE_WARN) - 1):
+        said += watch.add(chunk(0, 1.0))
+    assert not [m for m in said if "silence" in m]
+    for _ in range(5):
+        said += watch.add(chunk(0, 1.0))
+    assert len([m for m in said if "silence" in m]) == 1
+    said += watch.add(chunk(800, 0.5))
+    assert len([m for m in said if "sound again" in m]) == 1
+
+
+def test_a_quiet_but_live_mic_is_not_called_silent():
+    watch = ears.LevelWatch("mic2", "usb")
+    noise = (np.random.default_rng(1).standard_normal(ears.SAMPLE_RATE) * 20 / 32768).astype(np.float32)
+    assert not [m for _ in range(40) for m in watch.add(noise) if "silence" in m]
+
+
+def test_clipping_is_reported_with_a_gain_hint_at_most_every_few_seconds():
+    watch = ears.LevelWatch("mic2", "usb")
+    loud = chunk(32767, 0.25)
+    said = [m for _ in range(8) for m in watch.add(loud)]            # 2 s of clipping
+    assert len([m for m in said if "clipping" in m]) == 1
+    assert "gain" in said[0]
+
+
+def test_levels_are_reported_now_and_then():
+    watch = ears.LevelWatch("mic1", "dev")
+    said = [m for _ in range(int(ears.LEVEL_EVERY) * 2) for m in watch.add(chunk(3277, 1.0))]   # -20 dBFS
+    levels = [m for m in said if "dBFS" in m]
+    assert len(levels) == 2 and "-20 dBFS" in levels[0]
+
