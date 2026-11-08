@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
 import uuid
 import weakref
@@ -24,6 +25,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.brain import voice
 from app.face.tts import TTS, TTSError, build_tts
 
 router = APIRouter()
@@ -35,6 +37,8 @@ MATE_DOWN_S = 5.0      # no poll for this long = the avatar is gone (run.py turn
 FULL_DANCE_S = 300.0   # a verdict dance with seconds 0 plays to its end: about the longest one
 TYPES = {"Interjection", "TTSState", "Control", "SessionStart", "BotLine", "BotTalk", "DebateResult"}
 CHANNELS = ("referee", "for", "against")   # one avatar each; for/against = BotLine.persona
+CITE_MAX_WORDS = 8     # a sourced bot line's second bubble line, "— the ONS: Labour market overview", in words
+CITE_MAX_CHARS = 60    # and in characters (a title of long words)
 
 
 def cmd(op: str, **kw) -> dict:
@@ -117,7 +121,7 @@ def bot_cmds(ev, now: float, persona: str, mate: Mate | None = None) -> list[dic
     if ev.event == "BotLine" and ev.persona == persona:
         if now - ev.ts > SAY_TTL_S or (mate is not None and now < mate.dancing_until):
             return []
-        return [cmd("say", id=ev.id, text=ev.text), cmd("talk", id=ev.id, on=True)]
+        return [cmd("say", id=ev.id, text=bot_text(ev)), cmd("talk", id=ev.id, on=True)]
     if ev.event == "BotTalk" and ev.persona == persona:
         return [cmd("talk", id=ev.line_id, on=bool(ev.on))]
     if ev.event == "DebateResult":
@@ -130,6 +134,57 @@ def bot_cmds(ev, now: float, persona: str, mate: Mate | None = None) -> list[dic
             (ev.flag == "mute" and ev.value is True) or (ev.flag == "bots" and ev.value is False)):
         return [cmd("stop", clear=True)]
     return []
+
+
+def bot_text(ev) -> str:
+    """What a bot's bubble shows: BotLine.text, plus, for a sourced line, a short second line naming its source like
+    the stage characters' signs ("— the ONS: Labour market overview"). An unsourced line is its text alone (a
+    challenge or concede already ends with "(unsourced)"). BotLine.text itself is never changed."""
+    line = cite(ev.evidence) if ev.sourced else ""
+    return f"{ev.text}\n{line}" if line else ev.text
+
+
+def _short_title(title) -> str:
+    """The page title without its site suffix ("Labour market overview - ONS" -> "Labour market overview"); "" for
+    a title with a judgement word or a link in it (plain text only: the bubble never shows a URL)."""
+    t = " ".join(str(title or "").split())
+    for sep in (" | ", " - ", " — ", " – "):
+        if sep in t:
+            head, site = t.rsplit(sep, 1)
+            if head.strip() and 0 < len(site.split()) <= 4:
+                t = head
+            break
+    t = voice.clean(t)
+    return "" if re.search(r"https?://|www\.|\.[a-z]{2,}/", t, re.I) else t
+
+
+def cite(evidence) -> str:
+    """"— <source name>: <short title>" for the first evidence item, at most CITE_MAX_WORDS words and CITE_MAX_CHARS
+    characters (a longer title is cut with "…"); "— <name>" or "— <title>" when only one exists; "" when neither."""
+    name = voice.source_name(evidence or [])
+    titles = (_short_title(e.get("title") if isinstance(e, dict) else getattr(e, "title", "")) for e in evidence or [])
+    title = next((t for t in titles if t), "")
+    if title.lower() == name.lower():
+        title = ""
+    elif name and title.lower().startswith(name.lower()):
+        name = ""                              # the name came from the title's first words: say the title once
+    if not (name or title):
+        return ""
+    if not title:
+        return _fit(f"— {name}")
+    words, room = title.split(), max(1, CITE_MAX_WORDS - len(name.split()))
+    short = " ".join(words[:room]).rstrip(" ,;:-") + ("…" if len(words) > room else "")
+    return _fit(f"— {name}: {short}" if name else f"— {short}")
+
+
+def _fit(line: str) -> str:
+    """At most CITE_MAX_CHARS characters, cut at a word where there is one, with "…"."""
+    if len(line) <= CITE_MAX_CHARS:
+        return line
+    cut = line[:CITE_MAX_CHARS - 1].rstrip("…")
+    if cut.rfind(" ") > CITE_MAX_CHARS // 2:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:-") + "…"
 
 
 def verdict_dance(ev, now: float, persona: str, mate: Mate | None) -> list[dict]:

@@ -163,7 +163,9 @@ Cmd = {"op":"say"|"talk"|"stop"|"dance"|"dance_stop","id":"","text":"","audio":"
 - **Channels (side bots).** `GET /face/mate/next/{channel}` takes the same query and returns the same payload, one
   avatar per channel. `referee` is exactly the route above (`/face/mate/next` = `/face/mate/next/referee`). `for` and
   `against` carry only that side bot's lines: `BotLine{persona}` becomes `say` (`audio: ""`) plus `talk on` (dropped,
-  like an Interjection, if older than 4 s at delivery), and `BotTalk{persona, on:false}` becomes `talk off`.
+  like an Interjection, if older than 4 s at delivery), and `BotTalk{persona, on:false}` becomes `talk off`. The
+  `say` text is `BotLine.text`; a sourced line (`sourced` with `evidence`) adds a second line naming its source,
+  `"\n— <source name>: <short title>"` (at most 8 words and 60 characters, plain text, never a URL).
   `SessionStart`, `Control` mute=true and `Control` bots=false send `stop` with `clear=true`. Any other channel is a
   404. Each channel has its own status dot (`ModuleStatus` `mate`, `mate_for`, `mate_against`), published only once
   that avatar has polled. A Mate Engine instance picks its channel with `pollPath` in its own `speech_bridge.json`
