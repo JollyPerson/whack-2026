@@ -113,3 +113,28 @@ def test_a_ci_key_github_did_not_take_is_kept_and_the_wizard_stops(repo):
     [key_dir] = (repo / "tmp").iterdir()
     assert (key_dir / "ci_key").read_text() == "PRIVATE-KEY\n"
     assert str(key_dir / "ci_key") in r.stdout
+
+
+def test_enter_at_the_username_prompt_means_debate(repo):
+    r, log = wizard(repo, answers(user=""))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "set-env .env BASIC_AUTH_USER=debate" in log
+    assert "BASIC_AUTH_USER='debate'" in (repo / ".env.vultr").read_text()
+
+
+@pytest.mark.parametrize("bad", ["bad:user", "it's", "two words"])
+def test_a_username_basic_auth_cannot_use_is_asked_again(repo, bad):
+    r, log = wizard(repo, answers(user=[bad, "ref.team"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [line for line in log if "BASIC_AUTH_USER" in line] == ["set-env .env BASIC_AUTH_USER=ref.team"]
+
+
+def test_a_profile_the_app_does_not_know_is_asked_again(repo):
+    r, log = wizard(repo, answers(profile=["Live", "drive"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [line for line in log if "APP_PROFILE" in line] == ["set-env .env APP_PROFILE=drive"]
+
+
+def test_the_profiles_the_wizard_offers_exist():
+    from app.main import PROFILES
+    assert {"mock", "drive", "live"} <= set(PROFILES)

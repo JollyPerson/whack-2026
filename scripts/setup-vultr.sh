@@ -220,6 +220,15 @@ CI_KEY="$KEY_DIR/ci_key"
 as_root()   { ssh -n -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes "root@$VULTR_HOST" "$@"; }
 as_deploy() { ssh -i "$CI_KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes "deploy@$VULTR_HOST" "$@"; }
 set_remote() { printf '%s' "$3" | as_deploy "$APP_DIR/set-env.sh '$APP_DIR/$1' '$2'"; }
+# ask_valid KEY "Prompt" DEFAULT REGEX "Rule": like ask, with Enter meaning DEFAULT, until the answer matches REGEX.
+ask_valid() {
+  while :; do
+    ask "$1" "$2"
+    printf -v "$1" '%s' "${!1:-$3}"
+    [[ ${!1} =~ $4 ]] && return
+    warn "$5"
+  done
+}
 
 banner "Vultr deployment setup"
 
@@ -293,7 +302,8 @@ if [[ "$VULTR_DOMAIN" != "$SSLIP_DOMAIN" ]]; then
 fi
 set_remote .env DOMAIN "$VULTR_DOMAIN"
 
-ask BASIC_AUTH_USER "Site username (e.g. debate):"
+ask_valid BASIC_AUTH_USER "Site username (Enter for debate):" debate '^[A-Za-z0-9._-]+$' \
+  "Use only letters, digits, '.', '_' and '-'."
 write_env BASIC_AUTH_USER "$BASIC_AUTH_USER"
 set_remote .env BASIC_AUTH_USER "$BASIC_AUTH_USER"
 say "Everything except /health sits behind this login, because the app has no auth of its own."
@@ -318,8 +328,8 @@ fi
 stage "App profile and API keys"
 say "Profiles are listed in the README. 'mock' needs no keys and spends nothing."
 say "Once the keys below are set: 'drive' plays the recorded debate through the real pipeline, 'live' uses the mics."
-ask APP_PROFILE "Profile: mock, drive or live (Enter for mock on a first run):"
-APP_PROFILE=${APP_PROFILE:-mock}
+ask_valid APP_PROFILE "Profile: mock, drive or live (Enter for mock on a first run):" mock '^(mock|drive|live)$' \
+  "Choose mock, drive or live."
 write_env APP_PROFILE "$APP_PROFILE"
 set_remote .env APP_PROFILE "$APP_PROFILE"
 say "Keys are stored only on the server, in $APP_DIR/app.env. Press Enter to skip or keep what's there."
