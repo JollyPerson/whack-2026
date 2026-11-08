@@ -72,17 +72,23 @@ BOTS=real ./run.sh live                    # or drive, mock, ...
 ```
 
 - A sourced Verdict becomes a `rebut` that names its source ("The ONS says 4.2%, not 6%. Try again."). Without one,
-  Claude checks the claim from its own knowledge and, only when confident (`BOTS_CHECK_MIN_CONF`, 0.80), posts a
-  line ending "(unsourced)": a `challenge` when the claim looks wrong ("6%? Last I checked, it was nearer 4%.") or
-  true but misrepresented ("True, but that's against a modelled baseline."), or, rarely, a grudging `concede` when
-  it is true but widely believed false ("Annoyingly, that one checks out."). At most one of these per claim, and
-  never against the claim's Verdict. Otherwise a `followup` question. Every check result is logged at INFO
-  ("bots: check c7: misleading 0.79 -> not fired: below 0.80"), to tune the bar at rehearsal.
+  Claude checks the claim from its own knowledge and, only when confident, posts a line ending "(unsourced)": a
+  `challenge` when the claim looks wrong ("6%? Last I checked, it was nearer 4%.", `BOTS_CHECK_MIN_CONF`, 0.80) or
+  true but misrepresented ("True, but that's against a modelled baseline.", its own bar `BOTS_MISLEADING_MIN_CONF`,
+  0.60: Opus rates those at about 0.60), or, rarely, a grudging `concede` when it is true but widely believed false
+  ("Annoyingly, that one checks out.", 0.80). At most one of these per claim, and never against the claim's
+  Verdict. Otherwise a `followup` question. Every check result is logged at INFO with the bar that applied
+  ("bots: check c7: misleading 0.59 (misleading bar 0.60) -> not fired: below the bar"), to tune at rehearsal.
+- The brain's consistency checker feeds them too: a self-contradiction gets a `uturn` from the other side's bot,
+  quoting both claims as said ("Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?"), and a concession a
+  `conceded` from the bot whose point was granted ("Noted: you just conceded the cost point."). The debater's own
+  words, so no "(unsourced)" tag. Agreements and corrections get no line.
 - Unanswered points get a `nudge`. The bots trade a dry `banter` line at most every `BOTS_BANTER_GAP_S` (20 s),
   only while nothing more important is running or queued for either bot (`BOTS_BANTER=0` turns it off).
-  Priority: rebut > challenge > concede > nudge > followup > banter.
+  Priority: rebut > uturn > challenge > concede > nudge > conceded > followup > banter.
 - Each bot posts at most one bubble every `BOTS_MIN_GAP_S` (10 s). The admin flag `bots` pauses both; mute hides
-  everything. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
+  everything; the final screen pauses them until "Back to live" or the next session, so no bubble interrupts the
+  verdict dances. Tunables are the `BOTS_*` names in `app/config.py` and `.env.example`.
 - They use the same Anthropic key as the brain (`BOTS_MODEL` for follow-ups and banter, `BOTS_CHECK_MODEL` for the
   check). With no LLM they still rebut, nudge and ask template follow-ups, but never challenge, concede or banter.
 

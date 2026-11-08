@@ -1,4 +1,5 @@
-"""app/bots: the For/Against side bots (wording, guards, pacing, the claim pipeline, nudges, banter, wiring).
+"""app/bots: the For/Against side bots (wording, guards, pacing, the claim pipeline, nudges, U-turns and concessions,
+banter, the final screen, wiring).
 
 The engine runs on a fake clock that only moves when a test says so (the pacer's gaps, TTLs and hold_s); asyncio
 waits (the verdict wait, LLM calls) stay real but tiny. The LLM is a FakeLLM with canned answers, never the network.
@@ -18,8 +19,8 @@ from app.bots.run import Bots
 from app.bots.writer import Writer
 from app.brain.llm import AnthropicLLM, LLMTimeout
 from app.bus import Bus
-from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Control, Evidence, MapNode, Numeric, SessionStart,
-                         SpeakerInfo, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, BotTalk, Claim, Consistency, Control, Evidence, MapNode, Numeric,
+                         SessionStart, SpeakerInfo, Verdict)
 
 T0 = 1_762_600_000.0
 ONS = [Evidence(url="https://www.ons.gov.uk/x", title="Labour market overview", quote="the rate was 4.2%")]
@@ -30,7 +31,7 @@ SPEAKERS = {"A": SpeakerInfo(name="Alice Archer", side="prop"), "B": SpeakerInfo
 def _tunables(monkeypatch):
     monkeypatch.setattr(config, "FLAGS", {"bots": True})
     for k, v in dict(BOTS_MIN_GAP_S=10.0, BOTS_LINE_TTL_S=30.0, BOTS_VERDICT_WAIT_S=0.05, BOTS_CHECK_MIN_CONF=0.80,
-                     BOTS_BANTER=False, BOTS_BANTER_GAP_S=20.0).items():
+                     BOTS_MISLEADING_MIN_CONF=0.60, BOTS_BANTER=False, BOTS_BANTER_GAP_S=20.0).items():
         monkeypatch.setattr(config, k, v)
 
 
@@ -174,6 +175,7 @@ async def test_a_capped_verdict_is_not_sourced_so_the_knowledge_check_answers():
 
 
 @pytest.mark.parametrize("check,kind", [
+    (false_check(0.60), "followup"),                       # a contested claim: the misleading bar is not its bar
     (false_check(0.79), "followup"),                       # below BOTS_CHECK_MIN_CONF: no challenge
     (false_check(0.80), "challenge"),
     (false_check("90%"), "challenge"),                     # percentages are read as 0..1
@@ -228,7 +230,7 @@ ULEZ = "London's ULEZ cut nitrogen dioxide in central London by 46 per cent."
 STROKE = "Lightning often strikes the same place twice."
 
 
-@pytest.mark.parametrize("conf,kind", [(0.79, "followup"), (0.80, "challenge"), (0.95, "challenge")])
+@pytest.mark.parametrize("conf,kind", [(0.59, "followup"), (0.60, "challenge"), (0.95, "challenge")])   # own bar
 @pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
 async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bot(conf, kind, spk, side, persona):
     bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=misleading_check(conf)))
@@ -240,6 +242,18 @@ async def test_a_misleading_claim_gets_a_true_but_challenge_from_the_opposing_bo
         assert b.text == "True, but that's against a modelled baseline. (unsourced)"
     else:
         assert "(unsourced)" not in b.text
+
+
+@pytest.mark.parametrize("check,kind", [
+    (misleading_check(0.85), "followup"), (misleading_check(0.90), "challenge"),
+    (false_check(0.85), "challenge"), (surprising_check(0.85), "concede"),
+])
+async def test_the_misleading_bar_and_the_check_bar_are_tuned_apart(check, kind):
+    config.BOTS_MISLEADING_MIN_CONF = 0.90                                    # above BOTS_CHECK_MIN_CONF (0.80)
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=check))
+    bots.handle(C("c1", text=ULEZ))
+    await settle(bots)
+    assert [b.kind for b in said(out)] == [kind]
 
 
 @pytest.mark.parametrize("line,text", [
@@ -356,12 +370,13 @@ async def test_knowledge_drops_a_line_against_every_verdict_label_it_would_contr
 
 
 @pytest.mark.parametrize("check,verdict,kind,log", [
-    (false_check(), dict(), "rebut", "likely_false 0.95 -> not fired: sourced verdict"),
+    (false_check(), dict(), "rebut", "likely_false 0.95 (check bar 0.80) -> not fired: sourced verdict"),
     (surprising_check(), dict(guard_notes=CAPPED), "followup",
-     "surprising_true 0.90 -> not fired: the Verdict says contradicted"),
-    (misleading_check(), dict(label="supported"), "followup", "misleading 0.90 -> not fired: supported verdict"),
-    (misleading_check(), dict(label="missing_context", guard_notes=CAPPED), "challenge", "misleading 0.90 -> fired "
-                                                                                         "challenge"),
+     "surprising_true 0.90 (check bar 0.80) -> not fired: the Verdict says contradicted"),
+    (misleading_check(), dict(label="supported"), "followup",
+     "misleading 0.90 (misleading bar 0.60) -> not fired: supported verdict"),
+    (misleading_check(), dict(label="missing_context", guard_notes=CAPPED), "challenge",
+     "misleading 0.90 (misleading bar 0.60) -> fired challenge"),
 ])
 async def test_a_verdict_that_comes_in_while_the_check_outlasts_the_wait_still_wins(caplog, check, verdict, kind, log):
     caplog.set_level(logging.INFO, logger="bots")
@@ -394,19 +409,31 @@ def test_one_fact_line_per_claim_across_rebut_challenge_and_concede():
 
 def test_priority_order():
     assert sorted(lines.PRIORITY, key=lines.PRIORITY.get, reverse=True) == [
-        "rebut", "challenge", "concede", "nudge", "followup", "banter"]
-    assert lines.FACT_KINDS == ("rebut", "challenge", "concede")
+        "rebut", "uturn", "challenge", "concede", "nudge", "conceded", "followup", "banter"]
+    assert lines.FACT_KINDS == ("rebut", "challenge", "concede") and lines.TAGGED == ("challenge", "concede")
+    p = Pacer(min_gap=10, ttl=600)
+    p.push(L(text="First?"), 0)
+    p.tick(0)
+    for kind in ("followup", "conceded", "concede", "nudge", "uturn", "challenge", "rebut"):
+        tag = " (unsourced)" if kind in lines.TAGGED else ""
+        assert p.push(L(text=f"A {kind} line.{tag}", kind=kind, claim_id=f"c-{kind}"), 1)
+    assert [p.queued("for")[0].kind, len(p.queued("for"))] == ["followup", 7]
+    assert [b.kind for t in range(10, 80, 10) for b in p.tick(t) if isinstance(b, BotLine)] == [
+        "rebut", "uturn", "challenge", "concede", "nudge", "conceded", "followup"]
 
 
 @pytest.mark.parametrize("check,verdict,want", [
-    (false_check(0.95), None, "bots: check c1: likely_false 0.95 -> fired challenge"),
-    (misleading_check(0.79), None, "bots: check c1: misleading 0.79 -> not fired: below 0.80"),
-    (surprising_check(0.9), None, "bots: check c1: surprising_true 0.90 -> fired concede"),
+    (false_check(0.95), None, "bots: check c1: likely_false 0.95 (check bar 0.80) -> fired challenge"),
+    (false_check(0.60), None, "bots: check c1: likely_false 0.60 (check bar 0.80) -> not fired: below the bar"),
+    (misleading_check(0.59), None, "bots: check c1: misleading 0.59 (misleading bar 0.60) -> not fired: below the bar"),
+    (misleading_check(0.60), None, "bots: check c1: misleading 0.60 (misleading bar 0.60) -> fired challenge"),
+    (surprising_check(0.9), None, "bots: check c1: surprising_true 0.90 (check bar 0.80) -> fired concede"),
+    (surprising_check(0.79), None, "bots: check c1: surprising_true 0.79 (check bar 0.80) -> not fired: below the bar"),
     (check_answer("likely_true", 0.99), None, "bots: check c1: likely_true 0.99 -> not fired: likely_true"),
     (false_check(0.9, challenge="", correction="that is wrong"), None,
-     "bots: check c1: likely_false 0.90 -> not fired: dropped by the guards"),
-    (surprising_check(0.9), "contradicted", "bots: check c1: surprising_true 0.90 -> not fired: the Verdict says "
-                                            "contradicted"),
+     "bots: check c1: likely_false 0.90 (check bar 0.80) -> not fired: dropped by the guards"),
+    (surprising_check(0.9), "contradicted", "bots: check c1: surprising_true 0.90 (check bar 0.80) -> not fired: the "
+                                            "Verdict says contradicted"),
     (false_check(0.9), "supported", "bots: check c1: no result -> not fired: supported verdict"),
     (None, None, "bots: check c1: no result -> not fired: no answer (timeout or error)"),
 ])
@@ -432,7 +459,7 @@ async def test_the_check_log_line_shows_a_finished_check_that_a_sourced_verdict_
     await settle(bots, 1.0)
     assert [b.kind for b in said(out)] == ["rebut"]
     assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [
-        "bots: check c1: misleading 0.80 -> not fired: sourced verdict"]
+        "bots: check c1: misleading 0.80 (misleading bar 0.60) -> not fired: sourced verdict"]
 
 
 # ----------------------------------------------------------------------------- follow-ups
@@ -658,6 +685,143 @@ async def test_no_nudge_from_a_turn_that_is_still_open():
     bots.handle(ArgMapSnapshot(version=2, nodes=nodes, nonresponsive=[{**open_turn, "final": True}]))
     [b] = said(out)
     assert (b.kind, b.persona, b.target, b.claim_id) == ("nudge", "for", "B", "c1")
+
+
+# ----------------------------------------------------------------------------- the debate record (Consistency)
+OTHER_SIDE = {"prop": "opp", "opp": "prop"}
+
+
+def K(kid, kind="self_contradiction", side="opp", spk="B", then="cut it by 6%", now="about 4%", topic="", **kw):
+    """A Consistency finding: claim c2 (by `side`) against the earlier c1 (same side for a U-turn or a correction)."""
+    kw.setdefault("earlier_side", side if kind in ("self_contradiction", "correction") else OTHER_SIDE[side])
+    return Consistency(id=kid, kind=kind, claim_id="c2", earlier_claim_id="c1", side=side, speaker=spk, then=then,
+                       now=now, topic=topic, explanation="The same side gave a different figure.", confidence=0.9, **kw)
+
+
+UTURN_TEXT = "Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?"
+
+
+@pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
+async def test_a_self_contradiction_gets_a_uturn_from_the_opposing_bot_quoting_both_claims(spk, side, persona):
+    bots, out, clock = make(fast=FakeLLM(), check=FakeLLM(check=false_check()))
+    bots.handle(K("k1", side=side, spk=spk, then="We would cut it by 6%.", now="about 4%"))
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.claim_id, b.sourced, b.evidence) == ("uturn", persona, spk, "c2", False, [])
+    assert lines.OWN_SIDE[persona] != side
+    assert b.text == "Earlier: 'We would cut it by 6%'. Now: 'about 4%'. Which is it?"   # both quotes verbatim
+    assert "unsourced" not in b.text.lower() and len(b.text.split()) <= 18 and b.hold_s == lines.hold_s(b.text)
+    assert bots.writer.fast.calls == [] and bots.writer.checker.calls == []             # a template: no LLM
+
+
+def test_a_uturn_trims_long_quotes_with_an_ellipsis_keeping_their_figures():
+    then = "Our plan would cut child poverty by 6% within two years of taking office, and it is fully costed."
+    now = "In fact the figure we gave was about 4% over the parliament as a whole."
+    text = lines.uturn(then, now)
+    assert text == ("Earlier: '…child poverty by 6% within two…'. Now: '…gave was about 4% over the parliament…'. "
+                    "Which is it?")
+    assert len(text.split()) == lines.REBUT_MAX_WORDS
+    assert lines.uturn("cut it by 6%", now) == \
+        "Earlier: 'cut it by 6%'. Now: 'In fact the figure we gave was about 4%…'. Which is it?"   # the rest
+    assert lines.excerpt("one two three four", 4) == "one two three four" and lines.excerpt("a b c", 0) == ""
+    assert lines.excerpt("a b c d e f", 3) == "a b c…"
+    assert lines.guard(" ".join(["word"] * 18), "uturn") and not lines.guard(" ".join(["word"] * 19), "uturn")
+    assert lines.guard("Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?", "uturn", "cut it by 6%") is None
+
+
+def test_a_uturn_whose_quotes_fail_the_guards_drops_them():
+    plain = "That's not what you said earlier. Which is it?"
+    assert lines.uturn("That figure is false", "about 4%") == plain                      # a judgement word
+    assert lines.uturn("Bob admits it fell by 6%", "about 4%", names=["Bob"]) == plain   # a debater's name
+    assert lines.uturn("", "about 4%") == plain
+    assert lines.uturn("cut it by 6%", "about 4%", used=[UTURN_TEXT]) == "You said 'cut it by 6%'. Now it's 'about 4%'?"
+    assert lines.uturn("cut it by 6%", "about 4%", used=[UTURN_TEXT, "You said 'cut it by 6%'. Now it's 'about 4%'?",
+                                                           plain]) is None
+
+
+@pytest.mark.parametrize("spk,side,persona", [("B", "opp", "for"), ("A", "prop", "against")])
+async def test_a_concession_gets_conceded_from_the_bot_whose_point_was_granted(spk, side, persona):
+    bots, out, clock = make()
+    bots.handle(K("k1", "concession", side=side, spk=spk, then="childcare costs rose", topic="childcare costs",
+                  now="I'll grant that childcare costs rose"))
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.claim_id, b.sourced) == ("conceded", persona, spk, "c2", False)
+    assert lines.OWN_SIDE[persona] == OTHER_SIDE[side]                                  # the conceded-to side
+    assert b.text == "Noted: you just conceded the childcare costs point." and "unsourced" not in b.text.lower()
+
+
+def test_conceded_wording():
+    assert lines.conceded("cost") == "Noted: you just conceded the cost point."
+    assert lines.conceded("") == lines.conceded("absurd claims") == "Noted: you just conceded our point."
+    assert lines.conceded("The 6% target", "about 6%") == "Noted: you just conceded the 6% target point."
+    assert lines.conceded("the 9% target", "about 6%") == "Noted: you just conceded our point."   # not their figure
+    assert lines.conceded("cost", used=["Noted: you just conceded the cost point."]) == \
+        "So you grant the cost point. Noted."
+
+
+async def test_conceded_takes_the_earlier_claims_topic_when_the_finding_has_none():
+    bots, out, clock = make()
+    bots.handle(C("c1", "A", "prop", "Tuition debt tops 45,000 pounds.", topic="graduate debt", typ="value",
+                  checkable=False, imp=0.3))
+    bots.handle(K("k1", "concession", then="Tuition debt tops 45,000 pounds", now="that debt figure is right"))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target, b.text) == ("conceded", "for", "B", "Noted: you just conceded the graduate "
+                                                                             "debt point.")
+
+
+@pytest.mark.parametrize("finding", [
+    K("k1", "agreement"), K("k1", "correction"),
+    K("k1", "concession", earlier_side="opp"),                    # a concession to your own side: malformed
+    K("k1", earlier_side="prop"),                                 # a U-turn against the other side: malformed
+    K("k1", side=None, spk=None),                                 # no side, and no claim to take it from
+])
+async def test_agreements_corrections_and_malformed_findings_get_no_line(finding):
+    bots, out, clock = make()
+    bots.handle(finding)
+    clock.t += 30
+    bots.tick()
+    assert said(out) == [] and bots.findings == {"k1"}
+
+
+async def test_a_findings_side_and_speaker_default_to_its_claims():
+    bots, out, clock = make()
+    bots.handle(C("c2", "A", "prop", "It is about 4%.", typ="value", checkable=False, imp=0.3))
+    bots.handle(K("k1", side=None, spk=None, earlier_side=None))
+    await settle(bots)
+    [b] = said(out)
+    assert (b.kind, b.persona, b.target) == ("uturn", "against", "A")
+
+
+async def test_one_line_per_consistency_finding(caplog):
+    caplog.set_level(logging.INFO, logger="bots")
+    bots, out, clock = make()
+    bots.handle(K("k1"))
+    clock.t += 30
+    bots.handle(K("k1"))                                          # re-sent: the same finding
+    bots.tick()
+    assert [b.text for b in said(out)] == [UTURN_TEXT]
+    bots.handle(K("k2"))                                          # another pair, the same words: never the same text
+    clock.t += 30
+    bots.tick()
+    assert [b.text for b in said(out)] == [UTURN_TEXT, "You said 'cut it by 6%'. Now it's 'about 4%'?"]
+    assert [r.getMessage() for r in caplog.records if r.name == "bots"] == [
+        "bots: self_contradiction k1 by opp -> uturn queued", "bots: self_contradiction k2 by opp -> uturn queued"]
+
+
+async def test_a_uturn_jumps_the_queue_but_never_cuts_a_bubble():
+    config.BOTS_LINE_TTL_S = 60.0
+    bots, out, clock = make()
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c3", typ="causal", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    bots.handle(K("k1", "concession", then="wages rose", now="I accept wages rose", topic="wages"))
+    bots.handle(K("k2"))
+    assert [b.kind for b in said(out)] == ["followup"]            # For's bubble is still up
+    assert sorted(b.kind for b in bots.pacer.queued("for")) == ["conceded", "followup", "uturn"]
+    for _ in range(3):
+        clock.t += 10
+        bots.tick()
+    assert [b.kind for b in said(out)] == ["followup", "uturn", "conceded", "followup"]
 
 
 # ----------------------------------------------------------------------------- banter
@@ -926,6 +1090,53 @@ async def test_bots_false_or_mute_stops_posting_and_drops_queues(flag):
     assert len(said(out)) == 2
 
 
+@pytest.mark.parametrize("how", ["live", "session"])
+async def test_the_final_screen_pauses_the_bots_until_live_or_a_new_session(how):
+    config.BOTS_VERDICT_WAIT_S = 5.0
+    bots, out, clock = make()
+    bots.handle(C("c1", typ="value", checkable=False, text="Markets know best."))
+    bots.handle(C("c2", typ="value", checkable=False, text="Regulation always backfires."))
+    await settle(bots)
+    first = said(out)[0]
+    bots.handle(C("c3"))                                                        # waiting for its Verdict
+    await asyncio.sleep(0.01)
+    assert bots.tasks and bots.pending == {"c3"} and bots.pacer.queued("for")
+    bots.handle(Control(flag="screen", value="final"))
+    [talk] = [e for e in out if e.event == "BotTalk"]                            # the open mouth closes now
+    assert talk.line_id == first.id and bots.pacer.queued("for") == [] and bots.pending == set()
+    assert bots.paused and bots.enabled and not bots.muted                      # the operator's flags untouched
+    await asyncio.sleep(0.01)
+    assert not bots.tasks
+    bots.handle(K("k1"))                                          # the summary's catch-up finds a U-turn
+    bots.handle(C("c4", typ="value", checkable=False, text="Unions protect nobody."))
+    bots.handle(V("c3"))
+    clock.t += 60
+    bots.tick()
+    assert len(said(out)) == 1 and not bots.tasks
+    if how == "live":
+        bots.handle(Control(flag="screen", value="live"))
+    else:
+        bots.handle(SessionStart(motion="Another motion", speakers=SPEAKERS))
+    assert not bots.paused and not bots.pacer.paused
+    bots.handle(K("k1"))                                          # live: seen at the final screen, never posted late
+    bots.handle(C("c5", typ="value", checkable=False, text="Tariffs protect jobs."))
+    await settle(bots)
+    assert [b.kind for b in said(out)] == ["followup"] + (["followup"] if how == "live" else ["uturn"])
+
+
+async def test_leaving_the_final_screen_keeps_the_operators_bots_switch():
+    bots, out, clock = make()
+    bots.handle(Control(flag="bots", value=False))
+    bots.handle(Control(flag="screen", value="final"))
+    bots.handle(Control(flag="screen", value="live"))
+    assert bots.paused and not bots.enabled
+    bots.handle(Control(flag="screen", value="final"))
+    bots.handle(Control(flag="bots", value=True))
+    assert bots.paused and bots.final                                           # still the final screen
+    bots.handle(SessionStart(motion="Another motion", speakers=SPEAKERS))
+    assert not bots.paused and not bots.pacer.paused
+
+
 async def test_operator_switch_set_before_the_bots_start_is_honoured(monkeypatch):
     monkeypatch.setattr(config, "FLAGS", {"bots": False})
     bots, out, clock = make()
@@ -952,6 +1163,28 @@ async def test_restore_after_a_crash_remembers_what_was_said():
     assert [b.text for b in said(out2)] == ["Says who, and why?"]
     again.handle(ArgMapSnapshot(version=6, nodes=[node("c5", "prop", "unanswered")]))
     assert len(said(out2)) == 1                                                 # already unanswered: no nudge
+
+
+async def test_restore_remembers_the_findings_and_the_final_screen():
+    bots, out, clock = make()
+    bots.handle(K("k1"))
+    [b] = said(out)
+    start = SessionStart(motion="m", speakers=SPEAKERS, ts=T0)
+    history = [start, K("k1"), b, K("k2", "agreement"), Control(flag="screen", value="final")]
+    again, out2, clock2 = make()
+    again.restore(history)
+    assert again.findings == {"k1", "k2"} and again.paused and again.pacer.paused and again.enabled
+    again.handle(Control(flag="screen", value="live"))
+    again.handle(K("k1"))                                         # answered before the crash
+    clock2.t += 30
+    again.tick()
+    assert said(out2) == []
+    again.handle(K("k3"))                                         # a new finding, the same words: not the same text
+    assert [x.text for x in said(out2)] == ["You said 'cut it by 6%'. Now it's 'about 4%'?"]
+    for tail, paused in (([Control(flag="screen", value="live")], False), ([start], False), ([], True)):
+        again, out2, clock2 = make()
+        again.restore(history + tail)
+        assert (again.paused, again.pacer.paused) == (paused, paused)
 
 
 async def test_restore_closes_a_mouth_the_crash_left_open():
@@ -1040,6 +1273,30 @@ async def test_module_on_the_bus_answers_and_survives_a_failing_handler(monkeypa
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_module_on_the_bus_heckles_a_u_turn_and_pauses_at_the_final_screen(monkeypatch):
+    from app.bots import run as bots_run
+    monkeypatch.setattr(writer_mod, "make_writer", lambda: Writer(None, None))
+    bus = Bus()
+    task = asyncio.create_task(bots_run.run(bus))
+
+    def lines_() -> list[BotLine]:
+        return [e for e in bus.history if e.event == "BotLine"]
+
+    try:
+        await wait_for(lambda: any(e.event == "ModuleStatus" and e.module == "bots" for e in bus.history))
+        bus.publish(SessionStart(motion="m", speakers=SPEAKERS))
+        bus.publish(K("k1"), src="brain")
+        [b] = await wait_for(lines_)
+        assert (b.src, b.kind, b.persona, b.target, b.text) == ("bots", "uturn", "for", "B", UTURN_TEXT)
+        bus.publish(Control(flag="screen", value="final"))
+        bus.publish(K("k2", side="prop", spk="A"), src="brain")
+        await asyncio.sleep(0.1)
+        assert len(lines_()) == 1 and not task.done()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def test_main_starts_the_bots_only_with_bots_real(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import main as mainmod
@@ -1076,7 +1333,8 @@ def test_tunable_defaults():
     import sys
     from pathlib import Path
     env = {k: v for k, v in os.environ.items() if not k.startswith("BOTS_")} | {"DEBATE_REF_NO_DOTENV": "1"}
-    code = "from app import config as c; print(c.BOTS_CHECK_MIN_CONF, c.BOTS_BANTER_GAP_S, c.BOTS_MIN_GAP_S)"
+    code = ("from app import config as c; "
+            "print(c.BOTS_CHECK_MIN_CONF, c.BOTS_MISLEADING_MIN_CONF, c.BOTS_BANTER_GAP_S, c.BOTS_MIN_GAP_S)")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60, env=env,
                          cwd=Path(__file__).resolve().parent.parent, check=True).stdout
-    assert out.split() == ["0.8", "20.0", "10.0"]
+    assert out.split() == ["0.8", "0.6", "20.0", "10.0"]

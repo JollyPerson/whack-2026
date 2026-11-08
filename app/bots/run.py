@@ -1,20 +1,26 @@
 """The side bots, wired onto the bus. Owner: B. Runs only with BOTS=real (no profile starts it).
 
-Consumes: SessionStart, Claim, Verdict, ArgMapSnapshot, Control, BotLine
+Consumes: SessionStart, Claim, Verdict, ArgMapSnapshot, Consistency, Control, BotLine
 Produces: BotLine, BotTalk (src="bots"), ModuleStatus(bots)
 
 The For bot is Prop's second and answers Opp's claims; the Against bot mirrors it (Claim.side, set by the brain).
 A claim with no side is ignored, and a bot never answers its own side. Per opponent claim:
 - checkable and important: Claude's own-knowledge check starts at once (hiding its latency) while the bot waits up
   to BOTS_VERDICT_WAIT_S for the claim's Verdict. A sourced Verdict (lines.sourced) -> "rebut" quoting its source.
-  Supported -> no fact line. Otherwise, with confidence >= BOTS_CHECK_MIN_CONF, the check's assessment decides,
-  every line tagged "(unsourced)": likely_false -> "challenge" with Claude's correction; misleading (true figure,
-  misrepresented) -> a "True, but ..." "challenge"; surprising_true (a well-known misconception) -> a grudging
-  "concede". A check that disagrees with the claim's Verdict label is dropped. At most one fact line per claim.
+  Supported -> no fact line. Otherwise the check's assessment decides, every line tagged "(unsourced)":
+  likely_false -> "challenge" with Claude's correction; surprising_true (a well-known misconception) -> a grudging
+  "concede", both only with confidence >= BOTS_CHECK_MIN_CONF; misleading (true figure, misrepresented) -> a
+  "True, but ..." "challenge" from BOTS_MISLEADING_MIN_CONF, its own bar. A check that disagrees with the claim's
+  Verdict label is dropped. At most one fact line per claim.
 - no fact line and important -> "followup": a pointed question (Claude, else a template by claim type).
 - not checkable but important (arguments, predictions) -> "followup" straight away.
 Nudges: when one of a bot's OWN side's points turns unanswered in the ArgMapSnapshot (or is listed as ignored by a
 finished non-responsive turn), that bot nudges the opponent: "Still waiting on the cost point."
+The debate record (the brain's Consistency findings, already over CONSISTENCY_MIN_CONF), one line per finding:
+- self_contradiction by side X -> the bot opposing X posts a "uturn" to X's speaker, quoting both claims verbatim
+  from the finding: "Earlier: 'cut it by 6%'. Now: 'about 4%'. Which is it?"
+- concession by side X -> the bot of the side whose point X granted posts "conceded": "Noted: you just conceded the
+  cost point." Agreements and corrections get no line. Not AI knowledge: the debater's own words, so no tag.
 Banter (BOTS_BANTER), lowest priority: after one bot posts a non-banter line, at most once per BOTS_BANTER_GAP_S
 across both, the other bot may answer it with one dry line. It starts only when nothing important is running or
 waiting: no claim being answered for either bot (its knowledge check, its Verdict wait or its line being written),
@@ -22,7 +28,9 @@ no non-banter line queued for either bot, and the replying bot idle; all of it i
 written, before it is queued. If that only comes true later, it may still start within BANTER_FRESH_S of the line.
 A queued banter is dropped when a real line for its bot is ready first or a claim for its bot comes in, and then
 gives the gap back. Banter is never answered.
-Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); SessionStart resets everything.
+Control bots=false or mute=true pauses the bots (queues and in-flight work dropped); so does the final screen
+(Control screen=final), until screen=live or the next SessionStart, so no bubble cuts into the verdict and its
+dances. SessionStart resets everything.
 A crash-restart rebuilds what was already said from the bus history, silently; it only closes a mouth left open.
 """
 from __future__ import annotations
@@ -37,13 +45,15 @@ from app.bots import lines
 from app.bots.pacer import Pacer
 from app.bots.writer import Writer
 from app.brain.director import truthy
-from app.schemas import (ArgMapSnapshot, BotLine, Claim, Control, Event, ModuleStatus, SessionStart, Verdict)
+from app.schemas import (ArgMapSnapshot, BotLine, Claim, Consistency, Control, Event, ModuleStatus, SessionStart,
+                         Verdict)
 
 log = logging.getLogger("bots")
 CHECK_KIND = {"likely_false": "challenge", "misleading": "challenge", "surprising_true": "concede"}
 DISAGREES = {"likely_false": {"supported"},                     # check assessment -> the Verdict labels it would
              "misleading": {"supported", "contradicted"},         # contradict ("true, but" grants the figure)
              "surprising_true": {"contradicted", "missing_context"}}
+RECORD_KIND = {"self_contradiction": "uturn", "concession": "conceded"}   # Consistency kind -> line kind
 TICK_S = 0.25
 BANTER_TTL_S = 10.0       # a banter reply that can't post within this is stale
 BANTER_SOON_S = 3.0       # banter only goes to a bot that is free within this and has nothing queued
@@ -60,13 +70,12 @@ class Bots:
         self.pacer = Pacer(config.BOTS_MIN_GAP_S, config.BOTS_LINE_TTL_S, BANTER_TTL_S)
         self.enabled = truthy(config.FLAGS.get("bots", True))
         self.muted = truthy(config.FLAGS.get("mute", False))
-        self.pacer.paused = self.paused
         self.tasks: set[asyncio.Task] = set()
         self.reset()
 
     @property
     def paused(self) -> bool:
-        return not self.enabled or self.muted
+        return not self.enabled or self.muted or self.final
 
     def reset(self, ev: Optional[SessionStart] = None) -> None:
         self.cancel()
@@ -93,6 +102,9 @@ class Bots:
         self.banter_busy = False
         self.pending: set[str] = set()                # claims being answered (check, Verdict wait, line writing)
         self.cue: Optional[tuple[BotLine, float]] = None   # the latest real line banter may answer, and when
+        self.findings: set[str] = set()               # Consistency ids already seen: one line each, at most
+        self.final = False                            # the final screen is up: paused (the operator's flags kept)
+        self.pacer.paused = self.paused
 
     def cancel(self) -> None:
         for t in list(self.tasks):
@@ -120,6 +132,8 @@ class Bots:
             self.on_claim(ev)
         elif name == "ArgMapSnapshot":
             self.on_snapshot(ev)
+        elif name == "Consistency":
+            self.on_consistency(ev)
         elif name == "BotLine":
             self.on_botline(ev)
 
@@ -128,6 +142,8 @@ class Bots:
             self.enabled = truthy(ev.value)
         elif ev.flag == "mute":
             self.muted = truthy(ev.value)
+        elif ev.flag == "screen":
+            self.final = final_screen(ev.value)
         else:
             return
         if self.paused and not self.pacer.paused:
@@ -243,8 +259,8 @@ class Bots:
         kind = CHECK_KIND.get(res.assessment)
         if kind is None:
             return "", None, res.assessment
-        if res.confidence < config.BOTS_CHECK_MIN_CONF:
-            return kind, None, f"below {config.BOTS_CHECK_MIN_CONF:.2f}"
+        if res.confidence < bar(res.assessment)[1]:
+            return kind, None, "below the bar"
         if verdict is not None and verdict.label in DISAGREES[res.assessment]:
             return kind, None, f"the Verdict says {verdict.label}"
         if res.assessment == "likely_false":
@@ -306,6 +322,33 @@ class Bots:
             return
         if persona not in due or n.importance > due[persona][0]:
             due[persona] = (n.importance, n, target)
+
+    # ------------------------------------------------------------------------------------------- the debate record
+    def on_consistency(self, k: Consistency) -> None:
+        """A U-turn or a concession from the brain's consistency checker: the bot opposing the side that made it
+        heckles that side's speaker, once per finding (see the module doc)."""
+        if k.id in self.findings:
+            return
+        self.findings.add(k.id)                       # seen while paused too: never posted late
+        kind = RECORD_KIND.get(k.kind)
+        if kind is None or self.paused:
+            return
+        claim, earlier = self.claims.get(k.claim_id), self.claims.get(k.earlier_claim_id)
+        side = str(k.side or getattr(claim, "side", "") or "").lower()
+        before = str(k.earlier_side or getattr(earlier, "side", "") or "").lower()
+        persona = lines.answering(side)
+        if persona is None or (before in lines.SECOND and (before == side) != (kind == "uturn")):
+            return                                    # a U-turn is your own; a concession is to the other side
+        if kind == "uturn":
+            text = lines.uturn(k.then, k.now, self.names, self.said)
+        else:
+            text = lines.conceded(k.topic or getattr(earlier, "topic", ""),
+                                  f"{k.then} {k.now} {getattr(earlier, 'text', '')}", self.names, self.said)
+        target = k.speaker or getattr(claim, "speaker", None)
+        fired = bool(text) and self.queue(self.session, persona=persona, text=text, kind=kind, target=target,
+                                          claim_id=k.claim_id)
+        log.info("bots: %s %s by %s -> %s", k.kind, k.id, side, f"{kind} queued" if fired else
+                 "not queued" if text else "dropped by the guards")
 
     # ------------------------------------------------------------------------------------------- banter
     def idle(self, persona: str, within: float = 0.0) -> bool:
@@ -382,8 +425,9 @@ class Bots:
         self.maybe_banter()
 
     def restore(self, history: list[Event]) -> None:
-        """After a crash-restart: the session, claims, verdicts, map statuses and lines already posted, silently.
-        A line whose BotTalk(on=false) the crash cut off still gets it, at its own ts + hold_s (or at the next tick)."""
+        """After a crash-restart: the session, claims, verdicts, map statuses, findings, the final screen and lines
+        already posted, silently. A line whose BotTalk(on=false) the crash cut off still gets it, at its own
+        ts + hold_s (or at the next tick)."""
         open_lines: dict[str, BotLine] = {}
         for ev in history:
             try:
@@ -408,17 +452,34 @@ class Bots:
                         self.banters.append(ev.text)
                 elif ev.event == "BotTalk" and ev.src == "bots" and not ev.on:
                     open_lines.pop(ev.line_id, None)
+                elif ev.event == "Consistency":
+                    self.findings.add(ev.id)              # answered (or not) before the crash
+                elif ev.event == "Control" and ev.flag == "screen":
+                    self.final = final_screen(ev.value)
             except Exception:
                 log.exception("bots: restore skipped %s", ev.event)
+        self.pacer.paused = self.paused
         for line in open_lines.values():
             self.pacer.close_at(line, line.ts + line.hold_s)
 
 
+def bar(assessment: str) -> tuple[str, float]:
+    """The confidence an assessment needs to fire, and its name for the log: a "True, but" (misleading) has its own
+    bar, as the check model rates a true but misrepresented figure lower than a plain error."""
+    if assessment == "misleading":
+        return "misleading bar", config.BOTS_MISLEADING_MIN_CONF
+    return "check bar", config.BOTS_CHECK_MIN_CONF
+
+
 def log_check(cid: str, res: Any, outcome: str) -> None:
-    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF at rehearsal: claim, assessment,
-    confidence, and whether a line fired (or why not)."""
+    """One INFO line per own-knowledge check, to tune BOTS_CHECK_MIN_CONF and BOTS_MISLEADING_MIN_CONF at
+    rehearsal: claim, assessment, confidence, the bar that applied (for an assessment that can fire), and whether a
+    line fired (or why not)."""
     if res is None:
         log.info("bots: check %s: no result -> %s", cid, outcome)
+    elif res.assessment in CHECK_KIND:
+        name, at = bar(res.assessment)
+        log.info("bots: check %s: %s %.2f (%s %.2f) -> %s", cid, res.assessment, res.confidence, name, at, outcome)
     else:
         log.info("bots: check %s: %s %.2f -> %s", cid, res.assessment, res.confidence, outcome)
 
@@ -426,6 +487,11 @@ def log_check(cid: str, res: Any, outcome: str) -> None:
 def finished(task: asyncio.Task) -> Any:
     """The task's result if it already finished cleanly, else None."""
     return task.result() if task.done() and not task.cancelled() and task.exception() is None else None
+
+
+def final_screen(value: Any) -> bool:
+    """Control(flag="screen"): "final" is the verdict screen; any other value ("live") is back to the debate."""
+    return str(value or "").strip().lower() == "final"
 
 
 def final_nr(snap: ArgMapSnapshot) -> list[dict]:
@@ -438,8 +504,8 @@ async def run(bus) -> None:
     from app.bots.writer import make_writer
 
     # Subscribe and snapshot the history in one synchronous step: every event is restored or handled live, once.
-    sub = bus.subscribe("bots", {"SessionStart", "Claim", "Verdict", "ArgMapSnapshot", "Control", "BotLine"},
-                        maxsize=512)
+    sub = bus.subscribe("bots", {"SessionStart", "Claim", "Verdict", "ArgMapSnapshot", "Consistency", "Control",
+                                 "BotLine"}, maxsize=512)
     history = list(bus.history)
     try:
         writer = await asyncio.to_thread(make_writer)   # SDK import (~1 s) off the shared event loop
