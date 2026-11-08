@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./run.sh [live|drive|mock|dev-a|dev-b|dev-c|dev-d|replay] [--file X] [--speed N] [--only Utterance Pause]
 #          [--all-sessions] [--max-gap S]
-# Per-role override: EARS|BRAIN|EVIDENCE|FACE = real|mock|off|external|pkg.module:function
+# Per-role override: EARS|BRAIN|EVIDENCE|FACE = real|mock|off|external|pkg.module:function; BOTS=real adds the side bots
 # SKIP_PIP=1 never runs pip (offline venue).
 set -euo pipefail
 cd "$(dirname "$0")"

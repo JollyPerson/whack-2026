@@ -8,6 +8,7 @@ Three ways for a teammate's part to join the bus (pick whatever fits your design
   3. Any language, HTTP:   POST /publish  with one event or a list of events
 Role implementations are chosen per profile and can be overridden per role with env vars:
   EARS=real|mock|off|external|some.module:function   (same for BRAIN, EVIDENCE, FACE)
+  BOTS=real                                           the side bots (app/bots): no profile starts them
 """
 from __future__ import annotations
 
@@ -40,6 +41,7 @@ MODULES = {   # role -> impl -> "module:function"; imported lazily so a broken i
     "brain":    {"real": "app.brain.run:run",    "mock": "app.mocks.mock_brain:run"},
     "evidence": {"real": "app.evidence.run:run", "mock": "app.mocks.mock_evidence:run"},
     "face":     {"real": "app.face.run:run"},
+    "bots":     {"real": "app.bots.run:run"},        # in no profile: runs only with BOTS=real
 }
 PROFILES = {
     "live":   dict(ears="real", brain="real", evidence="real", face="real"),
