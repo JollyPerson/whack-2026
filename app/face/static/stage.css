@@ -1,7 +1,8 @@
 :root {
   color-scheme: dark;
-  --bg: #0d1117; --panel: #161b22; --raise: #21262d; --line: #30363d;
-  --fg: #f0f3f6; --mute: #a3adb8;
+  --bg: #15100b; --panel: rgba(30, 22, 15, .78); --raise: rgba(52, 40, 29, .82); --line: rgba(201, 163, 92, .22);
+  --solid: #1e1610;   /* opaque panel for overlays */
+  --fg: #f6f0e6; --mute: #c4b6a2; --lane: rgba(12, 8, 5, .22);
   --prop: #4493f8; --opp: #d9772b;
   --ok: #3fb950; --bad: #ff6b6b; --warn: #e3b341; --unk: #8b949e;
   --bubble: #fffdf6; --bubble-fg: #1b1f24;
@@ -9,8 +10,9 @@
 }
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #f4f5f7; --panel: #ffffff; --raise: #eef0f3; --line: #cfd5dc;
-  --fg: #14181f; --mute: #57606a;
+  --bg: #f6f1e8; --panel: rgba(255, 252, 246, .84); --raise: rgba(241, 233, 220, .9); --line: rgba(120, 88, 48, .24);
+  --solid: #fffcf6;
+  --fg: #1d1710; --mute: #5c4f40; --lane: rgba(255, 250, 240, .3);
   --prop: #0b5cad; --opp: #b4500b;
   --ok: #1a7f37; --bad: #cf222e; --warn: #8f6200; --unk: #5f6b76;
   --bubble: #ffffff;
@@ -23,10 +25,17 @@ body {
   background: var(--bg); color: var(--fg);
   font: var(--text)/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
+/* The backdrop: a debating hall (hall.svg, Proposition benches left, Opposition right), blurred and dimmed so it sets
+   the scene without competing with the text. --veil is the dimming layer, tuned per theme for contrast. */
+:root { --veil: rgba(18, 12, 8, .74); --veil-top: rgba(18, 12, 8, .86); }
+:root[data-theme="light"] { --veil: rgba(246, 240, 230, .8); --veil-top: rgba(246, 240, 230, .9); }
+body::before, body::after { content: ''; position: fixed; z-index: -1; pointer-events: none; }
+body::before { inset: -3%; background: url(/static/hall.svg) center 40% / cover no-repeat; filter: blur(7px) saturate(.75); }
+body::after { inset: 0; background: linear-gradient(180deg, var(--veil-top), var(--veil) 28%, var(--veil) 80%, var(--veil-top)); }
 h1, h2, p { margin: 0; }
 a { color: inherit; }
 
-header { padding: .6em 1.2em .5em; border-bottom: 1px solid var(--line); text-align: center; }
+header { padding: .6em 1.2em .5em; text-align: center; }
 .eyebrow { color: var(--mute); font-size: .72em; letter-spacing: .08em; text-transform: uppercase; }
 .eyebrow a { margin-left: .6em; opacity: .7; }
 h1 { font-size: 1.6em; line-height: 1.15; font-weight: 650; text-wrap: balance; }
@@ -45,7 +54,7 @@ button.link { background: none; border: 0; padding: 0; margin-left: .6em; color:
 /* ---------- two halves ---------- */
 main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr minmax(15em, .72fr) 1fr; }
 .half { --side: var(--prop); position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
-  padding: .8em 1.2em; background: linear-gradient(180deg, color-mix(in srgb, var(--side) 12%, transparent), transparent 40%); }
+  padding: .8em 1.2em; }
 .half.opp { --side: var(--opp); }
 .divider { display: flex; align-items: center; justify-content: center; width: 2.6em;
   background: linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat; }
@@ -177,7 +186,7 @@ blockquote { margin: .35em 0; padding-left: .7em; border-left: .2em solid var(--
 .face svg { width: 100%; height: 100%; }
 .face .stick, .face .shadow, .face .wave, .face .glass { display: none; }
 
-footer { display: flex; justify-content: center; gap: 2em; flex-wrap: wrap; padding: .4em 1em; border-top: 1px solid var(--line);
+footer { display: flex; justify-content: center; gap: 2em; flex-wrap: wrap; padding: .4em 1em;
   color: var(--mute); font-size: .8em; }
 footer .who { display: inline-flex; align-items: center; gap: .35em; }
 footer b { color: var(--fg); }
@@ -192,7 +201,7 @@ footer b { color: var(--fg); }
 .setup { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; padding: 1em;
   background: rgba(0, 0, 0, .6); backdrop-filter: blur(3px); }
 .setup form { width: min(46em, 100%); max-height: 100%; overflow: auto; padding: 1.2em 1.4em; border-radius: 1em;
-  background: var(--panel); border: 1px solid var(--line); box-shadow: 0 1em 3em rgba(0, 0, 0, .5);
+  background: var(--solid); border: 1px solid var(--line); box-shadow: 0 1em 3em rgba(0, 0, 0, .5);
   display: flex; flex-direction: column; gap: .7em; font-size: .9em; }
 .setup h2 { font-size: 1.4em; }
 .setup .hint { color: var(--mute); font-size: .9em; }
@@ -221,9 +230,7 @@ footer b { color: var(--fg); }
 
 /* ---------- the centre lane: the wider picture ---------- */
 .centre { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: .7em .8em;
-  border-left: 1px solid var(--line); border-right: 1px solid var(--line);
-  background: linear-gradient(90deg, color-mix(in srgb, var(--prop) 7%, transparent), transparent 30%, transparent 70%,
-                                     color-mix(in srgb, var(--opp) 7%, transparent)); }
+  background: linear-gradient(90deg, transparent, var(--lane) 14%, var(--lane) 86%, transparent); }
 .centre-title { text-align: center; font-size: .72em; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--mute); }
 .uturns { display: flex; justify-content: space-between; align-items: baseline; margin: .3em .2em; font-weight: 800; }
 .uturns .prop { color: var(--prop); } .uturns .opp { color: var(--opp); }
@@ -232,7 +239,8 @@ footer b { color: var(--fg); }
 .cidle { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center;
   color: var(--mute); opacity: .6; font-size: .95em; padding: 0 1em; }
 .cactor { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; gap: .2em; overflow: hidden auto;
-  scrollbar-width: none; }   /* display-only: scrolls if it must, without a bar over the card */
+  scrollbar-width: none; padding-top: .6em; }   /* display-only: scrolls if it must, without a bar over the card.
+                                                  The top padding is headroom for the tilted sign's raised corner */
 .cactor .figure { width: clamp(5em, 36%, 7.5em); padding-top: 2.5em; animation: pop-in .7s cubic-bezier(.2, 1.6, .4, 1) both; }
 .cactor .sign { font-size: .85em; }
 .cactor .nametag { font-size: 1em; }
