@@ -498,3 +498,82 @@ def test_falling_behind_is_reported(capsys):
     state["audio"].add(np.zeros(ears.SAMPLE_RATE, dtype=np.float32))
     ears.transcribe_source(FakeModel([]), "mic1", state, ARGS, None)    # overlapping windows: all heard
     assert "behind" not in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------------- scripts/ears-two-mics.sh
+SOURCES = """\
+28058\talsa_output.pci-0000_00_1f.3.HiFi__Speaker__sink.monitor\tPipeWire\ts32le 2ch 48000Hz\tRUNNING
+28063\talsa_input.pci-0000_00_1f.3.HiFi__Mic1__source\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+31000\tMicYouVirtualSink.monitor\tPipeWire\tfloat32le 2ch 48000Hz\tRUNNING
+31001\talsa_input.usb-Samson_Technologies_Samson_Meteor_Mic-00.analog-stereo\tPipeWire\ts16le 2ch 48000Hz\tIDLE
+"""
+USB = "alsa_input.usb-Samson_Technologies_Samson_Meteor_Mic-00.analog-stereo"
+
+
+def launcher_tree(tmp_path, ears_body='echo \'{"type": "sentence"}\'', default_sink="alsa_output.pci.HiFi__Speaker__sink"):
+    """A copy of the launcher with fake uv and pactl: uv's ears prints a sentence (or runs ears_body), its bridge
+    saves what it reads to bridge.in."""
+    import shutil
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "ears").mkdir()
+    shutil.copy2(ROOT / "scripts" / "ears-two-mics.sh", tmp_path / "scripts")
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "uv").write_text(f'#!/usr/bin/env bash\ncase "$*" in\n  *ears.py*) {ears_body} ;;\n'
+                             f'  *bridge.py*) cat > "{tmp_path}/bridge.in" ;;\nesac\n')
+    (bin_ / "pactl").write_text('#!/usr/bin/env bash\ncase "$*" in\n'
+                                f'  "list short sources") printf %s "$FAKE_SOURCES" ;;\n'
+                                f'  get-default-sink) echo "{default_sink}" ;;\nesac\n')
+    for tool in ("uv", "pactl"):
+        (bin_ / tool).chmod(0o755)
+    return tmp_path
+
+
+def run_launcher(tree, timeout=20, **env):
+    import os
+    import subprocess
+    return subprocess.run([str(tree / "scripts" / "ears-two-mics.sh")], capture_output=True, text=True,
+                          timeout=timeout, env={**os.environ, "PATH": f"{tree / 'bin'}:{os.environ['PATH']}",
+                                                "FAKE_SOURCES": SOURCES, **env})
+
+
+def test_launcher_runs_with_two_listed_mics(tmp_path):
+    tree = launcher_tree(tmp_path)
+    r = run_launcher(tree, MIC1="MicYouVirtualSink.monitor", MIC2=USB)
+    assert r.returncode == 0, r.stderr
+    assert (tree / "bridge.in").read_text() == '{"type": "sentence"}\n'
+
+
+def test_launcher_offers_a_phone_apps_monitor_source_but_not_the_speakers(tmp_path):
+    # MicYou exposes the phone as MicYouVirtualSink.monitor: hiding every .monitor hid the phone mic.
+    r = run_launcher(launcher_tree(tmp_path))
+    assert r.returncode == 2
+    assert "MicYouVirtualSink.monitor" in r.stderr and USB in r.stderr
+    assert "Speaker__sink.monitor" not in r.stderr and "warning" not in r.stderr
+
+
+def test_launcher_refuses_the_same_source_twice(tmp_path):
+    r = run_launcher(launcher_tree(tmp_path), MIC1=USB, MIC2=USB)
+    assert r.returncode == 2 and "different" in r.stderr
+    assert not (tmp_path / "bridge.in").exists()
+
+
+def test_launcher_refuses_a_source_that_is_not_there(tmp_path):
+    r = run_launcher(launcher_tree(tmp_path), MIC1="MicYouVirtualSink.monitr", MIC2=USB)
+    assert r.returncode == 2 and "MicYouVirtualSink.monitr" in r.stderr and "MicYouVirtualSink.monitor" in r.stderr
+    assert not (tmp_path / "bridge.in").exists()
+
+
+def test_launcher_refuses_the_speakers_monitor_as_a_mic(tmp_path):
+    r = run_launcher(launcher_tree(tmp_path), MIC1="alsa_output.pci-0000_00_1f.3.HiFi__Speaker__sink.monitor",
+                     MIC2=USB)
+    assert r.returncode == 2 and "speakers" in r.stderr
+
+
+def test_launcher_warns_when_the_laptop_plays_into_the_phone_mics_sink(tmp_path):
+    # The default sink is what the dashboard's voice and the dance music play to: into MicYou's sink, mic1 hears them.
+    r = run_launcher(launcher_tree(tmp_path, default_sink="MicYouVirtualSink"), MIC1="MicYouVirtualSink.monitor",
+                     MIC2=USB)
+    assert r.returncode == 0, r.stderr
+    assert "set-default-sink" in r.stderr
+
