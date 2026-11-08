@@ -505,3 +505,31 @@ async def test_a_director_error_on_an_utterance_never_drops_it_from_the_map_or_e
     assert [c for c in h.of("Claim") if c.src == "brain" and c.speaker == "A"]
     assert [x["speaker"] for x in h.of("ArgMapSnapshot")[-1].turns] == ["A"]
     caplog.clear()
+
+
+async def test_warmup_task_is_cancelled_with_the_brain(brain, monkeypatch):
+    """asyncio.create_task(extractor.warmup(...)) was fire-and-forget: never cancelled on shutdown or on the next
+    SessionStart (back-to-back sessions stacked warmup LLM calls against old extractors)."""
+    from app.brain import llm as llm_mod
+
+    class HangLLM:
+        name = "hang"
+
+        async def complete_json(self, *a, **kw):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(llm_mod, "make_llm", HangLLM)
+    h = brain
+    await h.start()
+    warm = lambda: [t for t in asyncio.all_tasks()                                  # noqa: E731
+                    if getattr(t.get_coro(), "__qualname__", "") == "ClaimExtractor.warmup" and not t.done()]
+    h.session()
+    await h.step(.1)
+    assert len(warm()) == 1
+    h.session()
+    await h.step(.1)
+    assert len(warm()) == 1                                    # the old session's warmup was cancelled
+    await h.stop()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert warm() == []

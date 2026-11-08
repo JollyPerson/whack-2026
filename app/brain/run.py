@@ -249,7 +249,7 @@ async def run(bus) -> None:
             publish(e)
 
     extractor = ClaimExtractor(amap, publish, llm)
-    inflight: set[asyncio.Task] = set()
+    inflight: set[asyncio.Task] = set()               # extraction + warmup: cancelled on SessionStart and on exit
     log.info("brain up: llm=%s", getattr(llm, "name", None) or "heuristic")
 
     def drain(now: float) -> None:
@@ -265,11 +265,14 @@ async def run(bus) -> None:
         except Exception:
             log.exception("claim extraction failed for %s", u.id)
 
+    def spawn(coro) -> None:
+        t = asyncio.create_task(coro)
+        inflight.add(t)                                # also keeps it from being garbage-collected mid-flight
+        t.add_done_callback(inflight.discard)
+
     def start_extract(units: Iterable[Utterance]) -> None:
         for unit in units:
-            t = asyncio.create_task(_extract(unit))
-            inflight.add(t)
-            t.add_done_callback(inflight.discard)
+            spawn(_extract(unit))
 
     def on_tts(ev: Event, now: float) -> None:
         if ev.event == "TTSState":
@@ -366,7 +369,7 @@ async def run(bus) -> None:
                         m.reset(ev)
                     for m in (extractor, pauses, echo, bleed, late):
                         m.reset()
-                    asyncio.create_task(extractor.warmup(ev.motion))
+                    spawn(extractor.warmup(ev.motion))
                 elif name == "Utterance":
                     if late.is_late(ev) or (heard := echo.classify(ev, now)) == "echo" or \
                             (ev.final and bleed.is_bleed(ev)):
