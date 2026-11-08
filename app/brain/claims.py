@@ -822,6 +822,9 @@ class ClaimExtractor:
         except Exception:
             prev = []
         sents = [s for t in prev for s in split_sentences(str(t))]
+        own = f" {_norm(u.text)} "
+        while sents and f" {_norm(sents[-1])} " in own:   # a joined unit has its LAST final's id: the finals
+            sents.pop()                                   # before it are its own opening fragments
         return (sents + list(earlier))[-2:]
 
     def _motion_text(self) -> str:

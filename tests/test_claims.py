@@ -14,7 +14,7 @@ from app.brain.claims import ClaimExtractor
 from app.brain.llm import LLMInvalid, LLMRefusal
 from app.brain.prompts import OUTPUT_SCHEMA, SYSTEM_PROMPT
 from app.bus import load_jsonl
-from app.schemas import Claim, Pause, Utterance
+from app.schemas import Claim, Pause, SessionStart, SpeakerInfo, Utterance
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "fake_debate.jsonl"
 T = 1000.0
@@ -425,6 +425,33 @@ async def test_filler_sentences_are_dropped():
     ex, _, _ = make(llm)
     await ex.extract(utt("Thank you. Can I just finish my point? Okay. Inflation is 4%."))
     assert len(llm.calls) == 1 and "SENTENCE [PROP]: Inflation is 4%." in llm.calls[0]["user"]
+
+
+async def test_earlier_in_turn_skips_the_units_own_fragments():
+    """A unit joined from several finals has its LAST utterance's id, so its own opening fragment showed up as
+    EARLIER IN THIS TURN and pushed the sentence that really came before out of the 2-sentence window."""
+    from app.brain.argmap import ArgMap
+    amap = ArgMap()
+    amap.reset(SessionStart(motion="Ban cars", speakers={"A": SpeakerInfo(side="prop"), "B": SpeakerInfo(side="opp")}))
+    llm = StubLLM({"claims": []})
+    ex = ClaimExtractor(amap, lambda ev: ev, llm, clock=lambda: T + 0.5)
+
+
+    async def say(*texts):
+        for text in texts:
+            u = utt(text, uid=f"u{len(amap.utt_turn)}", t_end=T - 5 + len(amap.utt_turn))
+            amap.on_utterance(u)
+            for unit in ex.assemble(u, u.t_end):
+                await ex.extract(unit)
+        return llm.calls[-1]["user"].split("\n")[-2:]
+
+    assert await say("Car journeys are up. Bus use fell by a third last decade.",
+                     "Air pollution causes around 40,000", "early deaths every year in the UK.") == [
+        "EARLIER IN THIS TURN [PROP]: Car journeys are up. Bus use fell by a third last decade.",
+        "SENTENCE [PROP]: Air pollution causes around 40,000 early deaths every year in the UK."]
+    earlier, sent = await say("Road traffic is", "the biggest single source", "of nitrogen dioxide in cities.")
+    assert sent == "SENTENCE [PROP]: Road traffic is the biggest single source of nitrogen dioxide in cities."
+    assert "Road traffic" not in earlier and "single source" not in earlier          # never its own fragments
 
 
 # ----------------------------------------------------------------------------- sides
